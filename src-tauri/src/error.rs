@@ -12,6 +12,11 @@ pub enum ErrorCode {
     InsufficientResources,
     ProcessFailed,
     Cancelled,
+    ProjectNotFound,
+    ProjectCreateFailed,
+    ProjectLoadFailed,
+    ProjectSaveFailed,
+    ProjectDeleteFailed,
     UnknownError,
 }
 
@@ -81,6 +86,26 @@ impl AppError {
     pub fn process_failed(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::ProcessFailed, msg)
     }
+
+    pub fn project_not_found(id: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::ProjectNotFound, "Project not found", id)
+    }
+
+    pub fn project_create_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::ProjectCreateFailed, msg, details)
+    }
+
+    pub fn project_load_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::ProjectLoadFailed, msg, details)
+    }
+
+    pub fn project_save_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::ProjectSaveFailed, msg, details)
+    }
+
+    pub fn project_delete_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::ProjectDeleteFailed, msg, details)
+    }
 }
 
 #[cfg(test)]
@@ -100,5 +125,12 @@ mod tests {
     fn test_error_display() {
         let err = AppError::invalid_input("Prompt cannot be empty");
         assert_eq!(format!("{}", err), "InvalidInput: Prompt cannot be empty");
+    }
+
+    #[test]
+    fn test_project_errors() {
+        let err = AppError::project_not_found("proj-123");
+        assert_eq!(err.code, ErrorCode::ProjectNotFound);
+        assert_eq!(err.details, Some("proj-123".to_string()));
     }
 }

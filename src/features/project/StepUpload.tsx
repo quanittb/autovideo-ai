@@ -13,7 +13,8 @@ export const StepUpload: React.FC = () => {
     'Shorter videos (under 3 minutes) work best',
   ];
 
-  const metadata = activeProject?.sourceAsset?.metadata;
+  const sourceMedia = activeProject?.sourceMedia;
+  const sourceAsset = activeProject?.sourceAsset;
 
   return (
     <div className="flex-1 overflow-y-auto p-8 space-y-6 bg-slate-950 text-slate-100">
@@ -72,7 +73,7 @@ export const StepUpload: React.FC = () => {
                   <button className="p-1 text-slate-300 hover:text-white">
                     <Play className="w-4 h-4 fill-current" />
                   </button>
-                  <span className="font-mono text-[11px]">00:00 / {metadata?.durationFormatted || '01:02'}</span>
+                  <span className="font-mono text-[11px]">00:00 / {sourceMedia ? `${(sourceMedia.durationMs / 1000).toFixed(0)}s` : sourceAsset?.metadata.durationFormatted || '01:02'}</span>
                 </div>
                 <div className="flex items-center gap-3">
                   <button className="p-1 text-slate-400 hover:text-white">
@@ -96,25 +97,25 @@ export const StepUpload: React.FC = () => {
               <div>
                 <span className="text-slate-500 block">File Name</span>
                 <span className="text-slate-200 font-mono font-medium truncate block">
-                  {activeProject?.sourceAsset?.fileName || 'input_video.mp4'}
+                  {sourceMedia?.originalFileName || sourceAsset?.fileName || 'input_video.mp4'}
                 </span>
               </div>
               <div>
                 <span className="text-slate-500 block">Duration</span>
                 <span className="text-slate-200 font-mono font-medium">
-                  {metadata?.durationFormatted || '01:02'}
+                  {sourceMedia ? `${(sourceMedia.durationMs / 1000).toFixed(0)}s` : sourceAsset?.metadata.durationFormatted || '01:02'}
                 </span>
               </div>
               <div>
                 <span className="text-slate-500 block">Resolution</span>
                 <span className="text-slate-200 font-mono font-medium">
-                  {metadata ? `${metadata.width}x${metadata.height}` : '1920x1080'}
+                  {sourceMedia ? `${sourceMedia.width}x${sourceMedia.height}` : sourceAsset?.metadata ? `${sourceAsset.metadata.width}x${sourceAsset.metadata.height}` : '1920x1080'}
                 </span>
               </div>
               <div>
                 <span className="text-slate-500 block">Size</span>
                 <span className="text-slate-200 font-mono font-medium">
-                  {metadata?.fileSizeFormatted || '45.2 MB'}
+                  {sourceMedia ? `${(sourceMedia.fileSizeBytes / (1024 * 1024)).toFixed(1)} MB` : sourceAsset?.metadata.fileSizeFormatted || '45.2 MB'}
                 </span>
               </div>
             </div>

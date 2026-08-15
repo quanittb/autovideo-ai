@@ -25,6 +25,7 @@ pub fn run() {
             list_projects,
             get_project,
             create_project,
+            update_project,
             delete_project,
         ])
         .run(tauri::generate_context!())

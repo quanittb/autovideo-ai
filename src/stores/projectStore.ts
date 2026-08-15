@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { Project, ProjectSummary, TransformationRequest } from '../types/contracts';
+import { Project, ProjectSummary, TransformationRequest, SceneInfo } from '../types/contracts';
+import { invokeCommand } from '../lib/ipc';
 
 interface ProjectState {
   activeProject: Project | null;
@@ -7,6 +8,11 @@ interface ProjectState {
   isLoading: boolean;
   error: string | null;
 
+  fetchProjects: () => Promise<void>;
+  createNewProject: (name: string) => Promise<Project>;
+  loadProject: (id: string) => Promise<Project>;
+  saveProject: (project: Project) => Promise<void>;
+  deleteProject: (id: string) => Promise<void>;
   setActiveProject: (project: Project | null) => void;
   setProjects: (projects: ProjectSummary[]) => void;
   setLoading: (loading: boolean) => void;
@@ -31,65 +37,66 @@ const defaultTransformationRequest: TransformationRequest = {
   seed: 42,
 };
 
+const defaultScenes: SceneInfo[] = [
+  {
+    id: 'scene-1',
+    index: 1,
+    name: 'Woodland Overview',
+    startTimeFormatted: '00:00',
+    endTimeFormatted: '00:24',
+    startFrame: 0,
+    endFrame: 720,
+    thumbnailEmoji: '🌲',
+    status: 'ready',
+  },
+  {
+    id: 'scene-2',
+    index: 2,
+    name: 'Fox Subject Close-up',
+    startTimeFormatted: '00:24',
+    endTimeFormatted: '00:48',
+    startFrame: 720,
+    endFrame: 1440,
+    thumbnailEmoji: '🦊',
+    status: 'ready',
+  },
+  {
+    id: 'scene-3',
+    index: 3,
+    name: 'Snow Clearing Run',
+    startTimeFormatted: '00:48',
+    endTimeFormatted: '01:02',
+    startFrame: 1440,
+    endFrame: 1860,
+    thumbnailEmoji: '❄️',
+    status: 'ready',
+  },
+];
+
 export const defaultFoxRabbitProject: Project = {
+  schemaVersion: 1,
   id: 'proj-fox-rabbit',
   name: 'Fox to Rabbit',
   createdAt: '1 day ago',
   updatedAt: '1 day ago',
-  sourceAsset: {
-    id: 'asset-1',
-    fileName: 'input_video.mp4',
-    filePath: 'fixtures/videos/input_video.mp4',
-    metadata: {
-      width: 1920,
-      height: 1080,
-      durationSeconds: 62,
-      durationFormatted: '01:02',
-      fps: 30,
-      totalFrames: 1860,
-      codec: 'h264',
-      bitrateKbps: 6000,
-      fileSizeBytes: 47395840,
-      fileSizeFormatted: '45.2 MB',
-    },
-    isFixture: true,
+  status: 'READY',
+  sourceMedia: {
+    mediaId: 'asset-fox-1',
+    originalFileName: 'input_video.mp4',
+    sourcePath: 'fixtures/videos/input_video.mp4',
+    durationMs: 62000,
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    fileSizeBytes: 47395840,
+    container: 'mp4',
+    videoCodec: 'h264',
+    audioCodec: 'aac',
+    hasAudio: true,
   },
-  transformationRequest: defaultTransformationRequest,
-  scenes: [
-    {
-      id: 'scene-1',
-      index: 1,
-      name: 'Woodland Overview',
-      startTimeFormatted: '00:00',
-      endTimeFormatted: '00:24',
-      startFrame: 0,
-      endFrame: 720,
-      thumbnailEmoji: '🌲',
-      status: 'ready',
-    },
-    {
-      id: 'scene-2',
-      index: 2,
-      name: 'Fox Subject Close-up',
-      startTimeFormatted: '00:24',
-      endTimeFormatted: '00:48',
-      startFrame: 720,
-      endFrame: 1440,
-      thumbnailEmoji: '🦊',
-      status: 'ready',
-    },
-    {
-      id: 'scene-3',
-      index: 3,
-      name: 'Snow Clearing Run',
-      startTimeFormatted: '00:48',
-      endTimeFormatted: '01:02',
-      startFrame: 1440,
-      endFrame: 1860,
-      thumbnailEmoji: '❄️',
-      status: 'ready',
-    },
-  ],
+  transformationConfig: defaultTransformationRequest,
+  outputs: [],
+  scenes: defaultScenes,
   selectedSceneId: 'scene-2',
   qualityMetrics: {
     temporalConsistencyScore: 98.4,
@@ -100,62 +107,128 @@ export const defaultFoxRabbitProject: Project = {
   isFixture: true,
 };
 
-export const useProjectStore = create<ProjectState>((set) => ({
+export const useProjectStore = create<ProjectState>((set, get) => ({
   activeProject: defaultFoxRabbitProject,
-  projects: [
-    {
-      id: 'proj-fox-rabbit',
-      name: 'Fox to Rabbit',
-      createdAt: '1 day ago',
-      updatedAt: '1 day ago',
-      hasOutput: false,
-      isFixture: true,
-    },
-    {
-      id: 'proj-winter',
-      name: 'Winter to Autumn',
-      createdAt: '2 hours ago',
-      updatedAt: '2 hours ago',
-      hasOutput: false,
-      isFixture: true,
-    },
-    {
-      id: 'proj-beach',
-      name: 'Beach Vacation',
-      createdAt: '2 days ago',
-      updatedAt: '2 days ago',
-      hasOutput: false,
-      isFixture: true,
-    },
-    {
-      id: 'proj-market',
-      name: 'Home to Market',
-      createdAt: '3 days ago',
-      updatedAt: '3 days ago',
-      hasOutput: false,
-      isFixture: true,
-    },
-  ],
+  projects: [],
   isLoading: false,
   error: null,
+
+  fetchProjects: async () => {
+    set({ isLoading: true, error: null });
+    try {
+      const realProjects = await invokeCommand<ProjectSummary[]>('list_projects');
+      set({ projects: realProjects, isLoading: false });
+    } catch (err: any) {
+      console.warn('Failed to fetch real projects from Tauri, keeping current list:', err);
+      set({ error: err?.message || 'Failed to load projects', isLoading: false });
+    }
+  },
+
+  createNewProject: async (name: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      const created = await invokeCommand<Project>('create_project', { name });
+      const enriched: Project = {
+        ...created,
+        scenes: defaultScenes,
+        selectedSceneId: 'scene-1',
+      };
+      set((state) => ({
+        activeProject: enriched,
+        projects: [
+          {
+            id: created.id,
+            name: created.name,
+            createdAt: created.createdAt,
+            updatedAt: created.updatedAt,
+            status: created.status,
+            thumbnailPath: undefined,
+            hasOutput: false,
+            isFixture: false,
+          },
+          ...state.projects,
+        ],
+        isLoading: false,
+      }));
+      return enriched;
+    } catch (err: any) {
+      set({ error: err?.message || 'Failed to create project', isLoading: false });
+      throw err;
+    }
+  },
+
+  loadProject: async (id: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      const loaded = await invokeCommand<Project>('get_project', { id });
+      const enriched: Project = {
+        ...loaded,
+        scenes: loaded.scenes || defaultScenes,
+        selectedSceneId: loaded.selectedSceneId || 'scene-1',
+      };
+      set({ activeProject: enriched, isLoading: false });
+      return enriched;
+    } catch (err: any) {
+      set({ error: err?.message || 'Failed to load project', isLoading: false });
+      throw err;
+    }
+  },
+
+  saveProject: async (project: Project) => {
+    try {
+      const saved = await invokeCommand<Project>('update_project', { project });
+      set((state) => ({
+        activeProject: {
+          ...project,
+          updatedAt: saved.updatedAt,
+        },
+        projects: state.projects.map((p) =>
+          p.id === project.id
+            ? { ...p, name: project.name, updatedAt: saved.updatedAt, status: project.status }
+            : p
+        ),
+      }));
+    } catch (err: any) {
+      set({ error: err?.message || 'Failed to save project' });
+    }
+  },
+
+  deleteProject: async (id: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      await invokeCommand('delete_project', { id });
+      set((state) => ({
+        projects: state.projects.filter((p) => p.id !== id),
+        activeProject: state.activeProject?.id === id ? null : state.activeProject,
+        isLoading: false,
+      }));
+    } catch (err: any) {
+      set({ error: err?.message || 'Failed to delete project', isLoading: false });
+      throw err;
+    }
+  },
 
   setActiveProject: (project) => set({ activeProject: project }),
   setProjects: (projects) => set({ projects }),
   setLoading: (loading) => set({ isLoading: loading }),
   setError: (error) => set({ error }),
-  updateTransformationRequest: (partial) =>
-    set((state) => {
-      if (!state.activeProject) return state;
-      return {
-        activeProject: {
-          ...state.activeProject,
-          transformationRequest: {
-            ...state.activeProject.transformationRequest,
-            ...partial,
-          },
-        },
-      };
-    }),
+
+  updateTransformationRequest: (partial) => {
+    const current = get().activeProject;
+    if (!current) return;
+    const updatedProject: Project = {
+      ...current,
+      transformationConfig: {
+        ...current.transformationConfig,
+        ...partial,
+      },
+    };
+    set({ activeProject: updatedProject });
+    if (!current.isFixture) {
+      get().saveProject(updatedProject);
+    }
+  },
+
   selectScene: (sceneId) =>
     set((state) => {
       if (!state.activeProject) return state;

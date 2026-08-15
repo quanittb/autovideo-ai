@@ -7,6 +7,10 @@ export interface AppInfo {
   environment: string;
 }
 
+export async function invokeCommand<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  return await invoke<T>(cmd, args);
+}
+
 export const api = {
   getAppInfo: async (): Promise<AppInfo> => {
     try {
@@ -65,8 +69,12 @@ export const api = {
     return await invoke<Project>('create_project', { name });
   },
 
-  deleteProject: async (id: string): Promise<boolean> => {
-    return await invoke<boolean>('delete_project', { id });
+  updateProject: async (project: Project): Promise<Project> => {
+    return await invoke<Project>('update_project', { project });
+  },
+
+  deleteProject: async (id: string): Promise<void> => {
+    return await invoke<void>('delete_project', { id });
   },
 
   listModels: async (): Promise<ModelDescriptor[]> => {

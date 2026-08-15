@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   Sparkles, 
   Wand2, 
@@ -13,7 +13,7 @@ import {
   FolderOpen
 } from 'lucide-react';
 import { useUiStore } from '../../stores/uiStore';
-import { useProjectStore, defaultFoxRabbitProject } from '../../stores/projectStore';
+import { useProjectStore } from '../../stores/projectStore';
 import { MockBadge } from '../../components/common/MockBadge';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { LoadingState } from '../../components/ui/LoadingState';
@@ -22,8 +22,12 @@ import { ProjectSummary } from '../../types/contracts';
 
 export const HomeView: React.FC = () => {
   const { setActiveTab, setCurrentStep } = useUiStore();
-  const { projects, setActiveProject } = useProjectStore();
-  const [viewState, setViewState] = useState<'normal' | 'empty' | 'loading' | 'error'>('normal');
+  const { projects, fetchProjects, createNewProject, loadProject, isLoading, error } = useProjectStore();
+  const [viewState, setViewState] = useState<'auto' | 'empty' | 'loading' | 'error'>('auto');
+
+  useEffect(() => {
+    fetchProjects();
+  }, [fetchProjects]);
 
   const quickTools = [
     {
@@ -75,39 +79,39 @@ export const HomeView: React.FC = () => {
     },
   ];
 
-  const handleStartNewProject = () => {
-    setActiveProject({
-      ...defaultFoxRabbitProject,
-      id: `proj-${Date.now()}`,
-      name: 'Untitled Transformation',
-      createdAt: 'Just now',
-      updatedAt: 'Just now',
-    });
-    setCurrentStep('upload');
-    setActiveTab('workspace');
+  const handleStartNewProject = async (customName?: string) => {
+    try {
+      await createNewProject(customName || 'Untitled Transformation');
+      setCurrentStep('upload');
+      setActiveTab('workspace');
+    } catch (err) {
+      console.error('Failed to create project:', err);
+    }
   };
 
-  const handleOpenProject = (proj: ProjectSummary) => {
-    setActiveProject({
-      ...defaultFoxRabbitProject,
-      id: proj.id,
-      name: proj.name,
-    });
-    setCurrentStep('transform');
-    setActiveTab('workspace');
+  const handleOpenProject = async (proj: ProjectSummary) => {
+    try {
+      await loadProject(proj.id);
+      setCurrentStep('transform');
+      setActiveTab('workspace');
+    } catch (err) {
+      console.error('Failed to load project:', err);
+    }
   };
+
+  const isActuallyEmpty = viewState === 'empty' || (viewState === 'auto' && projects.length === 0 && !isLoading);
 
   return (
     <div className="flex-1 overflow-y-auto p-8 space-y-8 bg-slate-950 text-slate-100">
       {/* Dev Mode UI State Filter Bar */}
       <div className="flex items-center justify-between p-3 rounded-xl bg-slate-900/60 border border-slate-800 text-xs">
         <div className="flex items-center gap-2">
-          <MockBadge label="UI PHASE 2 ACTIVE" />
-          <span className="text-slate-400">Desktop Ergonomics & Creative AI Workspace</span>
+          <MockBadge label="REAL PROJECT PERSISTENCE ACTIVE" />
+          <span className="text-slate-400">Desktop Ergonomics & Local-First Rust Persistence</span>
         </div>
         <div className="flex items-center gap-1.5">
           <span className="text-[11px] text-slate-500 mr-1">Preview UI State:</span>
-          {(['normal', 'empty', 'loading', 'error'] as const).map((st) => (
+          {(['auto', 'empty', 'loading', 'error'] as const).map((st) => (
             <button
               key={st}
               onClick={() => setViewState(st)}
@@ -123,22 +127,14 @@ export const HomeView: React.FC = () => {
         </div>
       </div>
 
-      {viewState === 'loading' ? (
-        <LoadingState message="Loading projects and recent outputs..." />
-      ) : viewState === 'error' ? (
+      {(viewState === 'loading' || (viewState === 'auto' && isLoading)) ? (
+        <LoadingState message="Loading projects from local filesystem..." />
+      ) : (viewState === 'error' || (viewState === 'auto' && error && projects.length === 0)) ? (
         <ErrorState
           title="Failed to Load Projects"
-          message="Could not read project manifests from local application directory."
+          message={error || "Could not read project manifests from local application directory."}
           code="STORAGE_READ_ERROR"
-          onRetry={() => setViewState('normal')}
-        />
-      ) : viewState === 'empty' ? (
-        <EmptyState
-          icon={FolderOpen}
-          title="No Recent Projects Found"
-          description="You haven't created any AI video transformations yet. Click below to start your first project."
-          actionLabel="Create Project"
-          onAction={handleStartNewProject}
+          onRetry={() => fetchProjects()}
         />
       ) : (
         <>
@@ -157,7 +153,7 @@ export const HomeView: React.FC = () => {
               </p>
               <div className="pt-2 flex items-center gap-3">
                 <button
-                  onClick={handleStartNewProject}
+                  onClick={() => handleStartNewProject()}
                   className="px-6 py-3 rounded-xl bg-gradient-to-r from-purple-600 via-indigo-600 to-indigo-700 hover:from-purple-500 hover:to-indigo-600 text-white text-sm font-bold shadow-xl shadow-purple-900/40 transition-all flex items-center gap-2"
                 >
                   <Plus className="w-4 h-4" />
@@ -204,7 +200,7 @@ export const HomeView: React.FC = () => {
               {quickTools.map((tool) => (
                 <div
                   key={tool.id}
-                  onClick={handleStartNewProject}
+                  onClick={() => handleStartNewProject(tool.title)}
                   className="p-5 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-indigo-500/50 hover:bg-slate-900 transition-all cursor-pointer group space-y-3"
                 >
                   <div className={`w-10 h-10 rounded-lg flex items-center justify-center border ${tool.color}`}>
@@ -231,54 +227,58 @@ export const HomeView: React.FC = () => {
                   onClick={() => setActiveTab('projects')}
                   className="text-xs text-indigo-400 hover:text-indigo-300 font-medium"
                 >
-                  View All
+                  View All ({projects.length})
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {projects.map((proj) => (
-                  <div
-                    key={proj.id}
-                    onClick={() => handleOpenProject(proj)}
-                    className="rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 overflow-hidden group cursor-pointer transition-all flex flex-col justify-between"
-                  >
-                    <div className="h-32 bg-slate-950 relative overflow-hidden flex items-center justify-center">
-                      {proj.id === 'proj-fox-rabbit' ? (
-                        <span className="text-3xl">🦊 ➔ 🐰</span>
-                      ) : proj.id === 'proj-winter' ? (
-                        <span className="text-3xl">❄️ ➔ 🍂</span>
-                      ) : (
+              {isActuallyEmpty ? (
+                <EmptyState
+                  icon={FolderOpen}
+                  title="No Projects Yet"
+                  description="You haven't created any video transformations yet. Click below to start your first project."
+                  actionLabel="Create Project"
+                  onAction={() => handleStartNewProject()}
+                />
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {projects.map((proj) => (
+                    <div
+                      key={proj.id}
+                      onClick={() => handleOpenProject(proj)}
+                      className="rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 overflow-hidden group cursor-pointer transition-all flex flex-col justify-between"
+                    >
+                      <div className="h-32 bg-slate-950 relative overflow-hidden flex items-center justify-center">
                         <Video className="w-8 h-8 text-slate-600" />
-                      )}
-                      {proj.isFixture && (
-                        <div className="absolute top-2 right-2">
-                          <MockBadge label="DEMO" />
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="p-3.5 flex items-center justify-between border-t border-slate-800/60 bg-slate-900/40">
-                      <div>
-                        <h4 className="text-xs font-semibold text-slate-200 group-hover:text-indigo-300 transition-colors truncate">
-                          {proj.name}
-                        </h4>
-                        <div className="flex items-center gap-1.5 text-[10px] text-slate-500 mt-0.5">
-                          <Clock className="w-3 h-3" />
-                          <span>{proj.createdAt}</span>
-                        </div>
+                        {proj.isFixture && (
+                          <div className="absolute top-2 right-2">
+                            <MockBadge label="DEMO" />
+                          </div>
+                        )}
                       </div>
-                      <MoreVertical className="w-4 h-4 text-slate-500" />
+
+                      <div className="p-3.5 flex items-center justify-between border-t border-slate-800/60 bg-slate-900/40">
+                        <div className="min-w-0 pr-2">
+                          <h4 className="text-xs font-semibold text-slate-200 group-hover:text-indigo-300 transition-colors truncate">
+                            {proj.name}
+                          </h4>
+                          <div className="flex items-center gap-1.5 text-[10px] text-slate-500 mt-0.5 font-mono">
+                            <Clock className="w-3 h-3 shrink-0" />
+                            <span className="truncate">{proj.createdAt.slice(0, 10)}</span>
+                          </div>
+                        </div>
+                        <MoreVertical className="w-4 h-4 text-slate-500 shrink-0" />
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Right 4 cols: Fast Import Video Dropzone */}
             <div className="lg:col-span-4 space-y-4">
               <h3 className="text-base font-bold text-slate-200">Import Video</h3>
               <div
-                onClick={handleStartNewProject}
+                onClick={() => handleStartNewProject()}
                 className="p-8 rounded-2xl border-2 border-dashed border-slate-800 hover:border-indigo-500/80 bg-slate-900/40 hover:bg-slate-900/60 transition-all flex flex-col items-center justify-center text-center cursor-pointer group space-y-3"
               >
                 <div className="w-12 h-12 rounded-xl bg-indigo-600/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center group-hover:scale-110 transition-transform">

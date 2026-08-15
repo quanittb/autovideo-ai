@@ -68,7 +68,7 @@ export const ProjectWorkspace: React.FC = () => {
             <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs">
               <div className="flex items-center gap-2 text-slate-300 font-semibold">
                 <FileVideo className="w-4 h-4 text-indigo-400" />
-                <span className="truncate">{activeProject?.sourceAsset?.fileName || 'input_video.mp4'}</span>
+                <span className="truncate">{activeProject?.sourceMedia?.originalFileName || activeProject?.sourceAsset?.fileName || 'input_video.mp4'}</span>
               </div>
               <div className="grid grid-cols-2 gap-1 text-[11px] text-slate-400 font-mono">
                 <span>1080p • 30 FPS</span>

@@ -7,6 +7,11 @@ export type ErrorCode =
   | 'INSUFFICIENT_RESOURCES'
   | 'PROCESS_FAILED'
   | 'CANCELLED'
+  | 'PROJECT_NOT_FOUND'
+  | 'PROJECT_CREATE_FAILED'
+  | 'PROJECT_LOAD_FAILED'
+  | 'PROJECT_SAVE_FAILED'
+  | 'PROJECT_DELETE_FAILED'
   | 'UNKNOWN_ERROR';
 
 export interface AppError {
@@ -36,6 +41,30 @@ export interface StoragePaths {
   tempDir: string;
 }
 
+export type ProjectStatus =
+  | 'EMPTY'
+  | 'IMPORTED'
+  | 'ANALYZING'
+  | 'READY'
+  | 'PROCESSING'
+  | 'COMPLETED'
+  | 'FAILED';
+
+export interface SourceMedia {
+  mediaId: string;
+  originalFileName: string;
+  sourcePath: string;
+  durationMs: number;
+  width: number;
+  height: number;
+  fps: number;
+  fileSizeBytes: number;
+  container: string;
+  videoCodec: string;
+  audioCodec?: string;
+  hasAudio: boolean;
+}
+
 export interface VideoMetadata {
   width: number;
   height: number;
@@ -60,7 +89,7 @@ export interface MediaAsset {
   isFixture: boolean;
 }
 
-export interface PreservationOptions {
+export interface PreservationConfig {
   preserveMotion: boolean;
   preserveCamera: boolean;
   preserveComposition: boolean;
@@ -75,7 +104,7 @@ export interface TransformationRequest {
   referenceImageUri?: string;
   prompt: string;
   negativePrompt?: string;
-  preservation: PreservationOptions;
+  preservation: PreservationConfig;
   seed?: number;
 }
 
@@ -99,25 +128,42 @@ export interface SceneInfo {
 }
 
 export interface QualityMetrics {
-  temporalConsistencyScore: number; // e.g. 98.4
-  identityPreservationScore: number; // e.g. 96.2
-  audioSyncOffsetMs: number;         // e.g. 0 ms
+  temporalConsistencyScore: number;
+  identityPreservationScore: number;
+  audioSyncOffsetMs: number;
   warnings: string[];
 }
 
+export interface ProjectOutput {
+  outputId: string;
+  fileName: string;
+  filePath: string;
+  fileSizeBytes: number;
+  durationMs: number;
+  width: number;
+  height: number;
+  fps: number;
+  createdAt: string;
+}
+
 export interface Project {
+  schemaVersion: number;
   id: string;
   name: string;
   createdAt: string;
   updatedAt: string;
+  status: ProjectStatus;
+  sourceMedia?: SourceMedia;
   sourceAsset?: MediaAsset;
-  transformationRequest: TransformationRequest;
+  transformationConfig: TransformationRequest;
+  transformationRequest?: TransformationRequest;
   transformationPlan?: TransformationPlan;
-  scenes: SceneInfo[];
-  selectedSceneId: string;
-  qualityMetrics?: QualityMetrics;
-  outputVideoPath?: string;
+  outputs: ProjectOutput[];
   isFixture: boolean;
+  // UI convenience helper fields for active session
+  scenes?: SceneInfo[];
+  selectedSceneId?: string;
+  qualityMetrics?: QualityMetrics;
 }
 
 export interface ProjectSummary {
@@ -125,6 +171,7 @@ export interface ProjectSummary {
   name: string;
   createdAt: string;
   updatedAt: string;
+  status: ProjectStatus;
   thumbnailPath?: string;
   hasOutput: boolean;
   isFixture: boolean;

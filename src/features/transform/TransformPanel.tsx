@@ -37,7 +37,7 @@ export const TransformPanel: React.FC<TransformPanelProps> = ({ className = '' }
     { id: 'custom', label: 'Custom', icon: <Sliders className="w-3.5 h-3.5" /> },
   ];
 
-  const transformation = activeProject?.transformationRequest || {
+  const transformation = activeProject?.transformationConfig || activeProject?.transformationRequest || {
     category: 'character',
     detectedCharacter: 'Fox',
     originalCharacter: 'Fox',

@@ -8,7 +8,7 @@ export const StepTransform: React.FC = () => {
   const [splitPos] = useState(50);
   const [activeSubTab, setActiveSubTab] = useState<'character' | 'background' | 'environment' | 'style' | 'object' | 'custom'>('character');
 
-  const transformation = activeProject?.transformationRequest || {
+  const transformation = activeProject?.transformationConfig || activeProject?.transformationRequest || {
     category: 'character',
     originalCharacter: 'Fox',
     replacementCharacter: 'Rabbit',
