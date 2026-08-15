@@ -1,10 +1,10 @@
 import React from 'react';
 import { UploadCloud, CheckCircle2, Film, Play, Volume2, Maximize2 } from 'lucide-react';
-import { useAppStore } from '../../store/useAppStore';
-import { MockBadge } from '../common/MockBadge';
+import { useProjectStore } from '../../stores/projectStore';
+import { MockBadge } from '../../components/common/MockBadge';
 
 export const StepUpload: React.FC = () => {
-  const { activeProject } = useAppStore();
+  const { activeProject } = useProjectStore();
 
   const tips = [
     'Use high quality videos (1080p or higher)',
@@ -13,18 +13,18 @@ export const StepUpload: React.FC = () => {
     'Shorter videos (under 3 minutes) work best',
   ];
 
+  const metadata = activeProject?.sourceAsset?.metadata;
+
   return (
     <div className="flex-1 overflow-y-auto p-8 space-y-6 bg-slate-950 text-slate-100">
-      {/* Title */}
       <div>
         <h2 className="text-2xl font-bold text-slate-100 tracking-tight">Step 1: Upload Your Video</h2>
         <p className="text-sm text-slate-400 mt-1">Upload the video you want to transform</p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
-        {/* Left Column: Dropzone & Tips */}
+        {/* Left: Dropzone & Tips */}
         <div className="space-y-6">
-          {/* Drag & Drop Card */}
           <div className="border-2 border-dashed border-slate-700 hover:border-indigo-500/80 rounded-2xl p-10 bg-slate-900/40 hover:bg-slate-900/60 transition-all flex flex-col items-center justify-center text-center group cursor-pointer">
             <div className="w-16 h-16 rounded-2xl bg-indigo-600/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform shadow-lg shadow-indigo-900/20">
               <UploadCloud className="w-8 h-8" />
@@ -41,7 +41,6 @@ export const StepUpload: React.FC = () => {
             </div>
           </div>
 
-          {/* Tips for better results */}
           <div className="p-6 rounded-2xl bg-slate-900/50 border border-slate-800/80 space-y-4">
             <h4 className="text-sm font-semibold text-slate-200">Tips for better results</h4>
             <ul className="space-y-2.5">
@@ -55,28 +54,25 @@ export const StepUpload: React.FC = () => {
           </div>
         </div>
 
-        {/* Right Column: Preview & Video Information */}
+        {/* Right: Preview & Video Information */}
         <div className="space-y-6">
-          {/* Preview Box */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900 overflow-hidden shadow-xl relative">
             <div className="relative aspect-video bg-gradient-to-br from-amber-950 via-slate-900 to-slate-950 flex flex-col items-center justify-center p-6">
-              {/* Fox sample thumbnail */}
               <div className="text-center space-y-2">
                 <span className="text-6xl">🦊</span>
                 <p className="text-xs font-semibold text-amber-200">Input Sample Video (Fox in Snow)</p>
               </div>
 
               <div className="absolute top-3 right-3 z-10">
-                <MockBadge label="INPUT PREVIEW MOCK" />
+                <MockBadge label="INPUT PREVIEW FIXTURE" />
               </div>
 
-              {/* Player Overlay Bar */}
               <div className="absolute bottom-0 left-0 right-0 p-3 bg-slate-950/80 backdrop-blur-sm border-t border-slate-800 flex items-center justify-between text-xs text-slate-300">
                 <div className="flex items-center gap-3">
                   <button className="p-1 text-slate-300 hover:text-white">
                     <Play className="w-4 h-4 fill-current" />
                   </button>
-                  <span className="font-mono text-[11px]">00:00 / 01:02</span>
+                  <span className="font-mono text-[11px]">00:00 / {metadata?.durationFormatted || '01:02'}</span>
                 </div>
                 <div className="flex items-center gap-3">
                   <button className="p-1 text-slate-400 hover:text-white">
@@ -90,7 +86,6 @@ export const StepUpload: React.FC = () => {
             </div>
           </div>
 
-          {/* Video Information Card */}
           <div className="p-6 rounded-2xl bg-slate-900/50 border border-slate-800/80 space-y-4">
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-200">
               <Film className="w-4 h-4 text-indigo-400" />
@@ -101,25 +96,25 @@ export const StepUpload: React.FC = () => {
               <div>
                 <span className="text-slate-500 block">File Name</span>
                 <span className="text-slate-200 font-mono font-medium truncate block">
-                  {activeProject?.mediaInfo?.fileName || 'input_video.mp4'}
+                  {activeProject?.sourceAsset?.fileName || 'input_video.mp4'}
                 </span>
               </div>
               <div>
                 <span className="text-slate-500 block">Duration</span>
                 <span className="text-slate-200 font-mono font-medium">
-                  {activeProject?.mediaInfo?.durationFormatted || '01:02'}
+                  {metadata?.durationFormatted || '01:02'}
                 </span>
               </div>
               <div>
                 <span className="text-slate-500 block">Resolution</span>
                 <span className="text-slate-200 font-mono font-medium">
-                  {activeProject?.mediaInfo?.resolution || '1920x1080'}
+                  {metadata ? `${metadata.width}x${metadata.height}` : '1920x1080'}
                 </span>
               </div>
               <div>
                 <span className="text-slate-500 block">Size</span>
                 <span className="text-slate-200 font-mono font-medium">
-                  {activeProject?.mediaInfo?.fileSizeFormatted || '45.2 MB'}
+                  {metadata?.fileSizeFormatted || '45.2 MB'}
                 </span>
               </div>
             </div>

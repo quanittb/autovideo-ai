@@ -1,24 +1,31 @@
+pub mod ai;
 pub mod commands;
-pub mod domain;
+pub mod error;
+pub mod events;
+pub mod export;
+pub mod jobs;
+pub mod media;
+pub mod models;
+pub mod projects;
+pub mod runtime;
+pub mod system;
 
 use commands::*;
-
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! Welcome to AutoVideo AI!", name)
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            greet,
+            get_app_info,
+            get_hardware_profile,
+            get_storage_paths,
             get_ai_status,
             list_models,
             list_projects,
+            get_project,
             create_project,
-            get_sample_job
+            delete_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

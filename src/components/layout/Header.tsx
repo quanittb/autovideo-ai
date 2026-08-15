@@ -1,10 +1,12 @@
 import React from 'react';
 import { ArrowLeft, ArrowRight, Sparkles } from 'lucide-react';
-import { useAppStore } from '../../store/useAppStore';
+import { useUiStore } from '../../stores/uiStore';
+import { useProjectStore, defaultFoxRabbitProject } from '../../stores/projectStore';
 import { WizardStep } from '../../types';
 
 export const Header: React.FC = () => {
-  const { activeTab, currentStep, setCurrentStep, activeProject, setActiveTab, startNewProject } = useAppStore();
+  const { activeTab, currentStep, setCurrentStep, setActiveTab } = useUiStore();
+  const { activeProject, setActiveProject } = useProjectStore();
 
   const steps: { id: WizardStep; number: number; label: string }[] = [
     { id: 'upload', number: 1, label: 'Upload' },
@@ -26,13 +28,24 @@ export const Header: React.FC = () => {
     else setActiveTab('home');
   };
 
+  const handleStartNew = () => {
+    setActiveProject({
+      ...defaultFoxRabbitProject,
+      id: `proj-${Date.now()}`,
+      name: 'Untitled Transformation',
+      createdAt: 'Just now',
+      updatedAt: 'Just now',
+    });
+    setCurrentStep('upload');
+    setActiveTab('projects');
+  };
+
   const isWizardView = activeTab === 'projects' || activeTab === 'tools';
 
   return (
     <header className="h-16 border-b border-slate-800/80 bg-slate-950/60 backdrop-blur-md px-6 flex items-center justify-between shrink-0">
       {isWizardView ? (
         <>
-          {/* Back button & Breadcrumb */}
           <div className="flex items-center gap-3">
             <button
               onClick={handlePrev}
@@ -45,7 +58,6 @@ export const Header: React.FC = () => {
             </span>
           </div>
 
-          {/* 4-Step Wizard Progress */}
           <div className="flex items-center gap-2">
             {steps.map((step, idx) => {
               const stepIndexMap: Record<WizardStep, number> = { upload: 1, transform: 2, preview: 3, export: 4 };
@@ -84,7 +96,6 @@ export const Header: React.FC = () => {
             })}
           </div>
 
-          {/* Action button */}
           <div className="flex items-center gap-3">
             {currentStep !== 'export' && (
               <button
@@ -99,17 +110,16 @@ export const Header: React.FC = () => {
         </>
       ) : (
         <>
-          {/* Welcome Screen Top Header */}
           <div className="flex items-center gap-2">
             <h2 className="text-base font-semibold text-slate-200">
-              Welcome to AI Video Magic
+              AutoVideo AI Studio
             </h2>
-            <span className="text-xs text-slate-400">Transform your videos with AI power</span>
+            <span className="text-xs text-slate-400">Next-gen prompt-driven video transformation</span>
           </div>
 
           <div className="flex items-center gap-3">
             <button
-              onClick={startNewProject}
+              onClick={handleStartNew}
               className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md shadow-indigo-900/30 transition-all flex items-center gap-1.5"
             >
               <Sparkles className="w-3.5 h-3.5" />
