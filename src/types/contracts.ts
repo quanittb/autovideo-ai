@@ -60,12 +60,22 @@ export interface MediaAsset {
   isFixture: boolean;
 }
 
+export interface PreservationOptions {
+  preserveMotion: boolean;
+  preserveCamera: boolean;
+  preserveComposition: boolean;
+  preserveOriginalAudio: boolean;
+}
+
 export interface TransformationRequest {
-  category: string; // 'character' (MVP), 'scene', 'style', 'advanced'
+  category: 'character' | 'background' | 'environment' | 'style' | 'object' | 'custom';
+  detectedCharacter?: string;
   originalCharacter?: string;
   replacementCharacter?: string;
+  referenceImageUri?: string;
   prompt: string;
   negativePrompt?: string;
+  preservation: PreservationOptions;
   seed?: number;
 }
 
@@ -76,6 +86,25 @@ export interface TransformationPlan {
   estimatedDurationSeconds: number;
 }
 
+export interface SceneInfo {
+  id: string;
+  index: number;
+  name: string;
+  startTimeFormatted: string;
+  endTimeFormatted: string;
+  startFrame: number;
+  endFrame: number;
+  thumbnailEmoji: string;
+  status: 'ready' | 'processing' | 'completed';
+}
+
+export interface QualityMetrics {
+  temporalConsistencyScore: number; // e.g. 98.4
+  identityPreservationScore: number; // e.g. 96.2
+  audioSyncOffsetMs: number;         // e.g. 0 ms
+  warnings: string[];
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -84,6 +113,9 @@ export interface Project {
   sourceAsset?: MediaAsset;
   transformationRequest: TransformationRequest;
   transformationPlan?: TransformationPlan;
+  scenes: SceneInfo[];
+  selectedSceneId: string;
+  qualityMetrics?: QualityMetrics;
   outputVideoPath?: string;
   isFixture: boolean;
 }
@@ -108,14 +140,14 @@ export type JobState =
   | 'COMPLETED';
 
 export type JobStage =
-  | 'EXTRACTING_FRAMES'
-  | 'ANALYZING'
-  | 'GENERATING_MASKS'
-  | 'INPAINTING'
-  | 'TEMPORAL_SMOOTHING'
-  | 'STITCHING_AUDIO'
-  | 'ENCODING_VIDEO'
-  | 'FINALIZING';
+  | 'ANALYSIS'
+  | 'PLANNING'
+  | 'PREPARATION'
+  | 'TRANSFORMATION'
+  | 'TEMPORAL_REFINEMENT'
+  | 'AUDIO'
+  | 'QUALITY_CHECK'
+  | 'EXPORT';
 
 export interface JobProgress {
   stage: JobStage;
@@ -125,6 +157,9 @@ export interface JobProgress {
   totalFrames: number;
   percentage: number;
   estimatedSecondsRemaining: number;
+  currentSceneName?: string;
+  gpuDevice?: string;
+  vramUsageMB?: number;
 }
 
 export interface JobError {
@@ -148,8 +183,12 @@ export interface Job {
 export interface ModelDescriptor {
   id: string;
   name: string;
-  task: string;
+  version: string;
+  task: 'character' | 'background' | 'environment' | 'style' | 'temporal' | 'audio';
   fileSizeBytes: number;
+  license: string;
+  runtime: string;
+  vramRequirementMB: number;
   isDownloaded: boolean;
   isLoadedInVram: boolean;
   localPath?: string;
@@ -157,10 +196,11 @@ export interface ModelDescriptor {
 }
 
 export interface ExportSettings {
-  resolution: string;
-  quality: string;
-  format: string;
-  fps: number;
+  resolution: '1080p (1920x1080)' | '4K (3840x2160)' | '720p (1280x720)';
+  fps: 24 | 30 | 60;
+  codec: 'H.264 (AVC)' | 'HEVC (H.265)' | 'Apple ProRes';
+  quality: 'High Quality' | 'Standard' | 'Lossless (Pro)';
+  audioOption: 'Preserve Original Audio' | 'AI Enhanced Audio';
   removeWatermark: boolean;
   outputDirectory?: string;
 }

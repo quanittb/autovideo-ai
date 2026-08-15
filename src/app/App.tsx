@@ -1,10 +1,11 @@
 import React from 'react';
 import { Layout } from './Layout';
 import { HomeView } from '../features/home/HomeView';
+import { ProjectWorkspace } from '../features/workspace/ProjectWorkspace';
 import { StepUpload } from '../features/project/StepUpload';
-import { StepTransform } from '../features/transform/StepTransform';
-import { StepExport } from '../features/export/StepExport';
+import { JobMonitor } from '../features/processing/JobMonitor';
 import { ResultView } from '../features/result/ResultView';
+import { StepExport } from '../features/export/StepExport';
 import { SettingsView } from '../features/settings/SettingsView';
 import { ModelsView } from '../features/models/ModelsView';
 import { useUiStore } from '../stores/uiStore';
@@ -20,19 +21,23 @@ export const App: React.FC = () => {
         return <SettingsView />;
       case 'models':
         return <ModelsView />;
+      case 'jobs':
+        return <JobMonitor />;
+      case 'workspace':
       case 'projects':
-      case 'tools':
         switch (currentStep) {
           case 'upload':
             return <StepUpload />;
           case 'transform':
-            return <StepTransform />;
-          case 'preview':
+            return <ProjectWorkspace />;
+          case 'processing':
+            return <JobMonitor />;
+          case 'result':
             return <ResultView />;
           case 'export':
             return <StepExport />;
           default:
-            return <StepUpload />;
+            return <ProjectWorkspace />;
         }
       default:
         return <HomeView />;

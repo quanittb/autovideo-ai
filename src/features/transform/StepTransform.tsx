@@ -6,7 +6,7 @@ import { MockBadge } from '../../components/common/MockBadge';
 export const StepTransform: React.FC = () => {
   const { activeProject, updateTransformationRequest } = useProjectStore();
   const [splitPos] = useState(50);
-  const [activeSubTab, setActiveSubTab] = useState<'character' | 'scene' | 'style' | 'advanced'>('character');
+  const [activeSubTab, setActiveSubTab] = useState<'character' | 'background' | 'environment' | 'style' | 'object' | 'custom'>('character');
 
   const transformation = activeProject?.transformationRequest || {
     category: 'character',
@@ -26,7 +26,7 @@ export const StepTransform: React.FC = () => {
         {/* Left: Transform Controls */}
         <div className="lg:col-span-5 space-y-6">
           <div className="flex items-center gap-1.5 p-1 rounded-xl bg-slate-900 border border-slate-800">
-            {(['character', 'scene', 'style', 'advanced'] as const).map((tab) => (
+            {(['character', 'background', 'environment', 'style'] as const).map((tab) => (
               <button
                 key={tab}
                 onClick={() => {

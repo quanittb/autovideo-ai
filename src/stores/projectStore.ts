@@ -12,14 +12,22 @@ interface ProjectState {
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
   updateTransformationRequest: (partial: Partial<TransformationRequest>) => void;
+  selectScene: (sceneId: string) => void;
 }
 
 const defaultTransformationRequest: TransformationRequest = {
   category: 'character',
+  detectedCharacter: 'Fox',
   originalCharacter: 'Fox',
-  replacementCharacter: 'Rabbit',
-  prompt: 'A cute white rabbit wearing a scarf',
+  replacementCharacter: 'White Rabbit',
+  prompt: 'A cute white rabbit wearing a warm knitted scarf in autumn',
   negativePrompt: undefined,
+  preservation: {
+    preserveMotion: true,
+    preserveCamera: true,
+    preserveComposition: true,
+    preserveOriginalAudio: true,
+  },
   seed: 42,
 };
 
@@ -47,6 +55,48 @@ export const defaultFoxRabbitProject: Project = {
     isFixture: true,
   },
   transformationRequest: defaultTransformationRequest,
+  scenes: [
+    {
+      id: 'scene-1',
+      index: 1,
+      name: 'Woodland Overview',
+      startTimeFormatted: '00:00',
+      endTimeFormatted: '00:24',
+      startFrame: 0,
+      endFrame: 720,
+      thumbnailEmoji: '🌲',
+      status: 'ready',
+    },
+    {
+      id: 'scene-2',
+      index: 2,
+      name: 'Fox Subject Close-up',
+      startTimeFormatted: '00:24',
+      endTimeFormatted: '00:48',
+      startFrame: 720,
+      endFrame: 1440,
+      thumbnailEmoji: '🦊',
+      status: 'ready',
+    },
+    {
+      id: 'scene-3',
+      index: 3,
+      name: 'Snow Clearing Run',
+      startTimeFormatted: '00:48',
+      endTimeFormatted: '01:02',
+      startFrame: 1440,
+      endFrame: 1860,
+      thumbnailEmoji: '❄️',
+      status: 'ready',
+    },
+  ],
+  selectedSceneId: 'scene-2',
+  qualityMetrics: {
+    temporalConsistencyScore: 98.4,
+    identityPreservationScore: 96.2,
+    audioSyncOffsetMs: 0,
+    warnings: ['High-contrast lighting detected in Scene #2; deflicker filter applied.'],
+  },
   isFixture: true,
 };
 
@@ -103,6 +153,16 @@ export const useProjectStore = create<ProjectState>((set) => ({
             ...state.activeProject.transformationRequest,
             ...partial,
           },
+        },
+      };
+    }),
+  selectScene: (sceneId) =>
+    set((state) => {
+      if (!state.activeProject) return state;
+      return {
+        activeProject: {
+          ...state.activeProject,
+          selectedSceneId: sceneId,
         },
       };
     }),
