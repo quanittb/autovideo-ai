@@ -115,6 +115,24 @@ pub struct ProjectOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct ProjectEditorState {
+    pub current_time: f64,
+    pub timeline_zoom: f64,
+    pub selected_track: Option<String>,
+}
+
+impl Default for ProjectEditorState {
+    fn default() -> Self {
+        Self {
+            current_time: 0.0,
+            timeline_zoom: 1.0,
+            selected_track: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct Project {
     pub schema_version: u32,
     pub id: String,
@@ -126,6 +144,7 @@ pub struct Project {
     pub transformation_config: TransformationConfig,
     pub transformation_plan: Option<TransformationPlan>,
     pub outputs: Vec<ProjectOutput>,
+    pub editor_state: Option<ProjectEditorState>,
     pub is_fixture: bool,
 }
 
@@ -143,6 +162,7 @@ impl Project {
             transformation_config: TransformationConfig::default(),
             transformation_plan: None,
             outputs: Vec::new(),
+            editor_state: Some(ProjectEditorState::default()),
             is_fixture: false,
         }
     }

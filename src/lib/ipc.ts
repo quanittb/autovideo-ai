@@ -49,6 +49,19 @@ export const mediaApi = {
   },
 };
 
+export const editorApi = {
+  resolveProjectMedia: async (projectId: string): Promise<import('../types/contracts').ResolvedMediaAsset> => {
+    return await invoke<import('../types/contracts').ResolvedMediaAsset>('resolve_project_media', { projectId });
+  },
+
+  persistEditorState: async (
+    projectId: string,
+    editorState: import('../types/contracts').ProjectEditorState
+  ): Promise<void> => {
+    return await invoke<void>('persist_editor_state', { projectId, editorState });
+  },
+};
+
 export const api = {
   getAppInfo: async (): Promise<AppInfo> => {
     try {

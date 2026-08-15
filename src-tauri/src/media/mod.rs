@@ -171,6 +171,28 @@ pub struct CacheValidationReport {
     pub all_passed: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedMediaAsset {
+    pub media_id: String,
+    pub original_file_name: String,
+    pub source_path: PathBuf,
+    pub duration_seconds: f64,
+    pub duration_ms: u64,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+    pub file_size_bytes: u64,
+    pub container: String,
+    pub video_codec: String,
+    pub audio_codec: Option<String>,
+    pub has_audio: bool,
+    pub frames_dir: Option<PathBuf>,
+    pub frame_files: Vec<String>,
+    pub audio_path: Option<PathBuf>,
+    pub is_cache_available: bool,
+}
+
 #[derive(Default)]
 pub struct MediaService;
 
@@ -315,6 +337,61 @@ impl MediaService {
             video_codec: metadata.video_codec,
             audio_codec: metadata.audio_codec,
             has_audio: metadata.has_audio,
+        })
+    }
+
+    /// Resolves media asset for timeline and playback preview within the project context.
+    pub fn resolve_project_media(
+        &self,
+        project_dir: &Path,
+        source_media: &SourceMedia,
+    ) -> Result<ResolvedMediaAsset, AppError> {
+        if !source_media.source_path.exists() {
+            return Err(AppError::media_file_not_found(
+                source_media.source_path.display().to_string(),
+            ));
+        }
+
+        let media_cache_dir = project_dir.join("cache").join("media").join(&source_media.media_id);
+        let frames_dir = media_cache_dir.join("frames");
+        let audio_path = media_cache_dir.join("audio").join("source.wav");
+
+        let mut frame_files = Vec::new();
+        if frames_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&frames_dir) {
+                let mut sorted: Vec<_> = entries.flatten().collect();
+                sorted.sort_by_key(|e| e.file_name());
+                for entry in sorted {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if name.ends_with(".png") || name.ends_with(".jpg") {
+                            frame_files.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        let audio_exists = audio_path.exists();
+        let is_cache_available = !frame_files.is_empty() || audio_exists;
+
+        Ok(ResolvedMediaAsset {
+            media_id: source_media.media_id.clone(),
+            original_file_name: source_media.original_file_name.clone(),
+            source_path: source_media.source_path.clone(),
+            duration_seconds: source_media.duration_ms as f64 / 1000.0,
+            duration_ms: source_media.duration_ms,
+            width: source_media.width,
+            height: source_media.height,
+            fps: source_media.fps,
+            file_size_bytes: source_media.file_size_bytes,
+            container: source_media.container.clone(),
+            video_codec: source_media.video_codec.clone(),
+            audio_codec: source_media.audio_codec.clone(),
+            has_audio: source_media.has_audio,
+            frames_dir: if frames_dir.exists() { Some(frames_dir) } else { None },
+            frame_files,
+            audio_path: if audio_exists { Some(audio_path) } else { None },
+            is_cache_available,
         })
     }
 
@@ -833,6 +910,8 @@ impl MediaService {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use crate::system::StoragePaths;
+    use crate::projects::{ProjectManager, ProjectEditorState};
 
     #[test]
     fn test_check_runtime_status() {
@@ -1122,5 +1201,53 @@ mod tests {
         }
         println!("[VERIFICATION] Manifest Valid: {}", report.is_manifest_valid);
         println!("[VERIFICATION] ALL TESTS PASS: {}", report.all_passed);
+    }
+
+    #[test]
+    fn test_resolve_project_media_and_editor_persistence() {
+        let temp = tempdir().unwrap();
+        let proj_dir = temp.path().join("proj_editor_test");
+        let source_file = temp.path().join("test_timeline.mp4");
+        fs::write(&source_file, vec![0u8; 1024 * 128]).unwrap();
+
+        let service = MediaService::new();
+        let source_media = service.import_to_project(&proj_dir, &source_file).expect("Import failed");
+
+        // 1. Resolve media asset
+        let resolved = service.resolve_project_media(&proj_dir, &source_media).expect("Resolve media failed");
+        assert_eq!(resolved.media_id, source_media.media_id);
+        assert_eq!(resolved.original_file_name, "test_timeline.mp4");
+        assert_eq!(resolved.duration_seconds, 62.0);
+        assert_eq!(resolved.fps, 30.0);
+        assert!(resolved.frames_dir.is_some());
+
+        // 2. Editor State Persistence
+        let storage_paths = StoragePaths {
+            app_data_dir: temp.path().to_path_buf(),
+            projects_dir: temp.path().join("projects"),
+            models_dir: temp.path().join("models"),
+            cache_dir: temp.path().join("cache"),
+            logs_dir: temp.path().join("logs"),
+            temp_dir: temp.path().join("temp"),
+        };
+        let manager = ProjectManager::new(storage_paths);
+        let created = manager.create_project("Timeline Persistence Project").expect("Create project failed");
+        assert!(created.editor_state.is_some());
+        assert_eq!(created.editor_state.as_ref().unwrap().current_time, 0.0);
+
+        let mut updated = created.clone();
+        updated.editor_state = Some(ProjectEditorState {
+            current_time: 14.5,
+            timeline_zoom: 1.75,
+            selected_track: Some("V1".to_string()),
+        });
+
+        manager.update_project(&updated).expect("Update project failed");
+
+        let reloaded = manager.get_project(&created.id).expect("Reload project failed");
+        let reloaded_state = reloaded.editor_state.expect("Missing editor state");
+        assert_eq!(reloaded_state.current_time, 14.5);
+        assert_eq!(reloaded_state.timeline_zoom, 1.75);
+        assert_eq!(reloaded_state.selected_track, Some("V1".to_string()));
     }
 }

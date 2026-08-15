@@ -250,6 +250,42 @@ export interface ProjectOutput {
   createdAt: string;
 }
 
+export interface ProjectEditorState {
+  currentTime: number;
+  timelineZoom: number;
+  selectedTrack?: string;
+}
+
+export interface ResolvedMediaAsset {
+  mediaId: string;
+  originalFileName: string;
+  sourcePath: string;
+  durationSeconds: number;
+  durationMs: number;
+  width: number;
+  height: number;
+  fps: number;
+  fileSizeBytes: number;
+  container: string;
+  videoCodec: string;
+  audioCodec?: string;
+  hasAudio: boolean;
+  framesDir?: string;
+  frameFiles: string[];
+  audioPath?: string;
+  isCacheAvailable: boolean;
+}
+
+export type MediaLoadStatus = 'IDLE' | 'LOADING' | 'READY' | 'ERROR' | 'NOT_FOUND';
+
+export interface PlaybackState {
+  isPlaying: boolean;
+  currentTime: number;
+  duration: number;
+  volume: number;
+  muted: boolean;
+}
+
 export interface Project {
   schemaVersion: number;
   id: string;
@@ -263,6 +299,7 @@ export interface Project {
   transformationRequest?: TransformationRequest;
   transformationPlan?: TransformationPlan;
   outputs: ProjectOutput[];
+  editorState?: ProjectEditorState;
   isFixture: boolean;
   // UI convenience helper fields for active session
   scenes?: SceneInfo[];

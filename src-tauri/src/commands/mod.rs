@@ -190,3 +190,32 @@ pub fn open_directory(path: String) -> Result<(), AppError> {
 
     Ok(())
 }
+
+#[command]
+pub fn resolve_project_media(project_id: String) -> Result<crate::media::ResolvedMediaAsset, AppError> {
+    let storage_paths = StoragePaths::default_paths();
+    let manager = ProjectManager::new(storage_paths);
+    let project = manager.get_project(&project_id)?;
+    let proj_dir = manager.project_dir(&project_id);
+
+    let source_media = project.source_media.ok_or_else(|| {
+        AppError::invalid_input("Project does not have an imported source media file")
+    })?;
+
+    let media_service = MediaService::new();
+    media_service.resolve_project_media(&proj_dir, &source_media)
+}
+
+#[command]
+pub fn persist_editor_state(
+    project_id: String,
+    editor_state: crate::projects::ProjectEditorState,
+) -> Result<(), AppError> {
+    let storage_paths = StoragePaths::default_paths();
+    let manager = ProjectManager::new(storage_paths);
+    let mut project = manager.get_project(&project_id)?;
+
+    project.editor_state = Some(editor_state);
+    manager.update_project(&project)?;
+    Ok(())
+}
