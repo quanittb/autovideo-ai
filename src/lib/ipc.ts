@@ -77,6 +77,14 @@ export const api = {
     return await invoke<void>('delete_project', { id });
   },
 
+  importMedia: async (projectId: string, filePath: string): Promise<Project> => {
+    return await invoke<Project>('import_media', { projectId, filePath });
+  },
+
+  probeMedia: async (filePath: string): Promise<MediaMetadata> => {
+    return await invoke<MediaMetadata>('probe_media', { filePath });
+  },
+
   listModels: async (): Promise<ModelDescriptor[]> => {
     try {
       return await invoke<ModelDescriptor[]>('list_models');

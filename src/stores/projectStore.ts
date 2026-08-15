@@ -13,6 +13,7 @@ interface ProjectState {
   loadProject: (id: string) => Promise<Project>;
   saveProject: (project: Project) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
+  importMediaToProject: (projectId: string, filePath: string) => Promise<Project>;
   setActiveProject: (project: Project | null) => void;
   setProjects: (projects: ProjectSummary[]) => void;
   setLoading: (loading: boolean) => void;
@@ -204,6 +205,31 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }));
     } catch (err: any) {
       set({ error: err?.message || 'Failed to delete project', isLoading: false });
+      throw err;
+    }
+  },
+
+  importMediaToProject: async (projectId: string, filePath: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      const updated = await invokeCommand<Project>('import_media', { projectId, filePath });
+      const enriched: Project = {
+        ...updated,
+        scenes: updated.scenes || defaultScenes,
+        selectedSceneId: updated.selectedSceneId || 'scene-1',
+      };
+      set((state) => ({
+        activeProject: enriched,
+        projects: state.projects.map((p) =>
+          p.id === projectId
+            ? { ...p, status: updated.status, updatedAt: updated.updatedAt }
+            : p
+        ),
+        isLoading: false,
+      }));
+      return enriched;
+    } catch (err: any) {
+      set({ error: err?.message || 'Failed to import video file', isLoading: false });
       throw err;
     }
   },

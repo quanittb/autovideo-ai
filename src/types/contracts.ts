@@ -12,7 +12,29 @@ export type ErrorCode =
   | 'PROJECT_LOAD_FAILED'
   | 'PROJECT_SAVE_FAILED'
   | 'PROJECT_DELETE_FAILED'
+  | 'MEDIA_FILE_NOT_FOUND'
+  | 'MEDIA_UNSUPPORTED_FORMAT'
+  | 'MEDIA_TOO_LARGE'
+  | 'MEDIA_INVALID'
+  | 'MEDIA_METADATA_FAILED'
+  | 'MEDIA_IMPORT_FAILED'
   | 'UNKNOWN_ERROR';
+
+export interface MediaMetadata {
+  originalFileName: string;
+  sourcePath: string;
+  durationMs: number;
+  width: number;
+  height: number;
+  fps: number;
+  fileSizeBytes: number;
+  container: string;
+  videoCodec: string;
+  audioCodec?: string;
+  hasAudio: boolean;
+  rotation: number;
+  isPortrait: boolean;
+}
 
 export interface AppError {
   code: ErrorCode;

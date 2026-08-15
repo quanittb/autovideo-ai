@@ -1,9 +1,11 @@
+use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tauri::command;
 
 use crate::error::AppError;
+use crate::media::{MediaMetadata, MediaService};
 use crate::models::{ModelDescriptor, ModelManager};
-use crate::projects::{Project, ProjectManager, ProjectSummary};
+use crate::projects::{Project, ProjectManager, ProjectStatus, ProjectSummary};
 use crate::system::{HardwareProfile, StoragePaths};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,4 +78,29 @@ pub fn update_project(project: Project) -> Result<Project, AppError> {
 pub fn delete_project(id: String) -> Result<(), AppError> {
     let manager = ProjectManager::new(StoragePaths::default_paths());
     manager.delete_project(&id)
+}
+
+#[command]
+pub fn probe_media(file_path: String) -> Result<MediaMetadata, AppError> {
+    let media_service = MediaService::new();
+    let path = PathBuf::from(&file_path);
+    media_service.probe(&path)
+}
+
+#[command]
+pub fn import_media(project_id: String, file_path: String) -> Result<Project, AppError> {
+    let storage_paths = StoragePaths::default_paths();
+    let manager = ProjectManager::new(storage_paths);
+    let mut project = manager.get_project(&project_id)?;
+
+    let media_service = MediaService::new();
+    let proj_dir = manager.project_dir(&project_id);
+    let source_file = PathBuf::from(&file_path);
+
+    let source_media = media_service.import_to_project(&proj_dir, &source_file)?;
+
+    project.source_media = Some(source_media);
+    project.status = ProjectStatus::Imported;
+
+    manager.update_project(&project)
 }

@@ -17,6 +17,12 @@ pub enum ErrorCode {
     ProjectLoadFailed,
     ProjectSaveFailed,
     ProjectDeleteFailed,
+    MediaFileNotFound,
+    MediaUnsupportedFormat,
+    MediaTooLarge,
+    MediaInvalid,
+    MediaMetadataFailed,
+    MediaImportFailed,
     UnknownError,
 }
 
@@ -106,6 +112,38 @@ impl AppError {
     pub fn project_delete_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
         Self::with_details(ErrorCode::ProjectDeleteFailed, msg, details)
     }
+
+    pub fn media_file_not_found(path: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::MediaFileNotFound, "Source media file not found", path)
+    }
+
+    pub fn media_unsupported_format(format: impl Into<String>) -> Self {
+        Self::with_details(
+            ErrorCode::MediaUnsupportedFormat,
+            "Unsupported video format (Accepted: MP4, MOV, AVI, MKV)",
+            format,
+        )
+    }
+
+    pub fn media_too_large(size_bytes: u64, max_bytes: u64) -> Self {
+        Self::with_details(
+            ErrorCode::MediaTooLarge,
+            "Video file size exceeds maximum limit of 2 GB",
+            format!("File size: {} bytes, Maximum allowed: {} bytes", size_bytes, max_bytes),
+        )
+    }
+
+    pub fn media_invalid(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::MediaInvalid, msg, details)
+    }
+
+    pub fn media_metadata_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::MediaMetadataFailed, msg, details)
+    }
+
+    pub fn media_import_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::MediaImportFailed, msg, details)
+    }
 }
 
 #[cfg(test)]
@@ -132,5 +170,12 @@ mod tests {
         let err = AppError::project_not_found("proj-123");
         assert_eq!(err.code, ErrorCode::ProjectNotFound);
         assert_eq!(err.details, Some("proj-123".to_string()));
+    }
+
+    #[test]
+    fn test_media_errors() {
+        let err = AppError::media_too_large(3_000_000_000, 2_147_483_648);
+        assert_eq!(err.code, ErrorCode::MediaTooLarge);
+        assert!(err.details.unwrap().contains("Maximum allowed"));
     }
 }
