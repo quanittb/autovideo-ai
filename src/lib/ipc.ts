@@ -1,5 +1,16 @@
 import { invoke } from '@tauri-apps/api/core';
-import { HardwareProfile, ModelDescriptor, Project, ProjectSummary, StoragePaths } from '../types/contracts';
+import {
+  AudioExtractionResult,
+  FrameExtractionRequest,
+  FrameExtractionResult,
+  HardwareProfile,
+  MediaMetadata,
+  MediaRuntimeStatus,
+  ModelDescriptor,
+  Project,
+  ProjectSummary,
+  StoragePaths,
+} from '../types/contracts';
 
 export interface AppInfo {
   name: string;
@@ -10,6 +21,24 @@ export interface AppInfo {
 export async function invokeCommand<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   return await invoke<T>(cmd, args);
 }
+
+export const mediaApi = {
+  getRuntimeStatus: async (): Promise<MediaRuntimeStatus> => {
+    return await invoke<MediaRuntimeStatus>('get_media_runtime_status');
+  },
+
+  prepareMedia: async (projectId: string, mediaId: string): Promise<string> => {
+    return await invoke<string>('prepare_media', { projectId, mediaId });
+  },
+
+  extractFrames: async (request: FrameExtractionRequest): Promise<FrameExtractionResult> => {
+    return await invoke<FrameExtractionResult>('extract_media_frames', { request });
+  },
+
+  extractAudio: async (projectId: string, mediaId: string): Promise<AudioExtractionResult> => {
+    return await invoke<AudioExtractionResult>('extract_media_audio', { projectId, mediaId });
+  },
+};
 
 export const api = {
   getAppInfo: async (): Promise<AppInfo> => {

@@ -30,6 +30,10 @@ pub fn run() {
             delete_project,
             probe_media,
             import_media,
+            get_media_runtime_status,
+            prepare_media,
+            extract_media_frames,
+            extract_media_audio,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

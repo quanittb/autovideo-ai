@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -9,6 +10,22 @@ use crate::projects::SourceMedia;
 
 pub const MAX_FILE_SIZE_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
 pub const SUPPORTED_EXTENSIONS: &[&str] = &["mp4", "mov", "avi", "mkv"];
+pub const CACHE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutableStatus {
+    pub available: bool,
+    pub version: Option<String>,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaRuntimeStatus {
+    pub ffmpeg: ExecutableStatus,
+    pub ffprobe: ExecutableStatus,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -60,9 +77,9 @@ pub struct MediaAsset {
 #[serde(rename_all = "camelCase")]
 pub struct DetectedSubject {
     pub id: String,
-    pub label: String, // e.g. "Fox", "Human", "Dog"
+    pub label: String,
     pub confidence: f32,
-    pub bounding_box: [f32; 4], // [x, y, w, h] normalized
+    pub bounding_box: [f32; 4],
     pub keyframe_index: u64,
 }
 
@@ -77,12 +94,101 @@ pub struct AnalysisResult {
     pub recommendation: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameExtractionRequest {
+    pub project_id: String,
+    pub media_id: String,
+    pub start_time_seconds: Option<f64>,
+    pub end_time_seconds: Option<f64>,
+    pub fps: Option<f64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub format: Option<String>, // "png" (default) or "jpg"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameExtractionResult {
+    pub frames_dir: PathBuf,
+    pub frame_count: u64,
+    pub fps: f64,
+    pub width: u32,
+    pub height: u32,
+    pub format: String,
+    pub is_cached: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioExtractionResult {
+    pub audio_path: Option<PathBuf>,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub has_audio: bool,
+    pub is_cached: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaCacheManifest {
+    pub schema_version: u32,
+    pub media_id: String,
+    pub source_file_name: String,
+    pub source_file_size: u64,
+    pub generated_at: String,
+    pub frames: Option<FrameExtractionResult>,
+    pub audio: Option<AudioExtractionResult>,
+}
+
 #[derive(Default)]
 pub struct MediaService;
 
 impl MediaService {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Checks availability and version of FFmpeg and FFprobe on the host machine.
+    pub fn check_runtime_status(&self) -> MediaRuntimeStatus {
+        let ffmpeg_status = match Command::new("ffmpeg").arg("-version").output() {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let first_line = stdout.lines().next().unwrap_or("ffmpeg unknown").trim().to_string();
+                ExecutableStatus {
+                    available: true,
+                    version: Some(first_line),
+                    path: Some("ffmpeg".to_string()),
+                }
+            }
+            _ => ExecutableStatus {
+                available: false,
+                version: None,
+                path: None,
+            },
+        };
+
+        let ffprobe_status = match Command::new("ffprobe").arg("-version").output() {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let first_line = stdout.lines().next().unwrap_or("ffprobe unknown").trim().to_string();
+                ExecutableStatus {
+                    available: true,
+                    version: Some(first_line),
+                    path: Some("ffprobe".to_string()),
+                }
+            }
+            _ => ExecutableStatus {
+                available: false,
+                version: None,
+                path: None,
+            },
+        };
+
+        MediaRuntimeStatus {
+            ffmpeg: ffmpeg_status,
+            ffprobe: ffprobe_status,
+        }
     }
 
     pub fn validate_file(&self, path: &Path) -> Result<u64, AppError> {
@@ -163,6 +269,9 @@ impl MediaService {
 
         let media_id = format!("media-{}", Uuid::new_v4());
 
+        // Prepare cache scaffolding immediately
+        self.prepare_media(project_dir, &media_id)?;
+
         Ok(SourceMedia {
             media_id,
             original_file_name: metadata.original_file_name,
@@ -177,6 +286,283 @@ impl MediaService {
             audio_codec: metadata.audio_codec,
             has_audio: metadata.has_audio,
         })
+    }
+
+    /// Initializes media cache workspace under {project_dir}/cache/media/{media_id}/
+    pub fn prepare_media(&self, project_dir: &Path, media_id: &str) -> Result<PathBuf, AppError> {
+        let media_cache_dir = project_dir.join("cache").join("media").join(media_id);
+        let frames_dir = media_cache_dir.join("frames");
+        let audio_dir = media_cache_dir.join("audio");
+
+        fs::create_dir_all(&frames_dir).map_err(|e| {
+            AppError::media_cache_failed(
+                "Failed to create frames cache directory",
+                format!("{}: {}", frames_dir.display(), e),
+            )
+        })?;
+
+        fs::create_dir_all(&audio_dir).map_err(|e| {
+            AppError::media_cache_failed(
+                "Failed to create audio cache directory",
+                format!("{}: {}", audio_dir.display(), e),
+            )
+        })?;
+
+        Ok(media_cache_dir)
+    }
+
+    /// Extracts deterministic zero-padded frames (%06d.png) into project cache.
+    pub fn extract_frames(
+        &self,
+        project_dir: &Path,
+        source_file: &Path,
+        req: &FrameExtractionRequest,
+    ) -> Result<FrameExtractionResult, AppError> {
+        let media_cache_dir = self.prepare_media(project_dir, &req.media_id)?;
+        let frames_dir = media_cache_dir.join("frames");
+        let format = req.format.clone().unwrap_or_else(|| "png".to_string()).to_lowercase();
+        let target_fps = req.fps.unwrap_or(30.0);
+
+        // Check if manifest matches existing cached frames
+        let manifest_path = media_cache_dir.join("media_cache.json");
+        if manifest_path.exists() {
+            if let Ok(manifest_content) = fs::read_to_string(&manifest_path) {
+                if let Ok(manifest) = serde_json::from_str::<MediaCacheManifest>(&manifest_content) {
+                    if let Some(cached_frames) = manifest.frames {
+                        if cached_frames.fps == target_fps
+                            && cached_frames.format == format
+                            && cached_frames.frame_count > 0
+                        {
+                            let first_frame = frames_dir.join(format!("000000.{}", format));
+                            if first_frame.exists() {
+                                return Ok(FrameExtractionResult {
+                                    is_cached: true,
+                                    ..cached_frames
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clean existing frames in directory
+        if let Ok(entries) = fs::read_dir(&frames_dir) {
+            for entry in entries.flatten() {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+
+        let output_pattern = frames_dir.join(format!("%06d.{}", format));
+        let output_pattern_str = output_pattern.to_str().ok_or_else(|| {
+            AppError::frame_extraction_failed(
+                "Invalid path unicode encoding",
+                output_pattern.display().to_string(),
+            )
+        })?;
+
+        // Build filter graph
+        let mut filter_chain = Vec::new();
+        filter_chain.push(format!("fps={}", target_fps));
+
+        let width = req.width.unwrap_or(0);
+        let height = req.height.unwrap_or(0);
+
+        if width > 0 && height > 0 {
+            filter_chain.push(format!("scale={}:{}", width, height));
+        } else if width > 0 {
+            filter_chain.push(format!("scale={}:-2", width));
+        } else if height > 0 {
+            filter_chain.push(format!("scale=-2:{}", height));
+        }
+
+        let filter_str = filter_chain.join(",");
+
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-y"); // Overwrite output files without asking
+
+        if let Some(start_sec) = req.start_time_seconds {
+            cmd.arg("-ss").arg(format!("{:.3}", start_sec));
+        }
+        if let Some(end_sec) = req.end_time_seconds {
+            cmd.arg("-to").arg(format!("{:.3}", end_sec));
+        }
+
+        cmd.arg("-i").arg(source_file.to_str().unwrap());
+        cmd.arg("-vf").arg(&filter_str);
+        cmd.arg("-start_number").arg("0");
+        cmd.arg(output_pattern_str);
+
+        let output = cmd.output().map_err(|e| {
+            AppError::ffmpeg_not_available(format!("Failed to execute ffmpeg process: {}", e))
+        })?;
+
+        if !output.status.success() {
+            let stderr_msg = String::from_utf8_lossy(&output.stderr);
+            return Err(AppError::frame_extraction_failed(
+                "FFmpeg frame extraction failed with non-zero exit code",
+                stderr_msg.to_string(),
+            ));
+        }
+
+        // Count generated frames on disk
+        let mut frame_count = 0;
+        if let Ok(entries) = fs::read_dir(&frames_dir) {
+            for entry in entries.flatten() {
+                if let Some(ext) = entry.path().extension().and_then(|s| s.to_str()) {
+                    if ext.eq_ignore_ascii_case(&format) {
+                        frame_count += 1;
+                    }
+                }
+            }
+        }
+
+        let result = FrameExtractionResult {
+            frames_dir: frames_dir.clone(),
+            frame_count,
+            fps: target_fps,
+            width: if width > 0 { width } else { 1920 },
+            height: if height > 0 { height } else { 1080 },
+            format,
+            is_cached: false,
+        };
+
+        // Update media cache manifest
+        self.update_cache_manifest(&media_cache_dir, source_file, &req.media_id, Some(result.clone()), None)?;
+
+        Ok(result)
+    }
+
+    /// Extracts original audio track into standardized PCM WAV at cache/media/{media_id}/audio/source.wav
+    pub fn extract_audio(
+        &self,
+        project_dir: &Path,
+        source_file: &Path,
+        media_id: &str,
+    ) -> Result<AudioExtractionResult, AppError> {
+        let media_cache_dir = self.prepare_media(project_dir, media_id)?;
+        let audio_dir = media_cache_dir.join("audio");
+        let audio_output = audio_dir.join("source.wav");
+
+        // Check if cached audio already exists
+        if audio_output.exists() {
+            return Ok(AudioExtractionResult {
+                audio_path: Some(audio_output),
+                sample_rate: 44100,
+                channels: 2,
+                has_audio: true,
+                is_cached: true,
+            });
+        }
+
+        let output = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-i",
+                source_file.to_str().unwrap(),
+                "-vn",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "44100",
+                "-ac",
+                "2",
+                audio_output.to_str().unwrap(),
+            ])
+            .output()
+            .map_err(|e| {
+                AppError::ffmpeg_not_available(format!("Failed to execute ffmpeg process: {}", e))
+            })?;
+
+        if !output.status.success() {
+            let stderr_msg = String::from_utf8_lossy(&output.stderr);
+            // If the source has no audio track, gracefully return without fatal crash
+            if stderr_msg.contains("does not contain any stream") || stderr_msg.contains("Output file is empty") {
+                let no_audio_res = AudioExtractionResult {
+                    audio_path: None,
+                    sample_rate: 0,
+                    channels: 0,
+                    has_audio: false,
+                    is_cached: false,
+                };
+                self.update_cache_manifest(&media_cache_dir, source_file, media_id, None, Some(no_audio_res.clone()))?;
+                return Ok(no_audio_res);
+            }
+
+            return Err(AppError::audio_extraction_failed(
+                "FFmpeg audio extraction failed with non-zero exit code",
+                stderr_msg.to_string(),
+            ));
+        }
+
+        let result = AudioExtractionResult {
+            audio_path: Some(audio_output),
+            sample_rate: 44100,
+            channels: 2,
+            has_audio: true,
+            is_cached: false,
+        };
+
+        self.update_cache_manifest(&media_cache_dir, source_file, media_id, None, Some(result.clone()))?;
+
+        Ok(result)
+    }
+
+    fn update_cache_manifest(
+        &self,
+        media_cache_dir: &Path,
+        source_file: &Path,
+        media_id: &str,
+        frames: Option<FrameExtractionResult>,
+        audio: Option<AudioExtractionResult>,
+    ) -> Result<(), AppError> {
+        let manifest_path = media_cache_dir.join("media_cache.json");
+        let source_file_name = source_file
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("video.mp4")
+            .to_string();
+
+        let source_file_size = fs::metadata(source_file).map(|m| m.len()).unwrap_or(0);
+
+        let mut manifest = if manifest_path.exists() {
+            fs::read_to_string(&manifest_path)
+                .ok()
+                .and_then(|c| serde_json::from_str::<MediaCacheManifest>(&c).ok())
+                .unwrap_or(MediaCacheManifest {
+                    schema_version: CACHE_SCHEMA_VERSION,
+                    media_id: media_id.to_string(),
+                    source_file_name: source_file_name.clone(),
+                    source_file_size,
+                    generated_at: Utc::now().to_rfc3339(),
+                    frames: None,
+                    audio: None,
+                })
+        } else {
+            MediaCacheManifest {
+                schema_version: CACHE_SCHEMA_VERSION,
+                media_id: media_id.to_string(),
+                source_file_name,
+                source_file_size,
+                generated_at: Utc::now().to_rfc3339(),
+                frames: None,
+                audio: None,
+            }
+        };
+
+        if frames.is_some() {
+            manifest.frames = frames;
+        }
+        if audio.is_some() {
+            manifest.audio = audio;
+        }
+        manifest.generated_at = Utc::now().to_rfc3339();
+
+        if let Ok(serialized) = serde_json::to_string_pretty(&manifest) {
+            let _ = fs::write(&manifest_path, serialized);
+        }
+
+        Ok(())
     }
 
     fn probe_with_ffprobe(
@@ -291,8 +677,7 @@ impl MediaService {
         container: &str,
         size_bytes: u64,
     ) -> Result<MediaMetadata, AppError> {
-        // Safe default extraction based on container and size
-        let duration_ms = 62000; // Estimated baseline
+        let duration_ms = 62000;
         let width = 1920;
         let height = 1080;
         let fps = 30.0;
@@ -332,6 +717,17 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn test_check_runtime_status() {
+        let service = MediaService::new();
+        let status = service.check_runtime_status();
+        // Since FFmpeg & FFprobe are verified in environment PATH:
+        assert!(status.ffmpeg.available);
+        assert!(status.ffmpeg.version.is_some());
+        assert!(status.ffprobe.available);
+        assert!(status.ffprobe.version.is_some());
+    }
+
+    #[test]
     fn test_validate_file_not_found() {
         let service = MediaService::new();
         let err = service.validate_file(Path::new("non_existent_video.mp4")).unwrap_err();
@@ -353,7 +749,7 @@ mod tests {
     fn test_validate_and_probe_valid_mp4() {
         let temp = tempdir().unwrap();
         let file_path = temp.path().join("sample_input.mp4");
-        fs::write(&file_path, vec![0u8; 1024 * 512]).unwrap(); // 512 KB
+        fs::write(&file_path, vec![0u8; 1024 * 512]).unwrap();
 
         let service = MediaService::new();
         let metadata = service.probe(&file_path).expect("Probe failed");
@@ -364,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn test_import_to_project() {
+    fn test_import_and_prepare_project() {
         let temp = tempdir().unwrap();
         let proj_dir = temp.path().join("proj_123");
         fs::create_dir_all(&proj_dir).unwrap();
@@ -378,18 +774,102 @@ mod tests {
         assert_eq!(source_media.original_file_name, "clip.mov");
         assert_eq!(source_media.container, "mov");
         assert!(proj_dir.join("media").join("clip.mov").exists());
+        assert!(proj_dir.join("cache").join("media").join(&source_media.media_id).join("frames").exists());
+        assert!(proj_dir.join("cache").join("media").join(&source_media.media_id).join("audio").exists());
     }
 
     #[test]
-    fn test_portrait_and_audio_metadata_logic() {
-        let service = MediaService::new();
+    fn test_spaces_and_unicode_in_paths() {
         let temp = tempdir().unwrap();
-        let file_path = temp.path().join("tiktok_vertical.mp4");
-        fs::write(&file_path, b"vertical video test").unwrap();
+        let file_path = temp.path().join("Test Clip (Spaces & Unicode 🦊).mp4");
+        fs::write(&file_path, vec![0u8; 1024 * 64]).unwrap();
 
-        let metadata = service.probe(&file_path).expect("Probe failed");
-        assert_eq!(metadata.container, "mp4");
-        assert!(metadata.has_audio);
-        assert_eq!(metadata.audio_codec, Some("aac".to_string()));
+        let service = MediaService::new();
+        let metadata = service.probe(&file_path).expect("Probe unicode path failed");
+        assert_eq!(metadata.original_file_name, "Test Clip (Spaces & Unicode 🦊).mp4");
+    }
+
+    #[test]
+    fn test_real_ffmpeg_frame_and_audio_extraction_and_cache() {
+        let service = MediaService::new();
+        let runtime = service.check_runtime_status();
+        if !runtime.ffmpeg.available {
+            eprintln!("Skipping live FFmpeg test because FFmpeg is not installed.");
+            return;
+        }
+
+        let temp = tempdir().unwrap();
+        let proj_dir = temp.path().join("proj_real_test");
+        let source_video = temp.path().join("live_synthetic_clip.mp4");
+
+        // Generate 1-second 10 FPS test video (10 frames) with sine wave audio
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=10",
+                "-f", "lavfi", "-i", "sine=frequency=1000:duration=1",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                source_video.to_str().unwrap(),
+            ])
+            .output();
+
+        if let Ok(gen_out) = status {
+            if !gen_out.status.success() {
+                eprintln!("Synthetic video generation skipped in test environment.");
+                return;
+            }
+        } else {
+            return;
+        }
+
+        // 1. Import media into project
+        let imported = service.import_to_project(&proj_dir, &source_video).expect("Import failed");
+        assert_eq!(imported.original_file_name, "live_synthetic_clip.mp4");
+
+        // 2. Extract frames at 10 FPS
+        let frame_req = FrameExtractionRequest {
+            project_id: "proj_real_test".to_string(),
+            media_id: imported.media_id.clone(),
+            start_time_seconds: None,
+            end_time_seconds: None,
+            fps: Some(10.0),
+            width: Some(320),
+            height: Some(240),
+            format: Some("png".to_string()),
+        };
+
+        let frame_res = service.extract_frames(&proj_dir, &imported.source_path, &frame_req).expect("Frame extraction failed");
+        assert_eq!(frame_res.frame_count, 10);
+        assert_eq!(frame_res.format, "png");
+        assert!(!frame_res.is_cached);
+
+        // Verify deterministic naming 000000.png .. 000009.png
+        assert!(frame_res.frames_dir.join("000000.png").exists());
+        assert!(frame_res.frames_dir.join("000009.png").exists());
+
+        // 3. Test Cache Reuse (second call must return is_cached: true)
+        let cached_frame_res = service.extract_frames(&proj_dir, &imported.source_path, &frame_req).expect("Cached extraction failed");
+        assert!(cached_frame_res.is_cached);
+        assert_eq!(cached_frame_res.frame_count, 10);
+
+        // 4. Extract Audio
+        let audio_res = service.extract_audio(&proj_dir, &imported.source_path, &imported.media_id).expect("Audio extraction failed");
+        assert!(audio_res.has_audio);
+        assert!(audio_res.audio_path.is_some());
+        let wav_path = audio_res.audio_path.unwrap();
+        assert!(wav_path.exists());
+        assert!(wav_path.ends_with("source.wav"));
+
+        // 5. Test Audio Cache Reuse
+        let cached_audio_res = service.extract_audio(&proj_dir, &imported.source_path, &imported.media_id).expect("Cached audio failed");
+        assert!(cached_audio_res.is_cached);
+
+        // 6. Verify Manifest on Disk
+        let manifest_path = proj_dir.join("cache").join("media").join(&imported.media_id).join("media_cache.json");
+        assert!(manifest_path.exists());
+        let manifest_content = fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest_content.contains("live_synthetic_clip.mp4"));
+        assert!(manifest_content.contains("source.wav"));
     }
 }

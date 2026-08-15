@@ -23,6 +23,14 @@ pub enum ErrorCode {
     MediaInvalid,
     MediaMetadataFailed,
     MediaImportFailed,
+    FfmpegNotAvailable,
+    FfprobeNotAvailable,
+    MediaProbeFailed,
+    FrameExtractionFailed,
+    AudioExtractionFailed,
+    NoAudioStream,
+    MediaCacheFailed,
+    MediaProcessCancelled,
     UnknownError,
 }
 
@@ -144,6 +152,50 @@ impl AppError {
     pub fn media_import_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
         Self::with_details(ErrorCode::MediaImportFailed, msg, details)
     }
+
+    pub fn ffmpeg_not_available(details: impl Into<String>) -> Self {
+        Self::with_details(
+            ErrorCode::FfmpegNotAvailable,
+            "FFmpeg executable was not found in system PATH",
+            details,
+        )
+    }
+
+    pub fn ffprobe_not_available(details: impl Into<String>) -> Self {
+        Self::with_details(
+            ErrorCode::FfprobeNotAvailable,
+            "FFprobe executable was not found in system PATH",
+            details,
+        )
+    }
+
+    pub fn media_probe_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::MediaProbeFailed, msg, details)
+    }
+
+    pub fn frame_extraction_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::FrameExtractionFailed, msg, details)
+    }
+
+    pub fn audio_extraction_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::AudioExtractionFailed, msg, details)
+    }
+
+    pub fn no_audio_stream(details: impl Into<String>) -> Self {
+        Self::with_details(
+            ErrorCode::NoAudioStream,
+            "Source video contains no audio stream",
+            details,
+        )
+    }
+
+    pub fn media_cache_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::MediaCacheFailed, msg, details)
+    }
+
+    pub fn media_process_cancelled(msg: impl Into<String>) -> Self {
+        Self::new(ErrorCode::MediaProcessCancelled, msg)
+    }
 }
 
 #[cfg(test)]
@@ -177,5 +229,8 @@ mod tests {
         let err = AppError::media_too_large(3_000_000_000, 2_147_483_648);
         assert_eq!(err.code, ErrorCode::MediaTooLarge);
         assert!(err.details.unwrap().contains("Maximum allowed"));
+
+        let ffmpeg_err = AppError::ffmpeg_not_available("ffmpeg binary missing");
+        assert_eq!(ffmpeg_err.code, ErrorCode::FfmpegNotAvailable);
     }
 }

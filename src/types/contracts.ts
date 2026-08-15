@@ -18,7 +18,65 @@ export type ErrorCode =
   | 'MEDIA_INVALID'
   | 'MEDIA_METADATA_FAILED'
   | 'MEDIA_IMPORT_FAILED'
+  | 'FFMPEG_NOT_AVAILABLE'
+  | 'FFPROBE_NOT_AVAILABLE'
+  | 'MEDIA_PROBE_FAILED'
+  | 'FRAME_EXTRACTION_FAILED'
+  | 'AUDIO_EXTRACTION_FAILED'
+  | 'NO_AUDIO_STREAM'
+  | 'MEDIA_CACHE_FAILED'
+  | 'MEDIA_PROCESS_CANCELLED'
   | 'UNKNOWN_ERROR';
+
+export interface ExecutableStatus {
+  available: boolean;
+  version?: string;
+  path?: string;
+}
+
+export interface MediaRuntimeStatus {
+  ffmpeg: ExecutableStatus;
+  ffprobe: ExecutableStatus;
+}
+
+export interface FrameExtractionRequest {
+  projectId: string;
+  mediaId: string;
+  startTimeSeconds?: number;
+  endTimeSeconds?: number;
+  fps?: number;
+  width?: number;
+  height?: number;
+  format?: string;
+}
+
+export interface FrameExtractionResult {
+  framesDir: string;
+  frameCount: number;
+  fps: number;
+  width: number;
+  height: number;
+  format: string;
+  isCached: boolean;
+}
+
+export interface AudioExtractionResult {
+  audioPath?: string;
+  sampleRate: number;
+  channels: number;
+  hasAudio: boolean;
+  isCached: boolean;
+}
+
+export interface MediaCacheManifest {
+  schemaVersion: number;
+  mediaId: string;
+  sourceFileName: string;
+  sourceFileSize: number;
+  generatedAt: string;
+  frames?: FrameExtractionResult;
+  audio?: AudioExtractionResult;
+}
 
 export interface MediaMetadata {
   originalFileName: string;

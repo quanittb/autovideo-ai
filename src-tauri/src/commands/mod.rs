@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use tauri::command;
 
 use crate::error::AppError;
-use crate::media::{MediaMetadata, MediaService};
+use crate::media::{
+    AudioExtractionResult, FrameExtractionRequest, FrameExtractionResult, MediaMetadata,
+    MediaRuntimeStatus, MediaService,
+};
 use crate::models::{ModelDescriptor, ModelManager};
 use crate::projects::{Project, ProjectManager, ProjectStatus, ProjectSummary};
 use crate::system::{HardwareProfile, StoragePaths};
@@ -103,4 +106,51 @@ pub fn import_media(project_id: String, file_path: String) -> Result<Project, Ap
     project.status = ProjectStatus::Imported;
 
     manager.update_project(&project)
+}
+
+#[command]
+pub fn get_media_runtime_status() -> Result<MediaRuntimeStatus, AppError> {
+    let media_service = MediaService::new();
+    Ok(media_service.check_runtime_status())
+}
+
+#[command]
+pub fn prepare_media(project_id: String, media_id: String) -> Result<String, AppError> {
+    let storage_paths = StoragePaths::default_paths();
+    let manager = ProjectManager::new(storage_paths);
+    let proj_dir = manager.project_dir(&project_id);
+
+    let media_service = MediaService::new();
+    let cache_dir = media_service.prepare_media(&proj_dir, &media_id)?;
+    Ok(cache_dir.display().to_string())
+}
+
+#[command]
+pub fn extract_media_frames(request: FrameExtractionRequest) -> Result<FrameExtractionResult, AppError> {
+    let storage_paths = StoragePaths::default_paths();
+    let manager = ProjectManager::new(storage_paths);
+    let project = manager.get_project(&request.project_id)?;
+    let proj_dir = manager.project_dir(&request.project_id);
+
+    let source_media = project.source_media.ok_or_else(|| {
+        AppError::invalid_input("Project does not have an imported source media file")
+    })?;
+
+    let media_service = MediaService::new();
+    media_service.extract_frames(&proj_dir, &source_media.source_path, &request)
+}
+
+#[command]
+pub fn extract_media_audio(project_id: String, media_id: String) -> Result<AudioExtractionResult, AppError> {
+    let storage_paths = StoragePaths::default_paths();
+    let manager = ProjectManager::new(storage_paths);
+    let project = manager.get_project(&project_id)?;
+    let proj_dir = manager.project_dir(&project_id);
+
+    let source_media = project.source_media.ok_or_else(|| {
+        AppError::invalid_input("Project does not have an imported source media file")
+    })?;
+
+    let media_service = MediaService::new();
+    media_service.extract_audio(&proj_dir, &source_media.source_path, &media_id)
 }
