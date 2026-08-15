@@ -3,17 +3,20 @@ import {
   Home, 
   FolderKanban, 
   Sparkles, 
-  User,
   Activity,
   Cpu,
   Settings as SettingsIcon,
-  Video
+  Video,
+  HardDrive,
+  CheckCircle2
 } from 'lucide-react';
 import { useUiStore } from '../../stores/uiStore';
+import { useHardwareProfile } from '../../hooks/useHardwareProfile';
 import { NavTab } from '../../types';
 
 export const Sidebar: React.FC = () => {
   const { activeTab, setActiveTab } = useUiStore();
+  const { hardware } = useHardwareProfile();
 
   const navItems: { id: NavTab; label: string; icon: React.ReactNode }[] = [
     { id: 'home', label: 'Home', icon: <Home className="w-4 h-4" /> },
@@ -62,27 +65,38 @@ export const Sidebar: React.FC = () => {
         </nav>
       </div>
 
-      {/* Bottom Section: Pro Upgrade Banner & User Profile */}
-      <div className="flex flex-col gap-4 pt-4 border-t border-slate-800/60">
-        <div className="p-3.5 rounded-xl bg-gradient-to-b from-indigo-950/40 to-slate-900/80 border border-indigo-900/40 relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-20 h-20 bg-indigo-500/10 rounded-full blur-xl pointer-events-none" />
-          <h4 className="text-xs font-bold text-slate-100 mb-0.5">Upgrade to Pro</h4>
-          <p className="text-[11px] text-slate-400 mb-2.5 leading-relaxed">
-            Unlock 4K rendering & cloud acceleration.
-          </p>
-          <button className="w-full py-2 px-3 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-[11px] font-bold shadow-md shadow-purple-900/30 transition-all flex items-center justify-center gap-1.5">
-            <Sparkles className="w-3 h-3" />
-            <span>Upgrade Now</span>
-          </button>
+      {/* Bottom Section: System Status & Hardware Telemetry Widget */}
+      <div className="flex flex-col gap-3 pt-4 border-t border-slate-800/60">
+        <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] uppercase font-mono tracking-wider text-slate-400 font-semibold">
+              System Engine
+            </span>
+            <div className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="text-[10px] text-emerald-400 font-medium">Ready</span>
+            </div>
+          </div>
+
+          <div className="space-y-1 text-[11px] text-slate-400 font-mono">
+            <div className="flex items-center gap-1.5 text-slate-300 truncate">
+              <Cpu className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+              <span className="truncate">{hardware?.gpuName || 'DirectML GPU'}</span>
+            </div>
+            <div className="flex items-center gap-1.5 text-slate-400">
+              <HardDrive className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+              <span>Local Storage: Active</span>
+            </div>
+          </div>
         </div>
 
-        <div className="flex items-center gap-3 px-2 py-1">
-          <div className="w-8 h-8 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-300">
-            <User className="w-4 h-4" />
+        <div className="flex items-center gap-2.5 px-2 py-1">
+          <div className="w-7 h-7 rounded-lg bg-indigo-950/60 border border-indigo-800/50 flex items-center justify-center text-indigo-400">
+            <CheckCircle2 className="w-3.5 h-3.5" />
           </div>
           <div className="flex flex-col min-w-0">
-            <span className="text-xs font-semibold text-slate-200 truncate">Creator Workspace</span>
-            <span className="text-[10px] text-slate-500">Free Tier</span>
+            <span className="text-xs font-semibold text-slate-200 truncate">AutoVideo Desktop</span>
+            <span className="text-[10px] text-slate-500">Full Access Studio</span>
           </div>
         </div>
       </div>

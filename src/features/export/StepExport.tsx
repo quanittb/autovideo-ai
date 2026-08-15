@@ -22,7 +22,6 @@ export const StepExport: React.FC = () => {
     codec: 'H.264 (AVC)',
     quality: 'High Quality',
     audioOption: 'Preserve Original Audio',
-    removeWatermark: true,
     outputDirectory: 'C:/Users/User/Videos/AutoVideo',
   });
 
@@ -104,7 +103,7 @@ export const StepExport: React.FC = () => {
                 >
                   <option value="High Quality">High Quality</option>
                   <option value="Standard">Standard</option>
-                  <option value="Lossless (Pro)">Lossless (Pro)</option>
+                  <option value="Lossless (Master)">Lossless (Master)</option>
                 </select>
               </div>
 
@@ -138,20 +137,6 @@ export const StepExport: React.FC = () => {
                   <FolderOpen className="w-4 h-4" />
                 </button>
               </div>
-            </div>
-
-            {/* Remove Watermark Toggle */}
-            <div className="flex items-center justify-between p-3 rounded-xl bg-slate-950 border border-slate-800">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-medium text-slate-200">Remove Watermark</span>
-                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-600 text-white">Pro</span>
-              </div>
-              <input
-                type="checkbox"
-                checked={settings.removeWatermark}
-                onChange={(e) => setSettings({ ...settings, removeWatermark: e.target.checked })}
-                className="w-4 h-4 accent-indigo-600 rounded cursor-pointer"
-              />
             </div>
 
             {/* Export Action Button */}

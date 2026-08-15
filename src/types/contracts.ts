@@ -199,8 +199,7 @@ export interface ExportSettings {
   resolution: '1080p (1920x1080)' | '4K (3840x2160)' | '720p (1280x720)';
   fps: 24 | 30 | 60;
   codec: 'H.264 (AVC)' | 'HEVC (H.265)' | 'Apple ProRes';
-  quality: 'High Quality' | 'Standard' | 'Lossless (Pro)';
+  quality: 'High Quality' | 'Standard' | 'Lossless (Master)';
   audioOption: 'Preserve Original Audio' | 'AI Enhanced Audio';
-  removeWatermark: boolean;
   outputDirectory?: string;
 }
