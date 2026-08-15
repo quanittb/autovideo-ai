@@ -268,9 +268,12 @@ export const MediaVerificationRunner: React.FC = () => {
 
             <VideoDropZone
               onVideoSelected={async (path) => {
-                if (activeProject) {
-                  await importMediaToProject(activeProject.id, path);
-                  addLog(`✓ Video imported into project: ${path}`);
+                try {
+                  const targetId = activeProject?.id || 'proj-fox-rabbit';
+                  const imported = await importMediaToProject(targetId, path);
+                  addLog(`✓ Video imported into project [${imported.id}]: ${path}`);
+                } catch (err: any) {
+                  addLog(`✗ Import error: ${err?.message || err}`);
                 }
               }}
               hasImportedVideo={!!sourceMedia}

@@ -86,21 +86,77 @@ pub fn delete_project(id: String) -> Result<(), AppError> {
 
 #[command]
 pub fn probe_media(file_path: String) -> Result<MediaMetadata, AppError> {
+    let raw_path = PathBuf::from(&file_path);
+    let target_path = if raw_path.is_dir() {
+        let mut found_video: Option<PathBuf> = None;
+        if let Ok(entries) = std::fs::read_dir(&raw_path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                        if crate::media::SUPPORTED_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
+                            found_video = Some(p);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        found_video.ok_or_else(|| {
+            AppError::invalid_input(format!("Thư mục '{}' không chứa tệp video hợp lệ (MP4, MOV, AVI, MKV)", raw_path.display()))
+        })?
+    } else {
+        raw_path
+    };
+
     let media_service = MediaService::new();
-    let path = PathBuf::from(&file_path);
-    media_service.probe(&path)
+    media_service.probe(&target_path)
 }
 
 #[command]
 pub fn import_media(project_id: String, file_path: String) -> Result<Project, AppError> {
     let storage_paths = StoragePaths::default_paths();
     let manager = ProjectManager::new(storage_paths);
-    let mut project = manager.get_project(&project_id)?;
+    
+    // Auto-create project if the ID is a mock fixture (e.g. proj-fox-rabbit) or missing
+    let mut project = match manager.get_project(&project_id) {
+        Ok(p) => p,
+        Err(_) => {
+            let base_name = std::path::Path::new(&file_path)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("Imported Project");
+            manager.create_project(base_name)?
+        }
+    };
+
+    let target_id = project.id.clone();
+    let proj_dir = manager.project_dir(&target_id);
+
+    let raw_path = PathBuf::from(&file_path);
+    let source_file = if raw_path.is_dir() {
+        let mut found_video: Option<PathBuf> = None;
+        if let Ok(entries) = std::fs::read_dir(&raw_path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                        if crate::media::SUPPORTED_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
+                            found_video = Some(p);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        found_video.ok_or_else(|| {
+            AppError::invalid_input(format!("Thư mục '{}' không chứa tệp video hợp lệ (MP4, MOV, AVI, MKV)", raw_path.display()))
+        })?
+    } else {
+        raw_path
+    };
 
     let media_service = MediaService::new();
-    let proj_dir = manager.project_dir(&project_id);
-    let source_file = PathBuf::from(&file_path);
-
     let source_media = media_service.import_to_project(&proj_dir, &source_file)?;
 
     project.source_media = Some(source_media);

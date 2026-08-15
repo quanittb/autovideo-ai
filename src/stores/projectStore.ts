@@ -212,7 +212,15 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   importMediaToProject: async (projectId: string, filePath: string) => {
     set({ isLoading: true, error: null });
     try {
-      const updated = await invokeCommand<Project>('import_media', { projectId, filePath });
+      let targetProjectId = projectId;
+      const current = get().activeProject;
+      if (!targetProjectId || targetProjectId === 'proj-fox-rabbit' || current?.isFixture) {
+        const baseName = filePath.split(/[\\/]/).pop() || 'Untitled Transformation';
+        const created = await get().createNewProject(baseName);
+        targetProjectId = created.id;
+      }
+
+      const updated = await invokeCommand<Project>('import_media', { projectId: targetProjectId, filePath });
       const enriched: Project = {
         ...updated,
         scenes: updated.scenes || defaultScenes,
@@ -220,11 +228,24 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       };
       set((state) => ({
         activeProject: enriched,
-        projects: state.projects.map((p) =>
-          p.id === projectId
-            ? { ...p, status: updated.status, updatedAt: updated.updatedAt }
-            : p
-        ),
+        projects: state.projects.some((p) => p.id === enriched.id)
+          ? state.projects.map((p) =>
+              p.id === enriched.id
+                ? { ...p, name: enriched.name, status: enriched.status, updatedAt: enriched.updatedAt }
+                : p
+            )
+          : [
+              {
+                id: enriched.id,
+                name: enriched.name,
+                createdAt: enriched.createdAt,
+                updatedAt: enriched.updatedAt,
+                status: enriched.status,
+                hasOutput: false,
+                isFixture: false,
+              },
+              ...state.projects,
+            ],
         isLoading: false,
       }));
       return enriched;
