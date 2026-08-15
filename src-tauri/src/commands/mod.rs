@@ -219,3 +219,24 @@ pub fn persist_editor_state(
     manager.update_project(&project)?;
     Ok(())
 }
+
+#[command]
+pub fn render_test_video(request: crate::render::RenderRequest) -> Result<crate::render::RenderResult, AppError> {
+    let storage_paths = StoragePaths::default_paths();
+    let manager = ProjectManager::new(storage_paths);
+    let mut project = manager.get_project(&request.project_id)?;
+    let proj_dir = manager.project_dir(&request.project_id);
+
+    let source_media = project.source_media.clone().ok_or_else(|| {
+        AppError::invalid_input("Project does not have an imported source media file")
+    })?;
+
+    let render_service = crate::render::RenderService::new();
+    let result = render_service.render_video(&proj_dir, &source_media, &request)?;
+
+    // Append generated project output to project model
+    project.outputs.push(result.project_output.clone());
+    let _ = manager.update_project(&project);
+
+    Ok(result)
+}

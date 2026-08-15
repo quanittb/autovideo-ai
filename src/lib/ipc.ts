@@ -62,6 +62,14 @@ export const editorApi = {
   },
 };
 
+export const renderApi = {
+  renderTestVideo: async (
+    request: import('../types/contracts').RenderRequest
+  ): Promise<import('../types/contracts').RenderResult> => {
+    return await invoke<import('../types/contracts').RenderResult>('render_test_video', { request });
+  },
+};
+
 export const api = {
   getAppInfo: async (): Promise<AppInfo> => {
     try {

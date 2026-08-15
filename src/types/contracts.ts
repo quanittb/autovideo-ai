@@ -26,6 +26,13 @@ export type ErrorCode =
   | 'NO_AUDIO_STREAM'
   | 'MEDIA_CACHE_FAILED'
   | 'MEDIA_PROCESS_CANCELLED'
+  | 'RENDER_FAILED'
+  | 'RENDER_CANCELLED'
+  | 'OUTPUT_INVALID'
+  | 'OUTPUT_NOT_FOUND'
+  | 'OUTPUT_METADATA_FAILED'
+  | 'AUDIO_MUX_FAILED'
+  | 'FRAME_SEQUENCE_INVALID'
   | 'UNKNOWN_ERROR';
 
 export interface ExecutableStatus {
@@ -100,6 +107,59 @@ export interface MediaCacheManifest {
   generatedAt: string;
   frames?: FrameExtractionResult;
   audio?: AudioExtractionResult;
+}
+
+export interface RenderRequest {
+  projectId: string;
+  mediaId: string;
+  frameDirectory?: string;
+  audioPath?: string;
+  fps?: number;
+  width?: number;
+  height?: number;
+  outputFormat?: string;
+  outputName?: string;
+}
+
+export interface RenderOutputMetadata {
+  valid: boolean;
+  outputPath: string;
+  durationMs: number;
+  durationSeconds: number;
+  width: number;
+  height: number;
+  fps: number;
+  videoCodec: string;
+  audioCodec?: string;
+  hasAudio: boolean;
+  fileSizeBytes: number;
+  createdAt: string;
+}
+
+export interface SourceVsOutputComparison {
+  sourceDurationSeconds: number;
+  outputDurationSeconds: number;
+  durationDeltaSeconds: number;
+  sourceResolution: string;
+  outputResolution: string;
+  sourceFps: number;
+  outputFps: number;
+  sourceHasAudio: boolean;
+  outputHasAudio: boolean;
+  resolutionMatches: boolean;
+  fpsMatches: boolean;
+  audioMatches: boolean;
+  isCompatible: boolean;
+}
+
+export interface RenderResult {
+  jobId: string;
+  projectId: string;
+  mediaId: string;
+  outputMetadata: RenderOutputMetadata;
+  comparison: SourceVsOutputComparison;
+  manifestPath: string;
+  projectOutput: ProjectOutput;
 }
 
 export interface MediaMetadata {

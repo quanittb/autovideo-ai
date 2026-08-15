@@ -7,6 +7,7 @@ pub mod jobs;
 pub mod media;
 pub mod models;
 pub mod projects;
+pub mod render;
 pub mod runtime;
 pub mod system;
 
@@ -38,6 +39,7 @@ pub fn run() {
             open_directory,
             resolve_project_media,
             persist_editor_state,
+            render_test_video,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   CheckCircle2, 
   XCircle, 
@@ -8,17 +8,20 @@ import {
   Film, 
   RotateCw, 
   Sliders, 
-  FileCode,
-  ShieldCheck,
-  Loader2
+  FileCode, 
+  ShieldCheck, 
+  Video, 
+  Loader2 
 } from 'lucide-react';
-import { mediaApi } from '../../lib/ipc';
+import { convertFileSrc } from '@tauri-apps/api/core';
+import { mediaApi, renderApi } from '../../lib/ipc';
 import { useProjectStore } from '../../stores/projectStore';
 import { 
   CacheValidationReport, 
   FrameExtractionResult, 
   AudioExtractionResult, 
-  MediaRuntimeStatus 
+  MediaRuntimeStatus,
+  RenderResult 
 } from '../../types/contracts';
 import { VideoDropZone } from './components/VideoDropZone';
 
@@ -31,6 +34,10 @@ export const MediaVerificationRunner: React.FC = () => {
   const [audioResult, setAudioResult] = useState<AudioExtractionResult | null>(null);
   const [validationReport, setValidationReport] = useState<CacheValidationReport | null>(null);
   const [prepStatus, setPrepStatus] = useState<'idle' | 'running' | 'pass' | 'fail'>('idle');
+  const [renderResult, setRenderResult] = useState<RenderResult | null>(null);
+  const [isRendering, setIsRendering] = useState(false);
+
+  const outputVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const addLog = (msg: string) => {
     const time = new Date().toLocaleTimeString();
@@ -128,8 +135,38 @@ export const MediaVerificationRunner: React.FC = () => {
     }
   };
 
+  const handleRenderVideo = async () => {
+    if (!activeProject || !activeProject.sourceMedia) {
+      addLog('✗ Error: No active project with imported media');
+      return;
+    }
+    setIsRendering(true);
+    addLog('Executing REAL Video Reconstruction (Phase 4C RenderService)...');
+    addLog('Reading extracted PNG frame sequence + source.wav...');
+    try {
+      const result = await renderApi.renderTestVideo({
+        projectId: activeProject.id,
+        mediaId: activeProject.sourceMedia.mediaId,
+        fps: activeProject.sourceMedia.fps || 30.0,
+        outputFormat: 'mp4',
+        outputName: 'reconstructed.mp4',
+      });
+      setRenderResult(result);
+      addLog(`✓ Render Succeeded: ${result.outputMetadata.outputPath}`);
+      addLog(`✓ Metadata: ${result.outputMetadata.width}x${result.outputMetadata.height}, ${result.outputMetadata.durationSeconds.toFixed(2)}s, ${result.outputMetadata.videoCodec}, ${result.outputMetadata.fileSizeBytes} bytes`);
+      addLog(`✓ Source vs Output Comparison: ${result.comparison.isCompatible ? 'COMPATIBLE' : 'MISMATCH'}`);
+    } catch (err: any) {
+      addLog(`✗ Video render failed: ${err?.message || err}`);
+    } finally {
+      setIsRendering(false);
+    }
+  };
+
   const handleOpenFolder = async () => {
-    const targetDir = validationReport?.mediaCacheDir;
+    const targetDir = renderResult?.outputMetadata.outputPath 
+      ? renderResult.outputMetadata.outputPath.substring(0, renderResult.outputMetadata.outputPath.lastIndexOf('\\'))
+      : validationReport?.mediaCacheDir;
+
     if (!targetDir) {
       addLog('✗ No output folder known yet. Run tests first.');
       return;
@@ -144,12 +181,13 @@ export const MediaVerificationRunner: React.FC = () => {
 
   const handleRunAllTests = async () => {
     setIsRunning(true);
-    addLog('=== STARTING FULL MEDIA ENGINE VERIFICATION SUITE ===');
+    addLog('=== STARTING FULL MEDIA ENGINE & RENDER VERIFICATION SUITE ===');
     await handleCheckRuntime();
     await handlePrepareMedia();
     await handleExtractFrames();
     await handleExtractAudio();
     await handleValidateCache();
+    await handleRenderVideo();
     addLog('=== ALL VERIFICATION TESTS COMPLETED ===');
     setIsRunning(false);
   };
@@ -171,6 +209,7 @@ export const MediaVerificationRunner: React.FC = () => {
   }, []);
 
   const sourceMedia = activeProject?.sourceMedia;
+  const outputSrc = renderResult ? convertFileSrc(renderResult.outputMetadata.outputPath) : null;
 
   return (
     <div className="flex-1 overflow-y-auto p-8 space-y-6 bg-slate-950 text-slate-100 font-sans">
@@ -178,22 +217,22 @@ export const MediaVerificationRunner: React.FC = () => {
       <div className="flex items-center justify-between pb-4 border-b border-slate-800">
         <div>
           <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold tracking-tight text-white">Media Engine Verification Runner</h1>
+            <h1 className="text-2xl font-bold tracking-tight text-white">Media Engine & Render Verification Runner</h1>
             <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
-              PHASE 4A REAL FFMPEG CORE
+              PHASE 4C REAL RECONSTRUCTION
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Real process execution test runner: verifies FFmpeg discovery, frame extraction (2 FPS, 0-3s), audio extraction, binary headers, and cache manifests.
+            End-to-end media synthesis test runner: extraction, audio demuxing, frame sequence re-encoding (libx264), audio muxing (AAC), and FFprobe validation.
           </p>
         </div>
 
         <button
           onClick={handleRunAllTests}
           disabled={isRunning || !sourceMedia}
-          className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-xs font-bold shadow-lg shadow-purple-900/30 flex items-center gap-2 disabled:opacity-50 transition-all"
+          className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-xs font-bold shadow-lg shadow-purple-900/30 flex items-center gap-2 disabled:opacity-50 transition-all cursor-pointer"
         >
-          {isRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
+          {isRunning || isRendering ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
           <span>Run All Tests</span>
         </button>
       </div>
@@ -247,11 +286,11 @@ export const MediaVerificationRunner: React.FC = () => {
 
           {/* Test Control Action Buttons */}
           <div className="p-5 rounded-2xl bg-slate-900/60 border border-slate-800 space-y-3">
-            <span className="text-xs font-bold text-slate-200 block">Manual Test Controls</span>
+            <span className="text-xs font-bold text-slate-200 block">Manual Pipeline Controls</span>
             <div className="grid grid-cols-2 gap-2 text-xs">
               <button
                 onClick={handleCheckRuntime}
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 transition-colors"
+                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 transition-colors cursor-pointer"
               >
                 <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
                 <span>Check FFmpeg/probe</span>
@@ -260,7 +299,7 @@ export const MediaVerificationRunner: React.FC = () => {
               <button
                 onClick={handlePrepareMedia}
                 disabled={!sourceMedia}
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors"
+                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors cursor-pointer"
               >
                 <Sliders className="w-3.5 h-3.5 text-sky-400" />
                 <span>Prepare Media</span>
@@ -269,7 +308,7 @@ export const MediaVerificationRunner: React.FC = () => {
               <button
                 onClick={handleExtractFrames}
                 disabled={!sourceMedia}
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors"
+                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors cursor-pointer"
               >
                 <Film className="w-3.5 h-3.5 text-purple-400" />
                 <span>Extract Test Frames</span>
@@ -278,16 +317,26 @@ export const MediaVerificationRunner: React.FC = () => {
               <button
                 onClick={handleExtractAudio}
                 disabled={!sourceMedia}
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors"
+                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors cursor-pointer"
               >
                 <FileCode className="w-3.5 h-3.5 text-amber-400" />
                 <span>Extract Audio</span>
               </button>
 
+              {/* Phase 4C Reconstruction Control */}
+              <button
+                onClick={handleRenderVideo}
+                disabled={!sourceMedia || isRendering}
+                className="p-2.5 rounded-xl bg-gradient-to-r from-purple-900/40 to-indigo-900/40 hover:from-purple-900/60 hover:to-indigo-900/60 border border-purple-500/40 text-purple-200 font-semibold text-left flex items-center gap-2 disabled:opacity-40 transition-colors cursor-pointer col-span-2"
+              >
+                {isRendering ? <Loader2 className="w-3.5 h-3.5 animate-spin text-purple-400" /> : <Video className="w-3.5 h-3.5 text-purple-400" />}
+                <span>Render Test Video (Frames + Audio → MP4)</span>
+              </button>
+
               <button
                 onClick={handleOpenFolder}
-                disabled={!validationReport}
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors"
+                disabled={!validationReport && !renderResult}
+                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors cursor-pointer"
               >
                 <FolderOpen className="w-3.5 h-3.5 text-emerald-400" />
                 <span>Open Output Folder</span>
@@ -296,7 +345,7 @@ export const MediaVerificationRunner: React.FC = () => {
               <button
                 onClick={handleReloadProject}
                 disabled={!activeProject}
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors"
+                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors cursor-pointer"
               >
                 <RotateCw className="w-3.5 h-3.5 text-rose-400" />
                 <span>Reload Project</span>
@@ -305,7 +354,7 @@ export const MediaVerificationRunner: React.FC = () => {
           </div>
         </div>
 
-        {/* Right Column (7 cols): Result Dashboard & Live Terminal */}
+        {/* Right Column (7 cols): Result Dashboard & Reconstructed Player */}
         <div className="lg:col-span-7 space-y-5">
           {/* Result Status Dashboard */}
           <div className="p-5 rounded-2xl bg-slate-900/60 border border-slate-800 space-y-4">
@@ -384,7 +433,7 @@ export const MediaVerificationRunner: React.FC = () => {
                   )}
                 </div>
                 <p className="text-[10px] text-slate-500 font-mono">
-                  {frameResult ? `000000.png..00000${frameResult.frameCount - 1}.png • ${frameResult.fps} FPS` : 'Format: PNG @ 2 FPS'}
+                  {frameResult ? `000000.png..00000${frameResult.frameCount - 1}.png` : 'Format: PNG'}
                 </p>
               </div>
 
@@ -401,29 +450,57 @@ export const MediaVerificationRunner: React.FC = () => {
                   )}
                 </div>
                 <p className="text-[10px] text-slate-500 font-mono">
-                  {audioResult?.hasAudio ? 'source.wav (16-bit PCM)' : 'Safe No-Audio Handling'}
+                  {audioResult?.hasAudio ? 'source.wav (16-bit PCM)' : 'Audio Extraction'}
+                </p>
+              </div>
+
+              {/* Phase 4C Video Reconstruction status */}
+              <div className="p-3.5 rounded-xl bg-purple-950/30 border border-purple-800/50 space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-purple-200">Reconstruction Engine</span>
+                  {renderResult ? (
+                    <span className="text-emerald-400 flex items-center gap-1 font-mono font-bold text-[11px]">
+                      <CheckCircle2 className="w-3.5 h-3.5" /> PASS
+                    </span>
+                  ) : (
+                    <span className="text-slate-500 text-[11px]">{isRendering ? 'Encoding MP4...' : 'Ready'}</span>
+                  )}
+                </div>
+                <p className="text-[10px] text-purple-400/80 font-mono">
+                  {renderResult ? `reconstructed.mp4 • ${renderResult.outputMetadata.videoCodec.toUpperCase()}` : 'FFmpeg Re-Encode & Mux'}
                 </p>
               </div>
             </div>
 
-            {/* Output Directory Banner */}
-            {validationReport && (
-              <div className="p-3.5 rounded-xl bg-indigo-950/40 border border-indigo-500/30 flex items-center justify-between text-xs">
-                <div className="space-y-0.5 min-w-0 pr-3">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300 block">
-                    Verified Output Cache Location
+            {/* Reconstructed Video Player Preview */}
+            {renderResult && outputSrc && (
+              <div className="p-4 rounded-xl bg-slate-950 border border-purple-500/30 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-purple-300 flex items-center gap-1.5">
+                    <Video className="w-3.5 h-3.5" />
+                    <span>Reconstructed Output Video Player</span>
                   </span>
-                  <p className="font-mono text-[11px] text-slate-300 truncate">
-                    {validationReport.mediaCacheDir}
-                  </p>
+                  <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                    REAL MP4 OUTPUT
+                  </span>
                 </div>
-                <button
-                  onClick={handleOpenFolder}
-                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shrink-0 flex items-center gap-1.5"
-                >
-                  <FolderOpen className="w-3.5 h-3.5" />
-                  <span>Open Folder</span>
-                </button>
+
+                <div className="relative rounded-lg overflow-hidden bg-black aspect-video max-h-56 flex items-center justify-center">
+                  <video
+                    ref={outputVideoRef}
+                    src={outputSrc}
+                    controls
+                    playsInline
+                    className="w-full h-full object-contain"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-[10px] font-mono text-slate-400 pt-1">
+                  <div>Duration: <span className="text-slate-200">{renderResult.outputMetadata.durationSeconds.toFixed(2)}s</span></div>
+                  <div>Resolution: <span className="text-slate-200">{renderResult.outputMetadata.width}×{renderResult.outputMetadata.height}</span></div>
+                  <div>FPS: <span className="text-slate-200">{renderResult.outputMetadata.fps}</span></div>
+                  <div>Size: <span className="text-slate-200">{(renderResult.outputMetadata.fileSizeBytes / 1024).toFixed(1)} KB</span></div>
+                </div>
               </div>
             )}
           </div>
@@ -437,7 +514,7 @@ export const MediaVerificationRunner: React.FC = () => {
               </div>
               <button
                 onClick={() => setLogLines([])}
-                className="text-[10px] text-slate-500 hover:text-slate-400 font-mono"
+                className="text-[10px] text-slate-500 hover:text-slate-400 font-mono cursor-pointer"
               >
                 Clear
               </button>

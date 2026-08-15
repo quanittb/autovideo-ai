@@ -31,6 +31,13 @@ pub enum ErrorCode {
     NoAudioStream,
     MediaCacheFailed,
     MediaProcessCancelled,
+    RenderFailed,
+    RenderCancelled,
+    OutputInvalid,
+    OutputNotFound,
+    OutputMetadataFailed,
+    AudioMuxFailed,
+    FrameSequenceInvalid,
     UnknownError,
 }
 
@@ -196,6 +203,34 @@ impl AppError {
     pub fn media_process_cancelled(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::MediaProcessCancelled, msg)
     }
+
+    pub fn render_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::RenderFailed, msg, details)
+    }
+
+    pub fn render_cancelled() -> Self {
+        Self::new(ErrorCode::RenderCancelled, "Video render operation was cancelled")
+    }
+
+    pub fn output_invalid(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::OutputInvalid, msg, details)
+    }
+
+    pub fn output_not_found(path: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::OutputNotFound, "Render output file was not found on disk", path)
+    }
+
+    pub fn output_metadata_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::OutputMetadataFailed, msg, details)
+    }
+
+    pub fn audio_mux_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::AudioMuxFailed, msg, details)
+    }
+
+    pub fn frame_sequence_invalid(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::FrameSequenceInvalid, msg, details)
+    }
 }
 
 #[cfg(test)]
@@ -225,12 +260,12 @@ mod tests {
     }
 
     #[test]
-    fn test_media_errors() {
+    fn test_media_and_render_errors() {
         let err = AppError::media_too_large(3_000_000_000, 2_147_483_648);
         assert_eq!(err.code, ErrorCode::MediaTooLarge);
         assert!(err.details.unwrap().contains("Maximum allowed"));
 
-        let ffmpeg_err = AppError::ffmpeg_not_available("ffmpeg binary missing");
-        assert_eq!(ffmpeg_err.code, ErrorCode::FfmpegNotAvailable);
+        let render_err = AppError::render_failed("Encoding failed", "Non-zero exit code");
+        assert_eq!(render_err.code, ErrorCode::RenderFailed);
     }
 }
