@@ -1,17 +1,18 @@
 import React, { useState } from 'react';
 import { 
-  UploadCloud, 
   CheckCircle2, 
   Film, 
   Play, 
   Volume2, 
   Maximize2, 
   AlertTriangle,
-  AlertCircle
+  AlertCircle,
+  FolderOpen
 } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useUiStore } from '../../stores/uiStore';
 import { MockBadge } from '../../components/common/MockBadge';
+import { VideoDropZone } from '../media/components/VideoDropZone';
 
 export const StepUpload: React.FC = () => {
   const { activeProject, importMediaToProject, isLoading, error } = useProjectStore();
@@ -28,13 +29,10 @@ export const StepUpload: React.FC = () => {
 
   const sourceMedia = activeProject?.sourceMedia;
 
-  const handleSimulateImport = async (samplePath: string) => {
+  // Single authoritative import handler for Native Dialog, Drag & Drop, and Manual Path
+  const handleProcessImport = async (targetPath: string) => {
     if (!activeProject) return;
-    try {
-      await importMediaToProject(activeProject.id, samplePath);
-    } catch (err) {
-      console.error('Import failed:', err);
-    }
+    await importMediaToProject(activeProject.id, targetPath);
   };
 
   const isWebviewPlayable = sourceMedia
@@ -64,49 +62,43 @@ export const StepUpload: React.FC = () => {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
-        {/* Left: Dropzone & Tips */}
+        {/* Left: Interactive Dropzone & Tips */}
         <div className="space-y-6">
-          <div 
-            onClick={() => setShowManualPathInput(!showManualPathInput)}
-            className="border-2 border-dashed border-slate-700 hover:border-indigo-500/80 rounded-2xl p-10 bg-slate-900/40 hover:bg-slate-900/60 transition-all flex flex-col items-center justify-center text-center group cursor-pointer"
-          >
-            <div className="w-16 h-16 rounded-2xl bg-indigo-600/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform shadow-lg shadow-indigo-900/20">
-              <UploadCloud className="w-8 h-8" />
-            </div>
-            <h3 className="text-lg font-semibold text-slate-200">
-              {sourceMedia ? 'Replace Video File' : 'Drag & drop your video here'}
-            </h3>
-            <p className="text-xs text-indigo-400 font-medium mt-1">
-              or click to specify file path
-            </p>
-            <div className="mt-6 pt-4 border-t border-slate-800/80 text-xs text-slate-500 space-y-1">
-              <p>Accepted formats: <strong>MP4, MOV, AVI, MKV</strong></p>
-              <p>Max file size: <strong>2 GB</strong> • Recommended: <strong>30–90 seconds</strong></p>
-            </div>
-          </div>
+          <VideoDropZone
+            onVideoSelected={handleProcessImport}
+            hasImportedVideo={!!sourceMedia}
+            disabled={isLoading}
+          />
 
-          {/* Quick File Path Importer for Desktop Testing */}
-          {showManualPathInput && (
-            <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
-              <span className="text-xs font-semibold text-slate-200 block">Import From File Path</span>
-              <div className="flex items-center gap-2">
+          {/* Quick Manual File Path Importer (Secondary option) */}
+          <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
+            <button
+              onClick={() => setShowManualPathInput(!showManualPathInput)}
+              className="text-xs text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1.5 transition-colors"
+            >
+              <FolderOpen className="w-3.5 h-3.5" />
+              <span>{showManualPathInput ? 'Hide manual path input' : 'Enter manual file path'}</span>
+            </button>
+
+            {showManualPathInput && (
+              <div className="flex items-center gap-2 pt-1">
                 <input
                   type="text"
                   value={inputPath}
                   onChange={(e) => setInputPath(e.target.value)}
-                  placeholder="e.g. C:/Videos/source_clip.mp4"
+                  placeholder="e.g. C:\Videos\source_clip.mp4"
                   className="flex-1 p-2 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono text-slate-200 focus:outline-none focus:border-indigo-500"
                 />
                 <button
-                  onClick={() => inputPath && handleSimulateImport(inputPath)}
+                  onClick={() => inputPath && handleProcessImport(inputPath)}
                   disabled={!inputPath || isLoading}
-                  className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50"
+                  className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50 transition-all"
                 >
                   Import
                 </button>
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
           <div className="p-6 rounded-2xl bg-slate-900/50 border border-slate-800/80 space-y-4">
             <h4 className="text-sm font-semibold text-slate-200">Tips for best AI results</h4>
