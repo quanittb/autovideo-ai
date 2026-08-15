@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import {
   AudioExtractionResult,
+  CacheValidationReport,
   FrameExtractionRequest,
   FrameExtractionResult,
   HardwareProfile,
@@ -37,6 +38,14 @@ export const mediaApi = {
 
   extractAudio: async (projectId: string, mediaId: string): Promise<AudioExtractionResult> => {
     return await invoke<AudioExtractionResult>('extract_media_audio', { projectId, mediaId });
+  },
+
+  validateCache: async (projectId: string, mediaId: string): Promise<CacheValidationReport> => {
+    return await invoke<CacheValidationReport>('validate_media_cache', { projectId, mediaId });
+  },
+
+  openDirectory: async (path: string): Promise<void> => {
+    return await invoke<void>('open_directory', { path });
   },
 };
 

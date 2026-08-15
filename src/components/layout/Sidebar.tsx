@@ -24,6 +24,7 @@ export const Sidebar: React.FC = () => {
     { id: 'projects', label: 'Projects', icon: <FolderKanban className="w-4 h-4" /> },
     { id: 'jobs', label: 'Jobs & Pipeline', icon: <Activity className="w-4 h-4" /> },
     { id: 'models', label: 'AI Models', icon: <Cpu className="w-4 h-4" /> },
+    { id: 'verification', label: 'Media Engine Test', icon: <Activity className="w-4 h-4 text-purple-400" /> },
     { id: 'settings', label: 'Settings', icon: <SettingsIcon className="w-4 h-4" /> },
   ];
 

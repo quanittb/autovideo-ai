@@ -68,6 +68,30 @@ export interface AudioExtractionResult {
   isCached: boolean;
 }
 
+export interface FrameFileInfo {
+  fileName: string;
+  path: string;
+  sizeBytes: number;
+  hasValidPngHeader: boolean;
+}
+
+export interface AudioFileInfo {
+  fileName: string;
+  path: string;
+  sizeBytes: number;
+  hasValidWavHeader: boolean;
+}
+
+export interface CacheValidationReport {
+  mediaCacheDir: string;
+  manifestExists: boolean;
+  isManifestValid: boolean;
+  totalFramesOnDisk: number;
+  frames: FrameFileInfo[];
+  audio?: AudioFileInfo;
+  allPassed: boolean;
+}
+
 export interface MediaCacheManifest {
   schemaVersion: number;
   mediaId: string;

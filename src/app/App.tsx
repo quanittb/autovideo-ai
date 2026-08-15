@@ -8,6 +8,7 @@ import { ResultView } from '../features/result/ResultView';
 import { StepExport } from '../features/export/StepExport';
 import { SettingsView } from '../features/settings/SettingsView';
 import { ModelsView } from '../features/models/ModelsView';
+import { MediaVerificationRunner } from '../features/media/MediaVerificationRunner';
 import { useUiStore } from '../stores/uiStore';
 
 export const App: React.FC = () => {
@@ -17,6 +18,8 @@ export const App: React.FC = () => {
     switch (activeTab) {
       case 'home':
         return <HomeView />;
+      case 'verification':
+        return <MediaVerificationRunner />;
       case 'settings':
         return <SettingsView />;
       case 'models':

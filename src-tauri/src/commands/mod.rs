@@ -1,11 +1,12 @@
 use std::path::PathBuf;
+use std::process::Command as StdCommand;
 use serde::{Deserialize, Serialize};
 use tauri::command;
 
 use crate::error::AppError;
 use crate::media::{
-    AudioExtractionResult, FrameExtractionRequest, FrameExtractionResult, MediaMetadata,
-    MediaRuntimeStatus, MediaService,
+    AudioExtractionResult, CacheValidationReport, FrameExtractionRequest, FrameExtractionResult,
+    MediaMetadata, MediaRuntimeStatus, MediaService,
 };
 use crate::models::{ModelDescriptor, ModelManager};
 use crate::projects::{Project, ProjectManager, ProjectStatus, ProjectSummary};
@@ -153,4 +154,39 @@ pub fn extract_media_audio(project_id: String, media_id: String) -> Result<Audio
 
     let media_service = MediaService::new();
     media_service.extract_audio(&proj_dir, &source_media.source_path, &media_id)
+}
+
+#[command]
+pub fn validate_media_cache(project_id: String, media_id: String) -> Result<CacheValidationReport, AppError> {
+    let storage_paths = StoragePaths::default_paths();
+    let manager = ProjectManager::new(storage_paths);
+    let proj_dir = manager.project_dir(&project_id);
+
+    let media_service = MediaService::new();
+    media_service.validate_media_cache(&proj_dir, &media_id)
+}
+
+#[command]
+pub fn open_directory(path: String) -> Result<(), AppError> {
+    let target = PathBuf::from(&path);
+    if !target.exists() {
+        return Err(AppError::file_not_found(path));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = StdCommand::new("explorer").arg(&path).spawn();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = StdCommand::new("open").arg(&path).spawn();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = StdCommand::new("xdg-open").arg(&path).spawn();
+    }
+
+    Ok(())
 }

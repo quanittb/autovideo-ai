@@ -34,6 +34,8 @@ pub fn run() {
             prepare_media,
             extract_media_frames,
             extract_media_audio,
+            validate_media_cache,
+            open_directory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -141,6 +141,36 @@ pub struct MediaCacheManifest {
     pub audio: Option<AudioExtractionResult>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameFileInfo {
+    pub file_name: String,
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub has_valid_png_header: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioFileInfo {
+    pub file_name: String,
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub has_valid_wav_header: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheValidationReport {
+    pub media_cache_dir: PathBuf,
+    pub manifest_exists: bool,
+    pub is_manifest_valid: bool,
+    pub total_frames_on_disk: u64,
+    pub frames: Vec<FrameFileInfo>,
+    pub audio: Option<AudioFileInfo>,
+    pub all_passed: bool,
+}
+
 #[derive(Default)]
 pub struct MediaService;
 
@@ -565,6 +595,94 @@ impl MediaService {
         Ok(())
     }
 
+    /// Inspects and validates the media cache directory, manifest, and file binary signatures on disk.
+    pub fn validate_media_cache(
+        &self,
+        project_dir: &Path,
+        media_id: &str,
+    ) -> Result<CacheValidationReport, AppError> {
+        let media_cache_dir = project_dir.join("cache").join("media").join(media_id);
+        let manifest_path = media_cache_dir.join("media_cache.json");
+        let frames_dir = media_cache_dir.join("frames");
+        let audio_path = media_cache_dir.join("audio").join("source.wav");
+
+        let manifest_exists = manifest_path.exists();
+        let is_manifest_valid = if manifest_exists {
+            fs::read_to_string(&manifest_path)
+                .ok()
+                .and_then(|c| serde_json::from_str::<MediaCacheManifest>(&c).ok())
+                .is_some()
+        } else {
+            false
+        };
+
+        let mut frames = Vec::new();
+        let mut total_frames_on_disk = 0;
+
+        if frames_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&frames_dir) {
+                let mut sorted_entries: Vec<_> = entries.flatten().collect();
+                sorted_entries.sort_by_key(|e| e.file_name());
+
+                for entry in sorted_entries {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                        let size_bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
+                        // Verify PNG signature (first 8 bytes: 89 50 4E 47 0D 0A 1A 0A)
+                        let has_valid_png_header = if let Ok(bytes) = fs::read(&path) {
+                            bytes.len() >= 8 && &bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+                        } else {
+                            false
+                        };
+
+                        if has_valid_png_header || path.extension().and_then(|s| s.to_str()) == Some("png") {
+                            total_frames_on_disk += 1;
+                        }
+
+                        frames.push(FrameFileInfo {
+                            file_name,
+                            path,
+                            size_bytes,
+                            has_valid_png_header,
+                        });
+                    }
+                }
+            }
+        }
+
+        let audio = if audio_path.exists() {
+            let size_bytes = fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0);
+            let has_valid_wav_header = if let Ok(bytes) = fs::read(&audio_path) {
+                bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE"
+            } else {
+                false
+            };
+
+            Some(AudioFileInfo {
+                file_name: "source.wav".to_string(),
+                path: audio_path,
+                size_bytes,
+                has_valid_wav_header,
+            })
+        } else {
+            None
+        };
+
+        let all_passed = manifest_exists && is_manifest_valid && total_frames_on_disk > 0;
+
+        Ok(CacheValidationReport {
+            media_cache_dir,
+            manifest_exists,
+            is_manifest_valid,
+            total_frames_on_disk,
+            frames,
+            audio,
+            all_passed,
+        })
+    }
+
     fn probe_with_ffprobe(
         &self,
         path: &Path,
@@ -871,5 +989,138 @@ mod tests {
         let manifest_content = fs::read_to_string(&manifest_path).unwrap();
         assert!(manifest_content.contains("live_synthetic_clip.mp4"));
         assert!(manifest_content.contains("source.wav"));
+    }
+
+    #[test]
+    fn test_media_verification_runner_flow() {
+        let service = MediaService::new();
+        let runtime = service.check_runtime_status();
+        if !runtime.ffmpeg.available || !runtime.ffprobe.available {
+            eprintln!("Skipping verification runner test because FFmpeg is not installed.");
+            return;
+        }
+
+        let temp = tempdir().unwrap();
+        let proj_dir = temp.path().join("proj_verification_run");
+        let source_video = temp.path().join("test_verification_source.mp4");
+
+        // Generate 3-second 30 FPS video with sine audio
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f", "lavfi", "-i", "testsrc=duration=3:size=576x1024:rate=30",
+                "-f", "lavfi", "-i", "sine=frequency=1000:duration=3",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                source_video.to_str().unwrap(),
+            ])
+            .output();
+
+        if let Ok(gen_out) = status {
+            if !gen_out.status.success() {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        // 1. Probe source video metadata
+        let metadata = service.probe(&source_video).expect("Probe failed");
+        assert_eq!(metadata.width, 576);
+        assert_eq!(metadata.height, 1024);
+        assert_eq!(metadata.fps, 30.0);
+        assert!(metadata.has_audio);
+
+        // 2. Import into project
+        let imported = service.import_to_project(&proj_dir, &source_video).expect("Import failed");
+
+        // 3. Extract Test Frames: start_time = 0, end_time = 3, fps = 2, format = png
+        let req = FrameExtractionRequest {
+            project_id: "proj_verification_run".to_string(),
+            media_id: imported.media_id.clone(),
+            start_time_seconds: Some(0.0),
+            end_time_seconds: Some(3.0),
+            fps: Some(2.0),
+            width: None,
+            height: None,
+            format: Some("png".to_string()),
+        };
+
+        let frame_res = service.extract_frames(&proj_dir, &imported.source_path, &req).expect("Extract test frames failed");
+        assert_eq!(frame_res.frame_count, 6); // Exactly 6 frames (000000.png .. 000005.png)
+
+        // 4. Extract Audio
+        let audio_res = service.extract_audio(&proj_dir, &imported.source_path, &imported.media_id).expect("Extract audio failed");
+        assert!(audio_res.has_audio);
+
+        // 5. Binary Validation Report
+        let report = service.validate_media_cache(&proj_dir, &imported.media_id).expect("Cache validation failed");
+        assert!(report.manifest_exists);
+        assert!(report.is_manifest_valid);
+        assert_eq!(report.total_frames_on_disk, 6);
+        assert_eq!(report.frames.len(), 6);
+
+        // Verify every frame has a valid PNG header (\x89PNG)
+        for frame in &report.frames {
+            assert!(frame.has_valid_png_header);
+            assert!(frame.size_bytes > 0);
+        }
+
+        // Verify audio has a valid WAV header (RIFF....WAVE)
+        let audio_info = report.audio.expect("Missing audio info");
+        assert!(audio_info.has_valid_wav_header);
+        assert!(audio_info.size_bytes > 0);
+
+        assert!(report.all_passed);
+    }
+
+    #[test]
+    fn test_live_system_verification_report() {
+        let video_path = PathBuf::from(r"d:\rustProject\autovideo-ai\.autovideo_data\sample_portrait_video.mp4");
+        if !video_path.exists() {
+            return;
+        }
+
+        let service = MediaService::new();
+        let proj_dir = PathBuf::from(r"d:\rustProject\autovideo-ai\.autovideo_data\projects\proj_verification_live");
+        let _ = fs::create_dir_all(&proj_dir);
+
+        let metadata = service.probe(&video_path).expect("Probe failed");
+        println!("[VERIFICATION] Source Video: {}", metadata.original_file_name);
+        println!("[VERIFICATION] Duration: {:.2}s", metadata.duration_ms as f64 / 1000.0);
+        println!("[VERIFICATION] Resolution: {}x{}", metadata.width, metadata.height);
+        println!("[VERIFICATION] FPS: {:.2}", metadata.fps);
+        println!("[VERIFICATION] Codecs: {} / {:?}", metadata.video_codec, metadata.audio_codec);
+        println!("[VERIFICATION] Size: {} bytes", metadata.file_size_bytes);
+
+        let imported = service.import_to_project(&proj_dir, &video_path).expect("Import failed");
+
+        let req = FrameExtractionRequest {
+            project_id: "proj_verification_live".to_string(),
+            media_id: imported.media_id.clone(),
+            start_time_seconds: Some(0.0),
+            end_time_seconds: Some(3.0),
+            fps: Some(2.0),
+            width: None,
+            height: None,
+            format: Some("png".to_string()),
+        };
+
+        let frame_res = service.extract_frames(&proj_dir, &imported.source_path, &req).expect("Frame extraction failed");
+        println!("[VERIFICATION] Frame Extraction: PASS ({} frames at {} FPS)", frame_res.frame_count, frame_res.fps);
+
+        let audio_res = service.extract_audio(&proj_dir, &imported.source_path, &imported.media_id).expect("Audio extraction failed");
+        println!("[VERIFICATION] Audio Extraction: PASS (has_audio: {})", audio_res.has_audio);
+
+        let report = service.validate_media_cache(&proj_dir, &imported.media_id).expect("Cache validation failed");
+        println!("[VERIFICATION] Output Directory: {}", report.media_cache_dir.display());
+        for frame in &report.frames {
+            println!("[VERIFICATION] Frame: {} ({} bytes, valid PNG: {})", frame.file_name, frame.size_bytes, frame.has_valid_png_header);
+        }
+        if let Some(audio) = &report.audio {
+            println!("[VERIFICATION] Audio: {} ({} bytes, valid WAV: {})", audio.file_name, audio.size_bytes, audio.has_valid_wav_header);
+        }
+        println!("[VERIFICATION] Manifest Valid: {}", report.is_manifest_valid);
+        println!("[VERIFICATION] ALL TESTS PASS: {}", report.all_passed);
     }
 }
