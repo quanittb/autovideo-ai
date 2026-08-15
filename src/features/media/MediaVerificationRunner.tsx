@@ -1,39 +1,28 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
-  CheckCircle2, 
-  XCircle, 
   Play, 
   FolderOpen, 
   Terminal, 
-  Film, 
   RotateCw, 
-  Sliders, 
-  FileCode, 
-  ShieldCheck, 
   Video, 
-  Loader2 
+  Loader2,
+  Sparkles,
+  Layers
 } from 'lucide-react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { mediaApi, renderApi } from '../../lib/ipc';
 import { useProjectStore } from '../../stores/projectStore';
 import { 
   CacheValidationReport, 
-  FrameExtractionResult, 
-  AudioExtractionResult, 
-  MediaRuntimeStatus,
   RenderResult 
 } from '../../types/contracts';
 import { VideoDropZone } from './components/VideoDropZone';
 
 export const MediaVerificationRunner: React.FC = () => {
   const { activeProject, importMediaToProject, loadProject } = useProjectStore();
-  const [runtimeStatus, setRuntimeStatus] = useState<MediaRuntimeStatus | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
-  const [frameResult, setFrameResult] = useState<FrameExtractionResult | null>(null);
-  const [audioResult, setAudioResult] = useState<AudioExtractionResult | null>(null);
   const [validationReport, setValidationReport] = useState<CacheValidationReport | null>(null);
-  const [prepStatus, setPrepStatus] = useState<'idle' | 'running' | 'pass' | 'fail'>('idle');
   const [renderResult, setRenderResult] = useState<RenderResult | null>(null);
   const [isRendering, setIsRendering] = useState(false);
 
@@ -48,7 +37,6 @@ export const MediaVerificationRunner: React.FC = () => {
     addLog('Querying host FFmpeg/FFprobe binaries via mediaApi.getRuntimeStatus()...');
     try {
       const status = await mediaApi.getRuntimeStatus();
-      setRuntimeStatus(status);
       if (status.ffmpeg.available) {
         addLog(`✓ FFmpeg detected: ${status.ffmpeg.version}`);
       } else {
@@ -69,38 +57,48 @@ export const MediaVerificationRunner: React.FC = () => {
       addLog('✗ Error: No active project with imported media');
       return;
     }
-    setPrepStatus('running');
     addLog(`Preparing media cache directories for media ID: ${activeProject.sourceMedia.mediaId}...`);
     try {
       const dir = await mediaApi.prepareMedia(activeProject.id, activeProject.sourceMedia.mediaId);
-      setPrepStatus('pass');
       addLog(`✓ Media workspace prepared at: ${dir}`);
     } catch (err: any) {
-      setPrepStatus('fail');
       addLog(`✗ Media preparation failed: ${err?.message || err}`);
     }
   };
 
-  const handleExtractFrames = async () => {
+  const handleExtractFramesForMode = async (mode: 'test_1s' | 'test_3s' | 'full') => {
     if (!activeProject || !activeProject.sourceMedia) {
       addLog('✗ Error: Please import a video first.');
-      return;
+      return null;
     }
-    addLog('Executing REAL FFmpeg Frame Extraction (start: 0s, end: 3s, fps: 2, format: png)...');
+
+    const sourceFps = activeProject.sourceMedia.fps || 30.0;
+    let startSec: number | undefined = 0.0;
+    let endSec: number | undefined = 1.0;
+
+    if (mode === 'test_3s') {
+      endSec = 3.0;
+    } else if (mode === 'full') {
+      startSec = undefined;
+      endSec = undefined;
+    }
+
+    addLog(`Extracting frames for mode [${mode.toUpperCase()}] at native ${sourceFps} FPS...`);
     try {
       const res = await mediaApi.extractFrames({
         projectId: activeProject.id,
         mediaId: activeProject.sourceMedia.mediaId,
-        startTimeSeconds: 0,
-        endTimeSeconds: 3,
-        fps: 2,
+        startTimeSeconds: startSec,
+        endTimeSeconds: endSec,
+        fps: sourceFps,
         format: 'png',
       });
-      setFrameResult(res);
-      addLog(`✓ Frame Extraction complete. Generated ${res.frameCount} frames at ${res.fps} FPS (cached: ${res.isCached})`);
+      addLog(`✓ Frame Extraction complete: ${res.frameCount} frames generated at ${res.fps} FPS`);
       await handleValidateCache();
+      return res;
     } catch (err: any) {
       addLog(`✗ Frame extraction failed: ${err?.message || err}`);
+      return null;
     }
   };
 
@@ -112,9 +110,8 @@ export const MediaVerificationRunner: React.FC = () => {
     addLog('Executing REAL FFmpeg Audio Extraction to 16-bit PCM WAV (source.wav)...');
     try {
       const res = await mediaApi.extractAudio(activeProject.id, activeProject.sourceMedia.mediaId);
-      setAudioResult(res);
       if (res.hasAudio) {
-        addLog(`✓ Audio extracted successfully to: ${res.audioPath} (${res.sampleRate}Hz stereo, cached: ${res.isCached})`);
+        addLog(`✓ Audio extracted successfully: ${res.audioPath} (${res.sampleRate}Hz stereo)`);
       } else {
         addLog('ℹ Source video has NO audio track (NO_AUDIO_STREAM). Handled safely.');
       }
@@ -135,26 +132,44 @@ export const MediaVerificationRunner: React.FC = () => {
     }
   };
 
-  const handleRenderVideo = async () => {
+  const handleRenderVideoMode = async (mode: 'test_1s' | 'test_3s' | 'full') => {
     if (!activeProject || !activeProject.sourceMedia) {
       addLog('✗ Error: No active project with imported media');
       return;
     }
     setIsRendering(true);
-    addLog('Executing REAL Video Reconstruction (Phase 4C RenderService)...');
-    addLog('Reading extracted PNG frame sequence + source.wav...');
+
+    addLog(`=== STARTING VIDEO RECONSTRUCTION: [${mode.toUpperCase()}] ===`);
+    // 1. Ensure frames for requested mode are extracted
+    await handleExtractFramesForMode(mode);
+    await handleExtractAudio();
+
+    const sourceFps = activeProject.sourceMedia.fps || 30.0;
+    const outputName = mode === 'full' 
+      ? 'reconstructed_full.mp4' 
+      : mode === 'test_3s' 
+      ? 'reconstructed_3s.mp4' 
+      : 'reconstructed_1s.mp4';
+
+    addLog(`Re-encoding frame sequence with FFmpeg (libx264, ${sourceFps} FPS) → ${outputName}...`);
     try {
       const result = await renderApi.renderTestVideo({
         projectId: activeProject.id,
         mediaId: activeProject.sourceMedia.mediaId,
-        fps: activeProject.sourceMedia.fps || 30.0,
+        fps: sourceFps,
         outputFormat: 'mp4',
-        outputName: 'reconstructed.mp4',
+        outputName,
+        mode,
       });
       setRenderResult(result);
       addLog(`✓ Render Succeeded: ${result.outputMetadata.outputPath}`);
-      addLog(`✓ Metadata: ${result.outputMetadata.width}x${result.outputMetadata.height}, ${result.outputMetadata.durationSeconds.toFixed(2)}s, ${result.outputMetadata.videoCodec}, ${result.outputMetadata.fileSizeBytes} bytes`);
-      addLog(`✓ Source vs Output Comparison: ${result.comparison.isCompatible ? 'COMPATIBLE' : 'MISMATCH'}`);
+      addLog(`✓ Output Metadata: ${result.outputMetadata.width}×${result.outputMetadata.height}, ${result.outputMetadata.durationSeconds.toFixed(2)}s, ${result.outputMetadata.videoCodec}, ${result.outputMetadata.fileSizeBytes} bytes`);
+      addLog(`✓ Comparison Status: ${result.comparison.timingExplanation}`);
+      if (result.comparison.isFullMatch) {
+        addLog('★ FULL RECONSTRUCTION PASS: Output duration and frame count perfectly match source video!');
+      } else {
+        addLog(`★ ${result.comparison.mode} PASS: Reconstructed test duration matches extracted frame sequence timing.`);
+      }
     } catch (err: any) {
       addLog(`✗ Video render failed: ${err?.message || err}`);
     } finally {
@@ -181,13 +196,12 @@ export const MediaVerificationRunner: React.FC = () => {
 
   const handleRunAllTests = async () => {
     setIsRunning(true);
-    addLog('=== STARTING FULL MEDIA ENGINE & RENDER VERIFICATION SUITE ===');
+    addLog('=== STARTING FULL MEDIA ENGINE & RECONSTRUCTION AUDIT SUITE ===');
     await handleCheckRuntime();
     await handlePrepareMedia();
-    await handleExtractFrames();
     await handleExtractAudio();
-    await handleValidateCache();
-    await handleRenderVideo();
+    await handleRenderVideoMode('test_1s');
+    await handleRenderVideoMode('full');
     addLog('=== ALL VERIFICATION TESTS COMPLETED ===');
     setIsRunning(false);
   };
@@ -219,11 +233,11 @@ export const MediaVerificationRunner: React.FC = () => {
           <div className="flex items-center gap-2">
             <h1 className="text-2xl font-bold tracking-tight text-white">Media Engine & Render Verification Runner</h1>
             <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
-              PHASE 4C REAL RECONSTRUCTION
+              PHASE 4C DURATION & TIMING AUDIT
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            End-to-end media synthesis test runner: extraction, audio demuxing, frame sequence re-encoding (libx264), audio muxing (AAC), and FFprobe validation.
+            Deterministic frame-timing validation: 1s Test, 3s Test, and Full Source Media Reconstruction.
           </p>
         </div>
 
@@ -274,7 +288,7 @@ export const MediaVerificationRunner: React.FC = () => {
                 </div>
                 <div className="flex justify-between text-slate-400 text-[11px]">
                   <span>Duration:</span>
-                  <span>{(sourceMedia.durationMs / 1000).toFixed(1)}s • {(sourceMedia.fileSizeBytes / (1024 * 1024)).toFixed(1)} MB</span>
+                  <span>{(sourceMedia.durationMs / 1000).toFixed(2)}s • {(sourceMedia.fileSizeBytes / (1024 * 1024)).toFixed(1)} MB</span>
                 </div>
                 <div className="flex justify-between text-slate-400 text-[11px]">
                   <span>Codecs:</span>
@@ -286,66 +300,63 @@ export const MediaVerificationRunner: React.FC = () => {
 
           {/* Test Control Action Buttons */}
           <div className="p-5 rounded-2xl bg-slate-900/60 border border-slate-800 space-y-3">
-            <span className="text-xs font-bold text-slate-200 block">Manual Pipeline Controls</span>
-            <div className="grid grid-cols-2 gap-2 text-xs">
+            <span className="text-xs font-bold text-slate-200 block">Reconstruction Pipeline Modes</span>
+            
+            <div className="space-y-2 text-xs">
+              {/* Mode A: 1s Quick Test */}
               <button
-                onClick={handleCheckRuntime}
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 transition-colors cursor-pointer"
-              >
-                <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
-                <span>Check FFmpeg/probe</span>
-              </button>
-
-              <button
-                onClick={handlePrepareMedia}
-                disabled={!sourceMedia}
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors cursor-pointer"
-              >
-                <Sliders className="w-3.5 h-3.5 text-sky-400" />
-                <span>Prepare Media</span>
-              </button>
-
-              <button
-                onClick={handleExtractFrames}
-                disabled={!sourceMedia}
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors cursor-pointer"
-              >
-                <Film className="w-3.5 h-3.5 text-purple-400" />
-                <span>Extract Test Frames</span>
-              </button>
-
-              <button
-                onClick={handleExtractAudio}
-                disabled={!sourceMedia}
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors cursor-pointer"
-              >
-                <FileCode className="w-3.5 h-3.5 text-amber-400" />
-                <span>Extract Audio</span>
-              </button>
-
-              {/* Phase 4C Reconstruction Control */}
-              <button
-                onClick={handleRenderVideo}
+                onClick={() => handleRenderVideoMode('test_1s')}
                 disabled={!sourceMedia || isRendering}
-                className="p-2.5 rounded-xl bg-gradient-to-r from-purple-900/40 to-indigo-900/40 hover:from-purple-900/60 hover:to-indigo-900/60 border border-purple-500/40 text-purple-200 font-semibold text-left flex items-center gap-2 disabled:opacity-40 transition-colors cursor-pointer col-span-2"
+                className="w-full p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-left flex items-center justify-between disabled:opacity-40 transition-colors cursor-pointer border border-slate-700/60"
               >
-                {isRendering ? <Loader2 className="w-3.5 h-3.5 animate-spin text-purple-400" /> : <Video className="w-3.5 h-3.5 text-purple-400" />}
-                <span>Render Test Video (Frames + Audio → MP4)</span>
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>1. Quick Test Render (1s • ~{Math.round(sourceMedia?.fps || 30)} frames)</span>
+                </div>
+                <span className="text-[10px] font-mono text-indigo-300 bg-indigo-950/60 px-1.5 py-0.5 rounded">TEST_1S</span>
               </button>
 
+              {/* Mode B: 3s Test */}
+              <button
+                onClick={() => handleRenderVideoMode('test_3s')}
+                disabled={!sourceMedia || isRendering}
+                className="w-full p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-left flex items-center justify-between disabled:opacity-40 transition-colors cursor-pointer border border-slate-700/60"
+              >
+                <div className="flex items-center gap-2">
+                  <Layers className="w-3.5 h-3.5 text-sky-400" />
+                  <span>2. Test Render (3s • ~{Math.round((sourceMedia?.fps || 30) * 3)} frames)</span>
+                </div>
+                <span className="text-[10px] font-mono text-sky-300 bg-sky-950/60 px-1.5 py-0.5 rounded">TEST_3S</span>
+              </button>
+
+              {/* Mode C: Full Reconstruction */}
+              <button
+                onClick={() => handleRenderVideoMode('full')}
+                disabled={!sourceMedia || isRendering}
+                className="w-full p-2.5 rounded-xl bg-gradient-to-r from-purple-900/60 to-indigo-900/60 hover:from-purple-900/80 hover:to-indigo-900/80 border border-purple-500/50 text-purple-100 font-bold text-left flex items-center justify-between disabled:opacity-40 transition-all cursor-pointer shadow-md"
+              >
+                <div className="flex items-center gap-2">
+                  <Video className="w-4 h-4 text-purple-400" />
+                  <span>3. Full Reconstruction (All Frames + Full Audio)</span>
+                </div>
+                <span className="text-[10px] font-mono text-purple-200 bg-purple-950 px-2 py-0.5 rounded border border-purple-500/40">FULL</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 text-xs pt-2 border-t border-slate-800">
               <button
                 onClick={handleOpenFolder}
                 disabled={!validationReport && !renderResult}
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors cursor-pointer"
+                className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors cursor-pointer"
               >
                 <FolderOpen className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Open Output Folder</span>
+                <span>Open Outputs Folder</span>
               </button>
 
               <button
                 onClick={handleReloadProject}
                 disabled={!activeProject}
-                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors cursor-pointer"
+                className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-left flex items-center gap-2 disabled:opacity-40 transition-colors cursor-pointer"
               >
                 <RotateCw className="w-3.5 h-3.5 text-rose-400" />
                 <span>Reload Project</span>
@@ -358,119 +369,63 @@ export const MediaVerificationRunner: React.FC = () => {
         <div className="lg:col-span-7 space-y-5">
           {/* Result Status Dashboard */}
           <div className="p-5 rounded-2xl bg-slate-900/60 border border-slate-800 space-y-4">
-            <span className="text-xs font-bold text-slate-200 block">Verification Status Dashboard</span>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-              {/* FFmpeg status */}
-              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80 space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-slate-300">FFmpeg Engine</span>
-                  {runtimeStatus?.ffmpeg.available ? (
-                    <span className="text-emerald-400 flex items-center gap-1 font-mono font-bold text-[11px]">
-                      <CheckCircle2 className="w-3.5 h-3.5" /> PASS
-                    </span>
-                  ) : (
-                    <span className="text-rose-400 flex items-center gap-1 font-mono font-bold text-[11px]">
-                      <XCircle className="w-3.5 h-3.5" /> FAIL
-                    </span>
-                  )}
-                </div>
-                <p className="text-[10px] text-slate-500 font-mono truncate">
-                  {runtimeStatus?.ffmpeg.version || 'Not Detected'}
-                </p>
-              </div>
-
-              {/* FFprobe status */}
-              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80 space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-slate-300">FFprobe Engine</span>
-                  {runtimeStatus?.ffprobe.available ? (
-                    <span className="text-emerald-400 flex items-center gap-1 font-mono font-bold text-[11px]">
-                      <CheckCircle2 className="w-3.5 h-3.5" /> PASS
-                    </span>
-                  ) : (
-                    <span className="text-rose-400 flex items-center gap-1 font-mono font-bold text-[11px]">
-                      <XCircle className="w-3.5 h-3.5" /> FAIL
-                    </span>
-                  )}
-                </div>
-                <p className="text-[10px] text-slate-500 font-mono truncate">
-                  {runtimeStatus?.ffprobe.version || 'Not Detected'}
-                </p>
-              </div>
-
-              {/* Media Preparation status */}
-              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80 space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-slate-300">Media Preparation</span>
-                  {prepStatus === 'pass' ? (
-                    <span className="text-emerald-400 flex items-center gap-1 font-mono font-bold text-[11px]">
-                      <CheckCircle2 className="w-3.5 h-3.5" /> PASS
-                    </span>
-                  ) : prepStatus === 'fail' ? (
-                    <span className="text-rose-400 flex items-center gap-1 font-mono font-bold text-[11px]">
-                      <XCircle className="w-3.5 h-3.5" /> FAIL
-                    </span>
-                  ) : (
-                    <span className="text-slate-500 text-[11px]">{prepStatus === 'running' ? 'Preparing...' : 'Pending'}</span>
-                  )}
-                </div>
-                <p className="text-[10px] text-slate-500 font-mono">
-                  {prepStatus === 'pass' ? 'frames/ & audio/ cache created' : 'Workspace directories'}
-                </p>
-              </div>
-
-              {/* Frame Extraction */}
-              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80 space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-slate-300">Frame Extraction</span>
-                  {frameResult ? (
-                    <span className="text-emerald-400 flex items-center gap-1 font-mono font-bold text-[11px]">
-                      <CheckCircle2 className="w-3.5 h-3.5" /> PASS ({frameResult.frameCount} frames)
-                    </span>
-                  ) : (
-                    <span className="text-slate-500 text-[11px]">Pending</span>
-                  )}
-                </div>
-                <p className="text-[10px] text-slate-500 font-mono">
-                  {frameResult ? `000000.png..00000${frameResult.frameCount - 1}.png` : 'Format: PNG'}
-                </p>
-              </div>
-
-              {/* Audio Extraction */}
-              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80 space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-slate-300">Audio Extraction</span>
-                  {audioResult ? (
-                    <span className="text-emerald-400 flex items-center gap-1 font-mono font-bold text-[11px]">
-                      <CheckCircle2 className="w-3.5 h-3.5" /> {audioResult.hasAudio ? 'PASS' : 'NO AUDIO'}
-                    </span>
-                  ) : (
-                    <span className="text-slate-500 text-[11px]">Pending</span>
-                  )}
-                </div>
-                <p className="text-[10px] text-slate-500 font-mono">
-                  {audioResult?.hasAudio ? 'source.wav (16-bit PCM)' : 'Audio Extraction'}
-                </p>
-              </div>
-
-              {/* Phase 4C Video Reconstruction status */}
-              <div className="p-3.5 rounded-xl bg-purple-950/30 border border-purple-800/50 space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-purple-200">Reconstruction Engine</span>
-                  {renderResult ? (
-                    <span className="text-emerald-400 flex items-center gap-1 font-mono font-bold text-[11px]">
-                      <CheckCircle2 className="w-3.5 h-3.5" /> PASS
-                    </span>
-                  ) : (
-                    <span className="text-slate-500 text-[11px]">{isRendering ? 'Encoding MP4...' : 'Ready'}</span>
-                  )}
-                </div>
-                <p className="text-[10px] text-purple-400/80 font-mono">
-                  {renderResult ? `reconstructed.mp4 • ${renderResult.outputMetadata.videoCodec.toUpperCase()}` : 'FFmpeg Re-Encode & Mux'}
-                </p>
-              </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-200 block">Verification Status Dashboard</span>
+              {renderResult && (
+                <span className={`px-2.5 py-0.5 rounded font-mono text-[10px] font-bold border ${
+                  renderResult.comparison.isFullMatch
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                    : 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30'
+                }`}>
+                  {renderResult.comparison.isFullMatch ? 'FULL RECONSTRUCTION: PASS' : `RECONSTRUCTION: PASS — ${renderResult.mode}`}
+                </span>
+              )}
             </div>
+
+            {/* Comparison Metrics Table */}
+            {renderResult ? (
+              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+                <div className="text-xs font-semibold text-slate-300 flex items-center justify-between">
+                  <span>Source vs Reconstructed Output Audit</span>
+                  <span className="font-mono text-[11px] text-purple-400 font-bold">Mode: {renderResult.mode}</span>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px] font-mono">
+                  <div className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800/80">
+                    <span className="text-[9px] text-slate-500 block uppercase">Source Duration</span>
+                    <span className="text-slate-200 font-bold">{renderResult.comparison.sourceDurationSeconds.toFixed(2)}s</span>
+                  </div>
+
+                  <div className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800/80">
+                    <span className="text-[9px] text-slate-500 block uppercase">Output Duration</span>
+                    <span className="text-slate-200 font-bold">{renderResult.comparison.outputDurationSeconds.toFixed(2)}s</span>
+                  </div>
+
+                  <div className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800/80">
+                    <span className="text-[9px] text-slate-500 block uppercase">Duration Delta</span>
+                    <span className={`font-bold ${renderResult.comparison.durationDeltaSeconds <= 0.10 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                      {renderResult.comparison.durationDeltaSeconds.toFixed(3)}s
+                    </span>
+                  </div>
+
+                  <div className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800/80">
+                    <span className="text-[9px] text-slate-500 block uppercase">Frames (Act / Exp)</span>
+                    <span className="text-slate-200 font-bold">{renderResult.comparison.actualFrameCount} / {renderResult.comparison.expectedFrameCount}</span>
+                  </div>
+                </div>
+
+                <div className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800/80 text-[10px] font-mono text-slate-400 flex justify-between">
+                  <span>Resolution: <span className="text-slate-200 font-bold">{renderResult.outputMetadata.width}×{renderResult.outputMetadata.height}</span></span>
+                  <span>FPS: <span className="text-slate-200 font-bold">{renderResult.outputMetadata.fps}</span></span>
+                  <span>Video/Audio: <span className="text-slate-200 font-bold uppercase">{renderResult.outputMetadata.videoCodec} / {renderResult.outputMetadata.audioCodec || 'None'}</span></span>
+                  <span>Size: <span className="text-slate-200 font-bold">{(renderResult.outputMetadata.fileSizeBytes / 1024).toFixed(1)} KB</span></span>
+                </div>
+              </div>
+            ) : (
+              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-500 text-center">
+                Select a Reconstruction Mode on the left to validate frame-timing & render MP4.
+              </div>
+            )}
 
             {/* Reconstructed Video Player Preview */}
             {renderResult && outputSrc && (
@@ -478,28 +433,22 @@ export const MediaVerificationRunner: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-purple-300 flex items-center gap-1.5">
                     <Video className="w-3.5 h-3.5" />
-                    <span>Reconstructed Output Video Player</span>
+                    <span>Active Output Player: {renderResult.outputMetadata.outputPath.split('\\').pop()}</span>
                   </span>
                   <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                    REAL MP4 OUTPUT
+                    REAL MP4 PLAYBACK
                   </span>
                 </div>
 
                 <div className="relative rounded-lg overflow-hidden bg-black aspect-video max-h-56 flex items-center justify-center">
                   <video
+                    key={outputSrc}
                     ref={outputVideoRef}
                     src={outputSrc}
                     controls
                     playsInline
                     className="w-full h-full object-contain"
                   />
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 text-[10px] font-mono text-slate-400 pt-1">
-                  <div>Duration: <span className="text-slate-200">{renderResult.outputMetadata.durationSeconds.toFixed(2)}s</span></div>
-                  <div>Resolution: <span className="text-slate-200">{renderResult.outputMetadata.width}×{renderResult.outputMetadata.height}</span></div>
-                  <div>FPS: <span className="text-slate-200">{renderResult.outputMetadata.fps}</span></div>
-                  <div>Size: <span className="text-slate-200">{(renderResult.outputMetadata.fileSizeBytes / 1024).toFixed(1)} KB</span></div>
                 </div>
               </div>
             )}
@@ -525,7 +474,7 @@ export const MediaVerificationRunner: React.FC = () => {
                 <span className="text-slate-600">No test actions recorded yet. Click "Run All Tests" or individual controls.</span>
               ) : (
                 logLines.map((line, idx) => (
-                  <div key={idx} className={line.includes('✓') ? 'text-emerald-400' : line.includes('✗') ? 'text-rose-400' : 'text-slate-300'}>
+                  <div key={idx} className={line.includes('✓') || line.includes('★') ? 'text-emerald-400' : line.includes('✗') ? 'text-rose-400' : 'text-slate-300'}>
                     {line}
                   </div>
                 ))

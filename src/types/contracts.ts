@@ -65,6 +65,8 @@ export interface FrameExtractionResult {
   height: number;
   format: string;
   isCached: boolean;
+  startTimeSeconds?: number;
+  endTimeSeconds?: number;
 }
 
 export interface AudioExtractionResult {
@@ -119,6 +121,7 @@ export interface RenderRequest {
   height?: number;
   outputFormat?: string;
   outputName?: string;
+  mode?: string;
 }
 
 export interface RenderOutputMetadata {
@@ -137,6 +140,7 @@ export interface RenderOutputMetadata {
 }
 
 export interface SourceVsOutputComparison {
+  mode: string;
   sourceDurationSeconds: number;
   outputDurationSeconds: number;
   durationDeltaSeconds: number;
@@ -149,6 +153,12 @@ export interface SourceVsOutputComparison {
   resolutionMatches: boolean;
   fpsMatches: boolean;
   audioMatches: boolean;
+  expectedFrameCount: number;
+  actualFrameCount: number;
+  frameCountMatches: boolean;
+  durationToleranceSeconds: number;
+  isFullMatch: boolean;
+  timingExplanation: string;
   isCompatible: boolean;
 }
 
@@ -156,6 +166,7 @@ export interface RenderResult {
   jobId: string;
   projectId: string;
   mediaId: string;
+  mode: string;
   outputMetadata: RenderOutputMetadata;
   comparison: SourceVsOutputComparison;
   manifestPath: string;

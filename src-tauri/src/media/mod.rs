@@ -117,6 +117,8 @@ pub struct FrameExtractionResult {
     pub height: u32,
     pub format: String,
     pub is_cached: bool,
+    pub start_time_seconds: Option<f64>,
+    pub end_time_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -438,6 +440,8 @@ impl MediaService {
                     if let Some(cached_frames) = manifest.frames {
                         if cached_frames.fps == target_fps
                             && cached_frames.format == format
+                            && cached_frames.start_time_seconds == req.start_time_seconds
+                            && cached_frames.end_time_seconds == req.end_time_seconds
                             && cached_frames.frame_count > 0
                         {
                             let first_frame = frames_dir.join(format!("000000.{}", format));
@@ -488,11 +492,14 @@ impl MediaService {
         let mut cmd = Command::new("ffmpeg");
         cmd.arg("-y"); // Overwrite output files without asking
 
-        if let Some(start_sec) = req.start_time_seconds {
+        if let (Some(start_sec), Some(end_sec)) = (req.start_time_seconds, req.end_time_seconds) {
+            let duration = (end_sec - start_sec).max(0.01);
             cmd.arg("-ss").arg(format!("{:.3}", start_sec));
-        }
-        if let Some(end_sec) = req.end_time_seconds {
-            cmd.arg("-to").arg(format!("{:.3}", end_sec));
+            cmd.arg("-t").arg(format!("{:.3}", duration));
+        } else if let Some(start_sec) = req.start_time_seconds {
+            cmd.arg("-ss").arg(format!("{:.3}", start_sec));
+        } else if let Some(end_sec) = req.end_time_seconds {
+            cmd.arg("-t").arg(format!("{:.3}", end_sec));
         }
 
         cmd.arg("-i").arg(source_file.to_str().unwrap());
@@ -532,6 +539,8 @@ impl MediaService {
             height: if height > 0 { height } else { 1080 },
             format,
             is_cached: false,
+            start_time_seconds: req.start_time_seconds,
+            end_time_seconds: req.end_time_seconds,
         };
 
         // Update media cache manifest
