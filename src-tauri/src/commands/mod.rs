@@ -1288,12 +1288,40 @@ pub fn get_all_job_history() -> Result<Vec<crate::jobs::Job>, AppError> {
     engine.list_jobs(None)
 }
 
+fn resolve_sidecar_script_path() -> PathBuf {
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let p = PathBuf::from(manifest_dir)
+            .join("scripts")
+            .join("generative_sidecar.py");
+        if p.exists() {
+            return p;
+        }
+    }
+    let local = PathBuf::from("src-tauri")
+        .join("scripts")
+        .join("generative_sidecar.py");
+    if local.exists() {
+        return local;
+    }
+    let local_scripts = PathBuf::from("scripts").join("generative_sidecar.py");
+    if local_scripts.exists() {
+        return local_scripts;
+    }
+    if let Ok(mut exe) = std::env::current_exe() {
+        exe.pop();
+        let p = exe.join("scripts").join("generative_sidecar.py");
+        if p.exists() {
+            return p;
+        }
+    }
+    PathBuf::from("src-tauri/scripts/generative_sidecar.py")
+}
+
 #[command]
 pub fn get_generative_capabilities() -> Result<crate::ai::generative::BackendCapabilities, AppError>
 {
     let storage_paths = StoragePaths::default_paths();
-    let script_path =
-        PathBuf::from(r"d:\rustProject\autovideo-ai\src-tauri\scripts\generative_sidecar.py");
+    let script_path = resolve_sidecar_script_path();
     let backend = crate::ai::generative::PythonSidecarBackend::new(
         PathBuf::from("python"),
         script_path,
@@ -1337,8 +1365,7 @@ pub fn check_generative_preflight() -> Result<GenerativePreflightReport, AppErro
         missing_models.push("birefnet (BiRefNet Segmentation)".to_string());
     }
 
-    let script_path =
-        PathBuf::from(r"d:\rustProject\autovideo-ai\src-tauri\scripts\generative_sidecar.py");
+    let script_path = resolve_sidecar_script_path();
     let backend = crate::ai::generative::PythonSidecarBackend::new(
         PathBuf::from("python"),
         script_path,
@@ -1444,8 +1471,7 @@ pub fn generate_keyframe(
     let _ = std::fs::create_dir_all(&out_dir);
     let output_path = out_dir.join("generated_keyframe.png");
 
-    let script_path =
-        PathBuf::from(r"d:\rustProject\autovideo-ai\src-tauri\scripts\generative_sidecar.py");
+    let script_path = resolve_sidecar_script_path();
     let backend = crate::ai::generative::PythonSidecarBackend::new(
         PathBuf::from("python"),
         script_path,
@@ -1571,8 +1597,7 @@ pub fn generate_video_pipeline(
     let _ = std::fs::create_dir_all(&out_dir);
     let output_video_path = out_dir.join(format!("{}.mp4", request.job_id));
 
-    let script_path =
-        PathBuf::from(r"d:\rustProject\autovideo-ai\src-tauri\scripts\generative_sidecar.py");
+    let script_path = resolve_sidecar_script_path();
     let backend = crate::ai::generative::PythonSidecarBackend::new(
         PathBuf::from("python"),
         script_path,
