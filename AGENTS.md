@@ -34,3 +34,9 @@ Base revision ban đầu:
    - Hạn chế còn lại
 11. **Tính trung thực tiêu chí**: Nếu acceptance criteria chưa đạt, không tuyên bố phase hoàn thành.
 12. **Dừng đúng lúc**: Hoàn thành phase hiện tại rồi dừng, không tự động làm phase tiếp theo.
+
+## Tài nguyên kiểm thử & Video test mặc định:
+- **Đường dẫn video test**: `"C:\Users\quant\Dropbox\PC\Downloads\video_test.mp4"`
+- **Chiến lược thời lượng kiểm thử**:
+  - Với từng tác vụ kiểm thử theo phase / development test / smoke test / benchmark: thực hiện test trên **khoảng 10s** của video để tối ưu thời gian và chi phí.
+  - Khi cần nghiệm thu kết quả cuối cùng thực sự (full pipeline acceptance / final output): thực hiện trên **toàn bộ thời lượng của video**.
