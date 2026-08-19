@@ -2,8 +2,9 @@
 mod tests {
     use crate::ai::cloud::{
         CloudJobManager, CloudJobRequest, CloudJobState, CloudProviderError, CloudVideoProvider,
-        CostEstimate, CostGuard, CostStatus, GenerationRouter, GenerationTask, LatencyTelemetry,
-        ReplicateProvider, RoutingTarget, SegmentPlanner, UserExecutionMode,
+        CostBreakdown, CostConfidence, CostEstimate, CostGuard, CostStatus, ExecutionClass,
+        GenerationRouter, LatencyTelemetry, ProviderRegistry, ReplicateProvider, RoutingPreference,
+        RoutingTarget, SegmentPlanner, TaskClass, DEFAULT_STANDARD_JOB_BUDGET_USD,
     };
     use crate::ai::generative::hardware::{
         CapabilityReport, CapabilityTier, HardwareStatus, PrecisionMode,
@@ -115,12 +116,14 @@ mod tests {
 
         let est_under = CostEstimate {
             estimated_usd: Some(0.24),
+            status: CostConfidence::Estimated,
             ..Default::default()
         };
         assert!(guard.check(&est_under).is_ok());
 
         let est_over = CostEstimate {
             estimated_usd: Some(1.20),
+            status: CostConfidence::Estimated,
             ..Default::default()
         };
         let err = guard.check(&est_over);
@@ -219,157 +222,273 @@ mod tests {
     }
 
     // =========================================================================
-    // 07. Router AUTO Mode: Cloud-First
+    // 07. Phase 14: Task Routing to Expected Execution Classes
     // =========================================================================
 
     #[test]
-    fn test_cloud_07_router_auto_mode_cloud_first() {
+    fn test_phase14_01_task_execution_classes() {
         let provider = ReplicateProvider::with_token("test_valid_token");
         let req = make_test_request(6.0);
         let hw = make_mock_hw(CapabilityTier::LowVram);
 
-        let decision = GenerationRouter::route(
-            GenerationTask::CharacterReplacement,
-            UserExecutionMode::Auto,
+        // 1. Style Filter -> LocalDeterministic
+        let d_style = GenerationRouter::route(
+            TaskClass::StyleFilter,
+            RoutingPreference::CostSaving,
             &req,
             &provider,
             Some(&hw),
         );
+        assert_eq!(d_style.execution_class, ExecutionClass::LocalDeterministic);
+        assert_eq!(d_style.target, RoutingTarget::Local);
+        assert_eq!(d_style.cost_breakdown.total_usd, Some(0.0));
 
-        assert_eq!(decision.target, RoutingTarget::Cloud);
-        assert_eq!(decision.provider_id, "replicate");
-        assert!(decision.fallback_available);
-    }
-
-    // =========================================================================
-    // 08. Router AUTO Mode: Local / Hybrid Fallback
-    // =========================================================================
-
-    #[test]
-    fn test_cloud_08_router_auto_mode_local_fallback() {
-        let provider = ReplicateProvider::new(); // unconfigured
-        let req = make_test_request(6.0);
-        let hw = make_mock_hw(CapabilityTier::LowVram);
-
-        let decision = GenerationRouter::route(
-            GenerationTask::CharacterReplacement,
-            UserExecutionMode::Auto,
+        // 2. Background Removal -> UtilityCloud
+        let d_bg_rem = GenerationRouter::route(
+            TaskClass::BackgroundRemoval,
+            RoutingPreference::CostSaving,
             &req,
             &provider,
             Some(&hw),
         );
+        assert_eq!(d_bg_rem.execution_class, ExecutionClass::UtilityCloud);
+        assert_eq!(d_bg_rem.target, RoutingTarget::Cloud);
 
-        assert_eq!(decision.target, RoutingTarget::Hybrid);
-        assert_eq!(decision.provider_id, "local_diffusers");
+        // 3. Character Replacement -> SpecializedVideoTransformation
+        let d_char = GenerationRouter::route(
+            TaskClass::CharacterReplacement,
+            RoutingPreference::CostSaving,
+            &req,
+            &provider,
+            Some(&hw),
+        );
+        assert_eq!(
+            d_char.execution_class,
+            ExecutionClass::SpecializedVideoTransformation
+        );
+        assert_eq!(d_char.target, RoutingTarget::Cloud);
     }
 
     // =========================================================================
-    // 09. Router CLOUD Mode: Strict Rejection (No silent fallback!)
+    // 08. Phase 14: Local Tasks Never Route to Paid Providers in Cost-Saving
     // =========================================================================
 
     #[test]
-    fn test_cloud_09_router_cloud_mode_strict_rejection() {
-        let provider = ReplicateProvider::new(); // unconfigured
+    fn test_phase14_02_local_tasks_never_route_to_paid_providers_in_cost_saving() {
+        let provider = ReplicateProvider::with_token("test_valid_token"); // Paid token is configured!
         let req = make_test_request(6.0);
         let hw = make_mock_hw(CapabilityTier::High);
 
+        let tasks = [
+            TaskClass::StyleFilter,
+            TaskClass::BackgroundComposite,
+            TaskClass::AudioTransformation,
+        ];
+
+        for task in tasks {
+            let decision = GenerationRouter::route(
+                task,
+                RoutingPreference::CostSaving,
+                &req,
+                &provider,
+                Some(&hw),
+            );
+            assert_eq!(
+                decision.execution_class,
+                ExecutionClass::LocalDeterministic,
+                "Task {:?} should route to LocalDeterministic",
+                task
+            );
+            assert_eq!(decision.target, RoutingTarget::Local);
+            assert_eq!(decision.cost_breakdown.total_usd, Some(0.0));
+        }
+    }
+
+    // =========================================================================
+    // 09. Phase 14: Capability & Resolution Mismatch Rejected
+    // =========================================================================
+
+    #[test]
+    fn test_phase14_03_capability_resolution_mismatch_rejected() {
+        let provider = ReplicateProvider::with_token("test_valid_token");
+        let mut req = make_test_request(6.0);
+        req.resolution = (3840, 2160); // 4K resolution unsupported by Minimax Video-01
+        let hw = make_mock_hw(CapabilityTier::High);
+
         let decision = GenerationRouter::route(
-            GenerationTask::CharacterReplacement,
-            UserExecutionMode::Cloud,
+            TaskClass::CharacterReplacement,
+            RoutingPreference::CostSaving,
             &req,
             &provider,
             Some(&hw),
         );
 
         assert_eq!(decision.target, RoutingTarget::Unavailable);
-        assert!(!decision.fallback_available);
-        assert!(decision.reason.contains("missing"));
+        assert!(!decision.auto_submit_allowed);
+        assert!(decision.reason.contains("not supported"));
     }
 
     // =========================================================================
-    // 10. Router LOCAL Mode: Explicit Local Routing
+    // 10. Phase 14: Unsupported FPS Rejected
     // =========================================================================
 
     #[test]
-    fn test_cloud_10_router_local_mode_explicit() {
+    fn test_phase14_04_unsupported_fps_rejected() {
         let provider = ReplicateProvider::with_token("test_valid_token");
-        let req = make_test_request(6.0);
+        let mut req = make_test_request(6.0);
+        req.fps = 120.0; // 120 FPS unsupported by video provider (supports max 30)
         let hw = make_mock_hw(CapabilityTier::High);
 
         let decision = GenerationRouter::route(
-            GenerationTask::CharacterReplacement,
-            UserExecutionMode::Local,
+            TaskClass::CharacterReplacement,
+            RoutingPreference::CostSaving,
             &req,
             &provider,
             Some(&hw),
         );
 
-        assert_eq!(decision.target, RoutingTarget::Local);
-        assert_eq!(decision.estimated_cost.estimated_usd, Some(0.0));
+        assert_eq!(decision.target, RoutingTarget::Unavailable);
+        assert!(!decision.auto_submit_allowed);
+        assert!(decision.reason.contains("Requested frame rate"));
     }
 
     // =========================================================================
-    // 11. Error Taxonomy Serialization
+    // 11. Phase 14: Exact Budget Boundary Passes ($3.00 on $3.00)
     // =========================================================================
 
     #[test]
-    fn test_cloud_11_error_taxonomy_serialization() {
-        let errors = vec![
-            CloudProviderError::ProviderUnavailable("service offline".to_string()),
-            CloudProviderError::AuthFailed("invalid token".to_string()),
-            CloudProviderError::RequestInvalid("bad prompt".to_string()),
-            CloudProviderError::RateLimited("429 limit".to_string()),
-            CloudProviderError::Timeout("polling timeout".to_string()),
-            CloudProviderError::JobFailed("cuda oom on server".to_string()),
-            CloudProviderError::DownloadFailed("socket closed".to_string()),
-            CloudProviderError::OutputInvalid("zero bytes".to_string()),
-            CloudProviderError::CostLimitExceeded {
-                estimated: 5.0,
-                limit: 2.0,
-            },
-            CloudProviderError::NetworkError("dns error".to_string()),
-        ];
+    fn test_phase14_05_exact_budget_boundary_passes() {
+        let guard = CostGuard::new(3.00); // Standard $3.00 budget
+        let breakdown = CostBreakdown {
+            total_usd: Some(3.00),
+            confidence: CostConfidence::Exact,
+            ..Default::default()
+        };
 
-        for err in errors {
-            let msg = format!("{}", err);
-            assert!(!msg.is_empty());
+        assert!(guard.check_breakdown(&breakdown).is_ok());
+    }
+
+    // =========================================================================
+    // 12. Phase 14: One Cent Over Budget Fails ($3.01 on $3.00)
+    // =========================================================================
+
+    #[test]
+    fn test_phase14_06_one_cent_over_budget_fails() {
+        let guard = CostGuard::new(3.00); // Standard $3.00 budget
+        let breakdown = CostBreakdown {
+            total_usd: Some(3.01),
+            confidence: CostConfidence::Estimated,
+            ..Default::default()
+        };
+
+        let res = guard.check_breakdown(&breakdown);
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            CloudProviderError::CostLimitExceeded { estimated, limit } => {
+                assert!((estimated - 3.01).abs() < 0.001);
+                assert!((limit - 3.00).abs() < 0.001);
+            }
+            other => panic!("Expected CostLimitExceeded, got {:?}", other),
         }
     }
 
     // =========================================================================
-    // 12. Replicate Response Status Parsing
+    // 13. Phase 14: Unknown Price Blocks Submission
     // =========================================================================
 
     #[test]
-    fn test_cloud_12_replicate_response_status_parsing() {
-        let raw_json = r#"{
-            "id": "pred_12345",
-            "status": "succeeded",
-            "output": "https://replicate.delivery/pbxt/abc/out.mp4",
-            "error": null
-        }"#;
+    fn test_phase14_07_unknown_price_blocks_submission() {
+        let guard = CostGuard::new(DEFAULT_STANDARD_JOB_BUDGET_USD);
+        let breakdown = CostBreakdown {
+            total_usd: None,
+            confidence: CostConfidence::Unknown,
+            ..Default::default()
+        };
 
-        let parsed: serde_json::Value = serde_json::from_str(raw_json).unwrap();
-        assert_eq!(parsed["id"], "pred_12345");
-        assert_eq!(parsed["status"], "succeeded");
-        assert_eq!(
-            parsed["output"],
-            "https://replicate.delivery/pbxt/abc/out.mp4"
+        let res = guard.check_breakdown(&breakdown);
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            CloudProviderError::RequestInvalid(msg) => {
+                assert!(msg.contains("Unknown cost"));
+            }
+            other => panic!("Expected RequestInvalid for unknown cost, got {:?}", other),
+        }
+    }
+
+    // =========================================================================
+    // 14. Phase 14: Disabled Full-Generative Blocks Submission in Cost-Saving
+    // =========================================================================
+
+    #[test]
+    fn test_phase14_08_disabled_full_generative_blocks_submission_in_cost_saving() {
+        let provider = ReplicateProvider::with_token("test_valid_token");
+        let req = make_test_request(6.0);
+        let hw = make_mock_hw(CapabilityTier::High);
+
+        let decision = GenerationRouter::route(
+            TaskClass::FullGenerativeTransformation,
+            RoutingPreference::CostSaving,
+            &req,
+            &provider,
+            Some(&hw),
         );
+
+        assert_eq!(decision.target, RoutingTarget::Unavailable);
+        assert!(!decision.auto_submit_allowed);
+        assert!(decision.reason.contains("COST_SAVING"));
     }
 
     // =========================================================================
-    // 13. Real Cloud Acceptance Status Discovery (Zero-Fake)
+    // 15. Phase 14: Serialized Project Data Backward Compatibility
     // =========================================================================
 
     #[test]
-    fn test_cloud_13_real_cloud_acceptance_status_discovery() {
-        let provider = ReplicateProvider::new();
-        if !provider.is_configured() {
-            // Zero-fake policy: correctly discovers unconfigured state
-            assert!(!provider.is_configured());
-        } else {
-            assert!(provider.is_configured());
+    fn test_phase14_09_serialized_project_data_backward_compatibility() {
+        // Deserializing legacy string values
+        let legacy_json = r#"{"task": "CharacterReplacement", "mode": "Auto"}"#;
+        #[derive(serde::Deserialize)]
+        struct LegacyPayload {
+            task: TaskClass,
+            mode: RoutingPreference,
         }
+
+        let parsed: LegacyPayload = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed.task, TaskClass::CharacterReplacement);
+        assert_eq!(parsed.mode, RoutingPreference::CostSaving);
+
+        let screaming_json = r#"{"task": "BACKGROUND_COMPOSITE", "mode": "LOCAL_ONLY"}"#;
+        let parsed_screaming: LegacyPayload = serde_json::from_str(screaming_json).unwrap();
+        assert_eq!(parsed_screaming.task, TaskClass::BackgroundComposite);
+        assert_eq!(parsed_screaming.mode, RoutingPreference::LocalOnly);
+    }
+
+    // =========================================================================
+    // 16. Phase 14: Provider Registry Dynamic Price Refresh
+    // =========================================================================
+
+    #[test]
+    fn test_phase14_10_provider_registry_price_refresh() {
+        let mut registry = ProviderRegistry::new();
+        assert_eq!(
+            registry.find_by_id("replicate").unwrap().pricing_amount,
+            Some(0.04)
+        );
+
+        // Dynamic price update without code changes
+        let updated = registry.update_price(
+            "replicate",
+            Some(0.035),
+            "https://replicate.com/minimax/video-01/pricing",
+            "2026-08-19",
+        );
+        assert!(updated);
+        assert_eq!(
+            registry.find_by_id("replicate").unwrap().pricing_amount,
+            Some(0.035)
+        );
+        assert_eq!(
+            registry.find_by_id("replicate").unwrap().observed_at,
+            "2026-08-19"
+        );
     }
 }
