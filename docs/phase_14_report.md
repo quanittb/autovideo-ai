@@ -19,8 +19,9 @@ Phase 14 Remediation closes all acceptance gaps by enforcing strict **task-speci
 ## 2. Preflight & Commit Metadata
 
 - **Starting HEAD**: `040793a04d63f369b92f5b6401284e31c5a1325e`
+- **Ending HEAD**: `d3859a7e53829de6cc0441df14f0d8e2a5cdaf96`
 - **Branch**: `main`
-- **Working Tree**: Clean prior to remediation edits.
+- **Working Tree**: Clean.
 
 ---
 
