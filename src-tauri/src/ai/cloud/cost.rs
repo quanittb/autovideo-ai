@@ -1,11 +1,78 @@
 use super::error::CloudProviderError;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CostStatus {
+pub const DEFAULT_PREVIEW_BUDGET_USD: f64 = 0.25;
+pub const DEFAULT_STANDARD_JOB_BUDGET_USD: f64 = 3.00;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CostConfidence {
+    #[serde(alias = "Exact", alias = "EXACT")]
     Exact,
+    #[serde(alias = "Estimated", alias = "ESTIMATED")]
     Estimated,
+    #[serde(alias = "Unknown", alias = "UNKNOWN")]
     Unknown,
+}
+
+pub type CostStatus = CostConfidence;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CostBreakdown {
+    pub provider_id: String,
+    pub model_id: String,
+    pub billable_duration_sec: f64,
+    pub resolution: (u32, u32),
+    pub segment_count: usize,
+    pub overlap_duration_sec: f64,
+    pub retry_allowance_usd: f64,
+    pub inference_cost_usd: Option<f64>,
+    pub transfer_storage_cost_usd: Option<f64>,
+    pub total_usd: Option<f64>,
+    pub confidence: CostConfidence,
+    pub currency: String,
+    pub breakdown: String,
+}
+
+impl Default for CostBreakdown {
+    fn default() -> Self {
+        Self {
+            provider_id: "local_ffmpeg".to_string(),
+            model_id: "ffmpeg_native".to_string(),
+            billable_duration_sec: 0.0,
+            resolution: (720, 1280),
+            segment_count: 1,
+            overlap_duration_sec: 0.0,
+            retry_allowance_usd: 0.0,
+            inference_cost_usd: Some(0.0),
+            transfer_storage_cost_usd: Some(0.0),
+            total_usd: Some(0.0),
+            confidence: CostConfidence::Exact,
+            currency: "USD".to_string(),
+            breakdown: "Free local processing".to_string(),
+        }
+    }
+}
+
+impl CostBreakdown {
+    pub fn to_estimate(&self) -> CostEstimate {
+        CostEstimate {
+            provider: self.provider_id.clone(),
+            model: self.model_id.clone(),
+            estimated_usd: self.total_usd,
+            min_usd: self.total_usd.map(|v| v * 0.9),
+            max_usd: self.total_usd.map(|v| v * 1.2),
+            confidence: match self.confidence {
+                CostConfidence::Exact => 1.0,
+                CostConfidence::Estimated => 0.85,
+                CostConfidence::Unknown => 0.0,
+            },
+            currency: self.currency.clone(),
+            status: self.confidence,
+            breakdown: self.breakdown.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,22 +84,22 @@ pub struct CostEstimate {
     pub max_usd: Option<f64>,
     pub confidence: f64,
     pub currency: String,
-    pub status: CostStatus,
+    pub status: CostConfidence,
     pub breakdown: String,
 }
 
 impl Default for CostEstimate {
     fn default() -> Self {
         Self {
-            provider: "replicate".to_string(),
-            model: "minimax/video-01".to_string(),
-            estimated_usd: None,
-            min_usd: None,
-            max_usd: None,
-            confidence: 0.0,
+            provider: "local_ffmpeg".to_string(),
+            model: "ffmpeg_native".to_string(),
+            estimated_usd: Some(0.0),
+            min_usd: Some(0.0),
+            max_usd: Some(0.0),
+            confidence: 1.0,
             currency: "USD".to_string(),
-            status: CostStatus::Unknown,
-            breakdown: "Unconfigured cost estimate".to_string(),
+            status: CostConfidence::Exact,
+            breakdown: "Local deterministic compute ($0.00)".to_string(),
         }
     }
 }
@@ -45,7 +112,7 @@ pub struct CostGuard {
 impl Default for CostGuard {
     fn default() -> Self {
         Self {
-            max_cost_per_job: 5.0, // Conservative default
+            max_cost_per_job: DEFAULT_STANDARD_JOB_BUDGET_USD,
         }
     }
 }
@@ -55,8 +122,46 @@ impl CostGuard {
         Self { max_cost_per_job }
     }
 
+    pub fn preview_guard() -> Self {
+        Self {
+            max_cost_per_job: DEFAULT_PREVIEW_BUDGET_USD,
+        }
+    }
+
+    pub fn standard_job_guard() -> Self {
+        Self {
+            max_cost_per_job: DEFAULT_STANDARD_JOB_BUDGET_USD,
+        }
+    }
+
     pub fn check(&self, estimate: &CostEstimate) -> Result<(), CloudProviderError> {
+        if estimate.status == CostConfidence::Unknown || estimate.estimated_usd.is_none() {
+            return Err(CloudProviderError::RequestInvalid(
+                "Unknown cost estimate cannot be auto-submitted. Budget verification requires explicit pricing."
+                    .to_string(),
+            ));
+        }
+
         if let Some(cost) = estimate.estimated_usd {
+            if cost > self.max_cost_per_job {
+                return Err(CloudProviderError::CostLimitExceeded {
+                    estimated: cost,
+                    limit: self.max_cost_per_job,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn check_breakdown(&self, breakdown: &CostBreakdown) -> Result<(), CloudProviderError> {
+        if breakdown.confidence == CostConfidence::Unknown || breakdown.total_usd.is_none() {
+            return Err(CloudProviderError::RequestInvalid(
+                "Unknown cost breakdown cannot be auto-submitted. Budget verification requires explicit pricing."
+                    .to_string(),
+            ));
+        }
+
+        if let Some(cost) = breakdown.total_usd {
             if cost > self.max_cost_per_job {
                 return Err(CloudProviderError::CostLimitExceeded {
                     estimated: cost,

@@ -562,6 +562,41 @@ export const aiApi = {
   },
 };
 
+export type ExecutionClass =
+  | 'LOCAL_DETERMINISTIC'
+  | 'UTILITY_CLOUD'
+  | 'SPECIALIZED_VIDEO_TRANSFORMATION'
+  | 'GENERATIVE_FALLBACK'
+  | 'LOCAL_EXPERIMENTAL';
+
+export type TaskClass =
+  | 'CHARACTER_REPLACEMENT'
+  | 'BACKGROUND_REMOVAL'
+  | 'BACKGROUND_COMPOSITE'
+  | 'STYLE_FILTER'
+  | 'AUDIO_TRANSFORMATION'
+  | 'ACTION_REGENERATION'
+  | 'FULL_GENERATIVE_TRANSFORMATION';
+
+export type RoutingPreference = 'COST_SAVING' | 'QUALITY' | 'LOCAL_ONLY' | 'CLOUD_ONLY';
+export type CostConfidence = 'EXACT' | 'ESTIMATED' | 'UNKNOWN';
+
+export interface CostBreakdown {
+  providerId: string;
+  modelId: string;
+  billableDurationSec: number;
+  resolution: [number, number];
+  segmentCount: number;
+  overlapDurationSec: number;
+  retryAllowanceUsd: number;
+  inferenceCostUsd?: number;
+  transferStorageCostUsd?: number;
+  totalUsd?: number;
+  confidence: CostConfidence;
+  currency: string;
+  breakdown: string;
+}
+
 export interface CloudJobRequest {
   jobId: string;
   prompt: string;
@@ -588,27 +623,31 @@ export interface CloudJobStatus {
     model: string;
     estimatedUsd?: number;
     currency: string;
-    status: 'Exact' | 'Estimated' | 'Unknown';
+    status: 'EXACT' | 'ESTIMATED' | 'UNKNOWN' | 'Exact' | 'Estimated' | 'Unknown';
     breakdown: string;
   };
   actualCost?: number;
 }
 
 export interface RoutingDecision {
-  target: 'Cloud' | 'Local' | 'Hybrid' | 'Unavailable';
+  target: 'LOCAL' | 'CLOUD' | 'HYBRID' | 'UNAVAILABLE' | 'Local' | 'Cloud' | 'Hybrid' | 'Unavailable';
+  executionClass: ExecutionClass;
   providerId: string;
-  task: string;
-  mode: 'Auto' | 'Cloud' | 'Local';
+  modelId: string;
+  task: TaskClass | string;
+  mode: RoutingPreference | string;
   reason: string;
+  costBreakdown: CostBreakdown;
   estimatedCost: {
     provider: string;
     model: string;
     estimatedUsd?: number;
     currency: string;
-    status: 'Exact' | 'Estimated' | 'Unknown';
+    status: 'EXACT' | 'ESTIMATED' | 'UNKNOWN' | 'Exact' | 'Estimated' | 'Unknown';
     breakdown: string;
   };
   fallbackAvailable: boolean;
+  autoSubmitAllowed: boolean;
 }
 
 export const cloudApi = {
@@ -632,6 +671,7 @@ export const cloudApi = {
     return await invoke('cancel_cloud_generation', { remoteId });
   },
 };
+
 
 
 
