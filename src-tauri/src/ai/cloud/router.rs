@@ -105,7 +105,7 @@ pub enum RoutingTarget {
     Unavailable,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutingDecision {
     pub target: RoutingTarget,

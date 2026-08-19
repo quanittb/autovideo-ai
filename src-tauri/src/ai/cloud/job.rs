@@ -17,45 +17,68 @@ pub enum CloudJobState {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct CloudJobRequest {
+    #[serde(alias = "job_id")]
     pub job_id: String,
     pub prompt: String,
+    #[serde(alias = "negative_prompt")]
     pub negative_prompt: Option<String>,
+    #[serde(alias = "source_video")]
     pub source_video: Option<PathBuf>,
+    #[serde(alias = "reference_image")]
     pub reference_image: Option<PathBuf>,
+    #[serde(alias = "duration_seconds")]
     pub duration_seconds: f64,
     pub fps: f64,
     pub resolution: (u32, u32),
+    #[serde(alias = "task_type")]
     pub task_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct CloudJobStatus {
+    #[serde(alias = "job_id")]
     pub job_id: String,
     pub state: CloudJobState,
+    #[serde(alias = "progress_pct")]
     pub progress_pct: f64,
+    #[serde(alias = "remote_id")]
     pub remote_id: Option<String>,
+    #[serde(alias = "remote_status")]
     pub remote_status: Option<String>,
+    #[serde(alias = "error_message")]
     pub error_message: Option<String>,
+    #[serde(alias = "output_url")]
     pub output_url: Option<String>,
+    #[serde(alias = "elapsed_seconds")]
     pub elapsed_seconds: f64,
+    #[serde(alias = "cost_estimate")]
     pub cost_estimate: Option<CostEstimate>,
+    #[serde(alias = "actual_cost")]
     pub actual_cost: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CloudJobResult {
+    #[serde(alias = "job_id")]
     pub job_id: String,
     pub provider: String,
     pub model: String,
+    #[serde(alias = "output_mp4_path")]
     pub output_mp4_path: PathBuf,
+    #[serde(alias = "duration_sec")]
     pub duration_sec: f64,
     pub width: u32,
     pub height: u32,
     pub fps: f64,
+    #[serde(alias = "cost_usd")]
     pub cost_usd: Option<f64>,
     pub latency: LatencyTelemetry,
+    #[serde(alias = "metadata_json_path")]
     pub metadata_json_path: PathBuf,
 }
 
@@ -120,11 +143,11 @@ impl CloudJobManager {
         }
     }
 
-    pub fn mark_failed(&self, job_id: &str, err: &CloudProviderError) {
+    pub fn mark_failed(&self, job_id: &str, err: &str) {
         if let Ok(mut lock) = self.jobs.write() {
             if let Some(j) = lock.get_mut(job_id) {
                 j.state = CloudJobState::Failed;
-                j.error_message = Some(format!("{}", err));
+                j.error_message = Some(err.to_string());
             }
         }
     }
@@ -137,14 +160,13 @@ impl CloudJobManager {
         }
     }
 
-    pub fn get_status(&self, job_id: &str) -> Option<CloudJobStatus> {
-        let lock = self.jobs.read().ok()?;
-        lock.get(job_id).cloned()
-    }
-}
-
-impl Default for CloudJobManager {
-    fn default() -> Self {
-        Self::new()
+    pub fn get_status(&self, job_id: &str) -> Result<CloudJobStatus, CloudProviderError> {
+        let lock = self
+            .jobs
+            .read()
+            .map_err(|_| CloudProviderError::ProviderUnavailable("Lock poisoned".to_string()))?;
+        lock.get(job_id)
+            .cloned()
+            .ok_or_else(|| CloudProviderError::RequestInvalid(format!("Job {} not found", job_id)))
     }
 }

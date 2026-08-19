@@ -1664,64 +1664,16 @@ pub async fn start_cloud_generation(
     request: crate::ai::cloud::CloudJobRequest,
     max_cost: Option<f64>,
 ) -> Result<crate::ai::cloud::CloudJobStatus, String> {
-    // 1. Authoritative budget validation (defaults to DEFAULT_STANDARD_JOB_BUDGET_USD: $3.00)
-    let budget_limit = match max_cost {
-        Some(val) => {
-            crate::ai::cloud::CostGuard::validate_budget(val).map_err(|e| format!("{}", e))?
-        }
-        None => crate::ai::cloud::DEFAULT_STANDARD_JOB_BUDGET_USD,
-    };
-
-    // 2. Determine real TaskClass
-    let task_class = crate::ai::cloud::TaskClass::from_str_or_default(&request.task_type);
-
-    // 3. Obtain routing decision through single GenerationRouter & ProviderRegistry
     let provider = crate::ai::cloud::ReplicateProvider::new();
     let registry = crate::ai::cloud::ProviderRegistry::new();
-    let decision = crate::ai::cloud::GenerationRouter::route_with_registry(
-        task_class,
-        crate::ai::cloud::RoutingPreference::CostSaving,
-        &request,
-        &provider,
-        None,
-        &registry,
-    );
 
-    // 4. Reject local deterministic tasks from paid cloud submission
-    if decision.target == crate::ai::cloud::RoutingTarget::Local {
-        return Err(format!(
-            "TASK_ROUTES_TO_LOCAL_EXECUTION: Task {:?} routes to local deterministic execution ($0.00) and cannot be submitted to cloud.",
-            task_class
-        ));
-    }
+    // Single authoritative production submission guard
+    let plan = crate::ai::cloud::validate_and_prepare_cloud_submission(
+        &request, max_cost, &provider, &registry,
+    )
+    .map_err(|e| format!("{}", e))?;
 
-    // 5. Reject unavailable or non-auto-submittable routes
-    if decision.target == crate::ai::cloud::RoutingTarget::Unavailable
-        || !decision.auto_submit_allowed
-    {
-        return Err(format!(
-            "ROUTING_UNAVAILABLE: Task {:?} cannot be submitted to cloud provider. Reason: {}",
-            task_class, decision.reason
-        ));
-    }
-
-    // 6. Authoritative backend CostGuard budget check
-    let cost_guard = crate::ai::cloud::CostGuard::new(budget_limit);
-    cost_guard
-        .check_breakdown(&decision.cost_breakdown)
-        .map_err(|e| format!("{}", e))?;
-
-    // 7. Verify executable provider adapter
-    if decision.provider_id != "replicate"
-        || !registry.has_executable_adapter(&decision.provider_id)
-    {
-        return Err(format!(
-            "PROVIDER_UNAVAILABLE: No executable adapter found for provider '{}'",
-            decision.provider_id
-        ));
-    }
-
-    // 8. Submit to provider
+    // Submit to selected provider
     let handle = provider
         .submit_job(&request)
         .await
@@ -1736,7 +1688,7 @@ pub async fn start_cloud_generation(
         error_message: None,
         output_url: None,
         elapsed_seconds: 0.5,
-        cost_estimate: Some(decision.estimated_cost),
+        cost_estimate: Some(plan.routing_decision.estimated_cost),
         actual_cost: None,
     })
 }

@@ -17,7 +17,7 @@ pub enum CostConfidence {
 
 pub type CostStatus = CostConfidence;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CostBreakdown {
     pub provider_id: String,
@@ -75,12 +75,16 @@ impl CostBreakdown {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct CostEstimate {
     pub provider: String,
     pub model: String,
+    #[serde(alias = "estimated_usd")]
     pub estimated_usd: Option<f64>,
+    #[serde(alias = "min_usd")]
     pub min_usd: Option<f64>,
+    #[serde(alias = "max_usd")]
     pub max_usd: Option<f64>,
     pub confidence: f64,
     pub currency: String,

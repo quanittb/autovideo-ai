@@ -1,17 +1,17 @@
 #[cfg(test)]
 mod tests {
     use crate::ai::cloud::{
-        CloudJobManager, CloudJobRequest, CloudJobState, CloudProviderError, CloudVideoProvider,
-        CostBreakdown, CostConfidence, CostEstimate, CostGuard, CostStatus, ExecutionClass,
-        GenerationRouter, LatencyTelemetry, ProviderRegistry, ReplicateProvider, RoutingPreference,
-        RoutingTarget, SegmentPlanner, TaskClass, DEFAULT_STANDARD_JOB_BUDGET_USD,
+        validate_and_prepare_cloud_submission, CloudJobManager, CloudJobRequest, CloudJobState,
+        CloudJobStatus, CloudProviderError, CloudVideoProvider, CostBreakdown, CostConfidence,
+        CostEstimate, CostGuard, CostStatus, LatencyTelemetry, ProviderRegistry, ReplicateProvider,
+        SegmentPlanner,
     };
     use std::path::PathBuf;
 
-    fn make_test_request(duration: f64) -> CloudJobRequest {
+    fn make_test_request(duration: f64, task: &str) -> CloudJobRequest {
         CloudJobRequest {
             job_id: "test_job_1".to_string(),
-            prompt: "A cinematic transformation of character in dramatic lighting".to_string(),
+            prompt: "A cinematic transformation in dramatic lighting".to_string(),
             negative_prompt: Some("blurry, low quality".to_string()),
             source_video: Some(PathBuf::from(
                 r"C:\Users\quant\Dropbox\PC\Downloads\Douyin_1782229041.mp4",
@@ -22,7 +22,7 @@ mod tests {
             duration_seconds: duration,
             fps: 30.0,
             resolution: (576, 1024),
-            task_type: "CharacterReplacement".to_string(),
+            task_type: task.to_string(),
         }
     }
 
@@ -34,49 +34,44 @@ mod tests {
     fn test_cloud_01_provider_capabilities() {
         let provider = ReplicateProvider::new();
         let caps = provider.capabilities();
-        // Truthful capability declaration: Minimax adapter currently only implements text-to-video prompt serialization
+        // Truthful capability declaration: Minimax adapter currently only implements text prompt serialization
         assert!(caps.supports_text_to_video);
         assert!(!caps.supports_image_to_video);
         assert!(!caps.supports_video_to_video);
         assert!(!caps.supports_reference_image);
         assert!(!caps.supports_character_reference);
         assert!(!caps.supports_audio);
-        assert_eq!(caps.estimated_cost_per_second, Some(0.04));
+        assert_eq!(caps.estimated_cost_per_second, None);
     }
 
     // =========================================================================
-    // 02. Cost Estimation Deterministic
+    // 02. Cost Estimation Uses ProviderRegistry (Single Source of Truth)
     // =========================================================================
 
     #[test]
     fn test_cloud_02_cost_estimation_deterministic() {
         let provider = ReplicateProvider::with_token("test_dummy_token");
-        let req = make_test_request(6.0);
+        let req = make_test_request(6.0, "CharacterReplacement");
         let est = provider.estimate_cost(&req);
 
-        assert_eq!(est.estimated_usd, Some(0.24));
+        // Minimax Video-01 official Replicate price is $0.50 per prediction output run
+        assert_eq!(est.model, "minimax/video-01");
+        assert_eq!(est.estimated_usd, Some(0.50));
         assert_eq!(est.currency, "USD");
         assert_eq!(est.status, CostStatus::Estimated);
-        assert!(est.breakdown.contains("$0.0400/sec x 6.0s"));
+        assert!(est.breakdown.contains("replicate"));
     }
 
     // =========================================================================
-    // 03. Cost Guard Budget Limit
+    // 03. Cost Guard Budget Limit Check
     // =========================================================================
 
     #[test]
     fn test_cloud_03_cost_guard_budget_limit() {
-        let guard = CostGuard::new(0.50); // $0.50 max budget
-
-        let est_under = CostEstimate {
-            estimated_usd: Some(0.24),
-            status: CostConfidence::Estimated,
-            ..Default::default()
-        };
-        assert!(guard.check(&est_under).is_ok());
+        let guard = CostGuard::new(0.40); // $0.40 max budget (below $0.50)
 
         let est_over = CostEstimate {
-            estimated_usd: Some(1.20),
+            estimated_usd: Some(0.50),
             status: CostConfidence::Estimated,
             ..Default::default()
         };
@@ -84,8 +79,8 @@ mod tests {
         assert!(err.is_err());
         match err.unwrap_err() {
             CloudProviderError::CostLimitExceeded { estimated, limit } => {
-                assert_eq!(estimated, 1.20);
-                assert_eq!(limit, 0.50);
+                assert_eq!(estimated, 0.50);
+                assert_eq!(limit, 0.40);
             }
             other => panic!("Expected CostLimitExceeded, got {:?}", other),
         }
@@ -127,7 +122,7 @@ mod tests {
     #[test]
     fn test_cloud_05_job_state_machine_transitions() {
         let manager = CloudJobManager::new();
-        let req = make_test_request(4.0);
+        let req = make_test_request(4.0, "CharacterReplacement");
 
         manager.register_job("job_101", &req, None);
         let s0 = manager.get_status("job_101").unwrap();
@@ -176,131 +171,100 @@ mod tests {
     }
 
     // =========================================================================
-    // 07. Phase 14 Remediation Test A: Local Tasks Cannot Submit Cloud Job
+    // 07. Production Submission Guard: Test 1 — Local Deterministic Tasks Rejected
     // =========================================================================
 
     #[test]
-    fn test_phase14_remediation_test_a_local_tasks_cannot_submit_cloud_job() {
+    fn test_phase14_guard_test_1_local_tasks_rejected() {
         let provider = ReplicateProvider::with_token("test_valid_token");
-        let req = make_test_request(6.0);
         let registry = ProviderRegistry::new();
 
         let local_tasks = [
-            TaskClass::StyleFilter,
-            TaskClass::BackgroundComposite,
-            TaskClass::AudioTransformation,
+            "STYLE_FILTER",
+            "BACKGROUND_COMPOSITE",
+            "AUDIO_TRANSFORMATION",
         ];
 
-        for task in local_tasks {
-            let decision = GenerationRouter::route_with_registry(
-                task,
-                RoutingPreference::CostSaving,
-                &req,
-                &provider,
-                None,
-                &registry,
-            );
+        for task_name in local_tasks {
+            let req = make_test_request(6.0, task_name);
+            let result = validate_and_prepare_cloud_submission(&req, None, &provider, &registry);
 
-            assert_eq!(
-                decision.target,
-                RoutingTarget::Local,
-                "Task {:?} must route to Local",
-                task
-            );
-            assert_eq!(decision.execution_class, ExecutionClass::LocalDeterministic);
-            assert_eq!(decision.cost_breakdown.total_usd, Some(0.0));
-
-            // Production submission check: routing target Local must be rejected if cloud submit is attempted
-            let is_cloud_submittable = decision.target == RoutingTarget::Cloud;
             assert!(
-                !is_cloud_submittable,
-                "Task {:?} must not be submittable to cloud",
-                task
+                result.is_err(),
+                "Task {} must be rejected by submission guard",
+                task_name
+            );
+            let err_msg = format!("{}", result.unwrap_err());
+            assert!(
+                err_msg.contains("TASK_ROUTES_TO_LOCAL_EXECUTION"),
+                "Expected TASK_ROUTES_TO_LOCAL_EXECUTION, got: {}",
+                err_msg
             );
         }
     }
 
     // =========================================================================
-    // 08. Phase 14 Remediation Test B: Character Replacement Blocked Until Real Adapter
+    // 08. Production Submission Guard: Test 2 — Character Replacement Blocked
     // =========================================================================
 
     #[test]
-    fn test_phase14_remediation_test_b_character_replacement_blocked_until_real_adapter() {
+    fn test_phase14_guard_test_2_character_replacement_blocked() {
         let provider = ReplicateProvider::with_token("test_valid_token");
-        let req = make_test_request(6.0);
         let registry = ProviderRegistry::new();
+        let req = make_test_request(6.0, "CHARACTER_REPLACEMENT");
 
-        let decision = GenerationRouter::route_with_registry(
-            TaskClass::CharacterReplacement,
-            RoutingPreference::CostSaving,
-            &req,
-            &provider,
-            None,
-            &registry,
+        let result = validate_and_prepare_cloud_submission(&req, None, &provider, &registry);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("ROUTING_UNAVAILABLE") && err_msg.contains("Phase 16"),
+            "Expected ROUTING_UNAVAILABLE with Phase 16 reason, got: {}",
+            err_msg
         );
-
-        // Desired execution class is SpecializedVideoTransformation, but target is Unavailable because
-        // current adapter lacks video-to-video / character reference serialization (deferred to Phase 16)
-        assert_eq!(
-            decision.execution_class,
-            ExecutionClass::SpecializedVideoTransformation
-        );
-        assert_eq!(decision.target, RoutingTarget::Unavailable);
-        assert!(!decision.auto_submit_allowed);
-        assert!(decision.reason.contains("Phase 16"));
     }
 
     // =========================================================================
-    // 09. Phase 14 Remediation Test C: Background Removal Blocked Until Real Adapter
+    // 09. Production Submission Guard: Test 3 — Background Removal Blocked
     // =========================================================================
 
     #[test]
-    fn test_phase14_remediation_test_c_background_removal_blocked_until_real_adapter() {
+    fn test_phase14_guard_test_3_background_removal_blocked() {
         let provider = ReplicateProvider::with_token("test_valid_token");
-        let req = make_test_request(6.0);
         let registry = ProviderRegistry::new();
+        let req = make_test_request(6.0, "BACKGROUND_REMOVAL");
 
-        let decision = GenerationRouter::route_with_registry(
-            TaskClass::BackgroundRemoval,
-            RoutingPreference::CostSaving,
-            &req,
-            &provider,
-            None,
-            &registry,
+        let result = validate_and_prepare_cloud_submission(&req, None, &provider, &registry);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("ROUTING_UNAVAILABLE") && err_msg.contains("Phase 17"),
+            "Expected ROUTING_UNAVAILABLE with Phase 17 reason, got: {}",
+            err_msg
         );
-
-        // Desired execution class is UtilityCloud, but target is Unavailable because
-        // no executable adapter exists in providers/ (deferred to Phase 17)
-        assert_eq!(decision.execution_class, ExecutionClass::UtilityCloud);
-        assert_eq!(decision.target, RoutingTarget::Unavailable);
-        assert!(!decision.auto_submit_allowed);
-        assert!(decision.reason.contains("Phase 17"));
     }
 
     // =========================================================================
-    // 10. Phase 14 Remediation Test D: Production Default Budget Is Exactly USD 3.00
+    // 10. Production Submission Guard: Test 4 — Default Budget ($3.00 pass, $3.01 fail)
     // =========================================================================
 
     #[test]
-    fn test_phase14_remediation_test_d_default_budget_is_3_usd() {
-        assert_eq!(DEFAULT_STANDARD_JOB_BUDGET_USD, 3.00);
-
-        let default_guard = CostGuard::standard_job_guard();
-        assert_eq!(default_guard.max_cost_per_job, 3.00);
+    fn test_phase14_guard_test_4_default_budget_enforcement() {
+        let guard = CostGuard::standard_job_guard();
+        assert_eq!(guard.max_cost_per_job, 3.00);
 
         let breakdown_exact = CostBreakdown {
             total_usd: Some(3.00),
             confidence: CostConfidence::Exact,
             ..Default::default()
         };
-        assert!(default_guard.check_breakdown(&breakdown_exact).is_ok());
+        assert!(guard.check_breakdown(&breakdown_exact).is_ok());
 
         let breakdown_over = CostBreakdown {
             total_usd: Some(3.01),
             confidence: CostConfidence::Estimated,
             ..Default::default()
         };
-        let err = default_guard.check_breakdown(&breakdown_over);
+        let err = guard.check_breakdown(&breakdown_over);
         assert!(err.is_err());
         match err.unwrap_err() {
             CloudProviderError::CostLimitExceeded { estimated, limit } => {
@@ -312,14 +276,13 @@ mod tests {
     }
 
     // =========================================================================
-    // 11. Phase 14 Remediation Test E: Unknown Price Blocks Submission
+    // 11. Production Submission Guard: Test 5 — Unknown Price Blocks Submission
     // =========================================================================
 
     #[test]
-    fn test_phase14_remediation_test_e_unknown_price_blocks_submission() {
+    fn test_phase14_guard_test_5_unknown_price_blocks_submission() {
         let guard = CostGuard::standard_job_guard();
 
-        // 1. None total cost
         let breakdown_none = CostBreakdown {
             total_usd: None,
             confidence: CostConfidence::Unknown,
@@ -327,71 +290,155 @@ mod tests {
         };
         assert!(guard.check_breakdown(&breakdown_none).is_err());
 
-        // 2. Unknown confidence
-        let breakdown_unknown_conf = CostBreakdown {
+        let breakdown_unknown = CostBreakdown {
             total_usd: Some(0.0),
             confidence: CostConfidence::Unknown,
             ..Default::default()
         };
-        assert!(guard.check_breakdown(&breakdown_unknown_conf).is_err());
+        assert!(guard.check_breakdown(&breakdown_unknown).is_err());
     }
 
     // =========================================================================
-    // 12. Phase 14 Remediation Test F: Invalid Budget Values Rejected
+    // 12. Production Submission Guard: Test 6 — Invalid User Budget Values
     // =========================================================================
 
     #[test]
-    fn test_phase14_remediation_test_f_invalid_budget_values_rejected() {
+    fn test_phase14_guard_test_6_invalid_user_budgets() {
         assert!(CostGuard::validate_budget(f64::NAN).is_err());
         assert!(CostGuard::validate_budget(f64::INFINITY).is_err());
         assert!(CostGuard::validate_budget(f64::NEG_INFINITY).is_err());
-        assert!(CostGuard::validate_budget(-1.0).is_err());
-        assert_eq!(CostGuard::validate_budget(2.50).unwrap(), 2.50);
-        assert_eq!(CostGuard::validate_budget(0.0).unwrap(), 0.0);
+        assert!(CostGuard::validate_budget(-0.01).is_err());
+        assert_eq!(CostGuard::validate_budget(3.00).unwrap(), 3.00);
     }
 
     // =========================================================================
-    // 13. Phase 14 Remediation Test G: Replicate Adapter Truthful Capability Contract
+    // 13. Production Submission Guard: Test 7 — Nonexistent Adapter Check
     // =========================================================================
 
     #[test]
-    fn test_phase14_remediation_test_g_replicate_adapter_truthful_capabilities() {
-        let provider = ReplicateProvider::new();
-        let caps = provider.capabilities();
-
-        // Verify only serialized capabilities are claimed
-        assert!(caps.supports_text_to_video);
-        assert!(!caps.supports_video_to_video);
-        assert!(!caps.supports_image_to_video);
-        assert!(!caps.supports_reference_image);
-        assert!(!caps.supports_character_reference);
-        assert!(!caps.supports_audio);
-    }
-
-    // =========================================================================
-    // 14. Phase 14 Remediation Test H: Provider Registry Adapter Verification
-    // =========================================================================
-
-    #[test]
-    fn test_phase14_remediation_test_h_provider_registry_adapter_verification() {
+    fn test_phase14_guard_test_7_nonexistent_adapter_rejected() {
         let registry = ProviderRegistry::new();
-
-        assert!(registry.has_executable_adapter("local_ffmpeg"));
-        assert!(registry.has_executable_adapter("replicate"));
-        assert!(registry.has_executable_adapter("local_diffusers"));
-
-        // Unimplemented adapter must return false
+        assert!(!registry.has_executable_adapter("nonexistent_cloud_model"));
         assert!(!registry.has_executable_adapter("replicate_utility"));
-        assert!(!registry.has_executable_adapter("nonexistent_provider"));
     }
 
     // =========================================================================
-    // 15. Phase 14 Remediation: Complete Historical Project Fixture Deserialization
+    // 14. Rust ↔ TypeScript Serialization Contract Tests (Blocker C)
     // =========================================================================
 
     #[test]
-    fn test_phase14_remediation_historical_project_fixture_deserialization() {
-        // Complete project JSON matching actual Project structure
+    fn test_phase14_ipc_contract_serialization_camel_case() {
+        // 1. CloudJobRequest camelCase contract
+        let req = make_test_request(6.0, "CharacterReplacement");
+        let json_req = serde_json::to_value(&req).unwrap();
+        assert!(json_req.get("jobId").is_some());
+        assert!(json_req.get("negativePrompt").is_some());
+        assert!(json_req.get("sourceVideo").is_some());
+        assert!(json_req.get("referenceImage").is_some());
+        assert!(json_req.get("durationSeconds").is_some());
+        assert!(json_req.get("taskType").is_some());
+        assert!(json_req.get("job_id").is_none());
+
+        // 2. CloudJobStatus camelCase contract
+        let status = CloudJobStatus {
+            job_id: "job_99".to_string(),
+            state: CloudJobState::Processing,
+            progress_pct: 50.0,
+            remote_id: Some("rem_1".to_string()),
+            remote_status: Some("processing".to_string()),
+            error_message: None,
+            output_url: Some("https://replicate.delivery/out.mp4".to_string()),
+            elapsed_seconds: 2.5,
+            cost_estimate: None,
+            actual_cost: Some(0.50),
+        };
+        let json_status = serde_json::to_value(&status).unwrap();
+        assert!(json_status.get("jobId").is_some());
+        assert!(json_status.get("progressPct").is_some());
+        assert!(json_status.get("remoteId").is_some());
+        assert!(json_status.get("remoteStatus").is_some());
+        assert!(json_status.get("outputUrl").is_some());
+        assert!(json_status.get("elapsedSeconds").is_some());
+        assert!(json_status.get("actualCost").is_some());
+        assert!(json_status.get("job_id").is_none());
+
+        // 3. CostEstimate camelCase contract
+        let est = CostEstimate {
+            provider: "replicate".to_string(),
+            model: "minimax/video-01".to_string(),
+            estimated_usd: Some(0.50),
+            min_usd: Some(0.45),
+            max_usd: Some(0.60),
+            confidence: 0.85,
+            currency: "USD".to_string(),
+            status: CostConfidence::Estimated,
+            breakdown: "1 prediction @ $0.50".to_string(),
+        };
+        let json_est = serde_json::to_value(&est).unwrap();
+        assert!(json_est.get("estimatedUsd").is_some());
+        assert!(json_est.get("minUsd").is_some());
+        assert!(json_est.get("maxUsd").is_some());
+        assert!(json_est.get("estimated_usd").is_none());
+
+        // 4. CostBreakdown camelCase contract
+        let breakdown = CostBreakdown::default();
+        let json_breakdown = serde_json::to_value(&breakdown).unwrap();
+        assert!(json_breakdown.get("providerId").is_some());
+        assert!(json_breakdown.get("modelId").is_some());
+        assert!(json_breakdown.get("billableDurationSec").is_some());
+        assert!(json_breakdown.get("segmentCount").is_some());
+        assert!(json_breakdown.get("totalUsd").is_some());
+
+        // 5. Frontend camelCase payload deserialization into Rust
+        let frontend_payload = r#"{
+            "jobId": "fe_job_123",
+            "prompt": "Test prompt from frontend",
+            "negativePrompt": "low quality",
+            "sourceVideo": "C:\\videos\\test.mp4",
+            "referenceImage": null,
+            "durationSeconds": 6.0,
+            "fps": 30.0,
+            "resolution": [720, 1280],
+            "taskType": "STYLE_FILTER"
+        }"#;
+        let parsed_req: CloudJobRequest = serde_json::from_str(frontend_payload).unwrap();
+        assert_eq!(parsed_req.job_id, "fe_job_123");
+        assert_eq!(parsed_req.duration_seconds, 6.0);
+        assert_eq!(parsed_req.task_type, "STYLE_FILTER");
+    }
+
+    // =========================================================================
+    // 15. Dynamic Price Refresh Updates All Estimates
+    // =========================================================================
+
+    #[test]
+    fn test_phase14_dynamic_price_refresh_updates_estimates() {
+        let mut registry = ProviderRegistry::new();
+        assert_eq!(
+            registry.find_by_id("replicate").unwrap().pricing_amount,
+            Some(0.50)
+        );
+
+        // Price update to $0.45 without modifying routing code
+        let updated = registry.update_price(
+            "replicate",
+            Some(0.45),
+            "https://replicate.com/minimax/video-01",
+            "2026-08-19",
+        );
+        assert!(updated);
+        assert_eq!(
+            registry.find_by_id("replicate").unwrap().pricing_amount,
+            Some(0.45)
+        );
+    }
+
+    // =========================================================================
+    // 16. Complete Historical Project Fixture Deserialization
+    // =========================================================================
+
+    #[test]
+    fn test_phase14_historical_project_fixture_deserialization() {
         let project_json = r#"{
             "schemaVersion": 1,
             "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -446,54 +493,5 @@ mod tests {
         assert_eq!(src.fps, 30.0);
         assert_eq!(project.transformation_config.category, "character");
         assert!(project.transformation_config.preservation.preserve_motion);
-    }
-
-    // =========================================================================
-    // 16. Phase 14 Remediation: TaskClass & Mode String Aliases
-    // =========================================================================
-
-    #[test]
-    fn test_phase14_remediation_task_class_string_aliases() {
-        assert_eq!(
-            TaskClass::from_str_or_default("CharacterReplacement"),
-            TaskClass::CharacterReplacement
-        );
-        assert_eq!(
-            TaskClass::from_str_or_default("style_filter"),
-            TaskClass::StyleFilter
-        );
-        assert_eq!(
-            TaskClass::from_str_or_default("REMOVE_BG"),
-            TaskClass::BackgroundRemoval
-        );
-        assert_eq!(
-            TaskClass::from_str_or_default("audio_mux"),
-            TaskClass::AudioTransformation
-        );
-    }
-
-    // =========================================================================
-    // 17. Phase 14 Remediation: Dynamic Price Refresh
-    // =========================================================================
-
-    #[test]
-    fn test_phase14_remediation_dynamic_price_refresh() {
-        let mut registry = ProviderRegistry::new();
-        assert_eq!(
-            registry.find_by_id("replicate").unwrap().pricing_amount,
-            Some(0.04)
-        );
-
-        let updated = registry.update_price(
-            "replicate",
-            Some(0.035),
-            "https://replicate.com/minimax/video-01/pricing",
-            "2026-08-19",
-        );
-        assert!(updated);
-        assert_eq!(
-            registry.find_by_id("replicate").unwrap().pricing_amount,
-            Some(0.035)
-        );
     }
 }

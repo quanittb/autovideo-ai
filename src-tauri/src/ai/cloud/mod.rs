@@ -6,6 +6,7 @@ pub mod providers;
 pub mod registry;
 pub mod router;
 pub mod segment;
+pub mod submission;
 
 pub use cost::{
     CostBreakdown, CostConfidence, CostEstimate, CostGuard, CostStatus, LatencyTelemetry,
@@ -23,3 +24,4 @@ pub use router::{
     UserExecutionMode,
 };
 pub use segment::{SegmentPlanner, VideoSegment};
+pub use submission::{validate_and_prepare_cloud_submission, ValidatedSubmissionPlan};

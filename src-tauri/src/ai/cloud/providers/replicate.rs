@@ -1,4 +1,4 @@
-use crate::ai::cloud::cost::{CostEstimate, CostStatus};
+use crate::ai::cloud::cost::CostEstimate;
 use crate::ai::cloud::error::CloudProviderError;
 use crate::ai::cloud::job::CloudJobRequest;
 use crate::ai::cloud::provider::{
@@ -68,31 +68,68 @@ impl CloudVideoProvider for ReplicateProvider {
             supports_audio: false,
             max_duration_sec: 10.0,
             supported_resolutions: vec![(512, 512), (720, 1280), (1080, 1920)],
-            estimated_cost_per_second: Some(0.04),
+            estimated_cost_per_second: None,
         }
     }
 
     fn estimate_cost(&self, req: &CloudJobRequest) -> CostEstimate {
+        let registry = crate::ai::cloud::ProviderRegistry::new();
         let dur = if req.duration_seconds <= 0.0 {
             6.0
         } else {
             req.duration_seconds
         };
-        let est = 0.04 * dur;
-        CostEstimate {
-            provider: self.provider_id().to_string(),
-            model: self.model_version.clone(),
-            estimated_usd: Some(est),
-            min_usd: Some(est * 0.8),
-            max_usd: Some(est * 1.5),
-            confidence: 0.90,
-            currency: "USD".to_string(),
-            status: if self.is_configured() {
-                CostStatus::Estimated
-            } else {
-                CostStatus::Unknown
-            },
-            breakdown: format!("${:.4}/sec x {:.1}s target duration", 0.04, dur),
+
+        if let Some(record) = registry.find_by_id(self.provider_id()) {
+            let seg_len = record.max_duration_sec.unwrap_or(6.0).min(6.0);
+            let segment_count = ((dur / seg_len).ceil() as usize).max(1);
+            let (inf_cost, confidence) = match (record.pricing_unit, record.pricing_amount) {
+                (crate::ai::cloud::PricingUnit::PerPrediction, Some(fee)) => (
+                    Some(fee * segment_count as f64),
+                    crate::ai::cloud::CostConfidence::Estimated,
+                ),
+                (crate::ai::cloud::PricingUnit::PerSecond, Some(rate)) => (
+                    Some(rate * dur),
+                    crate::ai::cloud::CostConfidence::Estimated,
+                ),
+                (crate::ai::cloud::PricingUnit::FreeLocal, Some(0.0)) => {
+                    (Some(0.0), crate::ai::cloud::CostConfidence::Exact)
+                }
+                _ => (None, crate::ai::cloud::CostConfidence::Unknown),
+            };
+
+            CostEstimate {
+                provider: self.provider_id().to_string(),
+                model: record.model_id.clone(),
+                estimated_usd: inf_cost,
+                min_usd: inf_cost.map(|v| v * 0.9),
+                max_usd: inf_cost.map(|v| v * 1.2),
+                confidence: if self.is_configured() {
+                    match confidence {
+                        crate::ai::cloud::CostConfidence::Exact => 1.0,
+                        crate::ai::cloud::CostConfidence::Estimated => 0.85,
+                        crate::ai::cloud::CostConfidence::Unknown => 0.0,
+                    }
+                } else {
+                    0.0
+                },
+                currency: record.currency.clone(),
+                status: if self.is_configured() {
+                    confidence
+                } else {
+                    crate::ai::cloud::CostConfidence::Unknown
+                },
+                breakdown: format!(
+                    "Provider: {} | Rate: {:?} ${:?} | Dur: {:.1}s ({} segs)",
+                    record.provider_id,
+                    record.pricing_unit,
+                    record.pricing_amount,
+                    dur,
+                    segment_count
+                ),
+            }
+        } else {
+            CostEstimate::default()
         }
     }
 
