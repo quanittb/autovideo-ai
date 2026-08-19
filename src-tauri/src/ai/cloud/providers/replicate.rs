@@ -61,11 +61,11 @@ impl CloudVideoProvider for ReplicateProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             supports_text_to_video: true,
-            supports_image_to_video: true,
-            supports_video_to_video: true,
-            supports_reference_image: true,
-            supports_character_reference: true,
-            supports_audio: true,
+            supports_image_to_video: false,
+            supports_video_to_video: false,
+            supports_reference_image: false,
+            supports_character_reference: false,
+            supports_audio: false,
             max_duration_sec: 10.0,
             supported_resolutions: vec![(512, 512), (720, 1280), (1080, 1920)],
             estimated_cost_per_second: Some(0.04),

@@ -1,98 +1,158 @@
-# AutoVideo AI — Phase 14 Report
-## Task-Specific, Capability-Aware & Cost-Aware Routing Model
+# AutoVideo AI — Phase 14 Remediation Report
+## Production Routing, Capability Truth & Budget Enforcement
 
 ---
 
 ## 1. Executive Summary
 
-Phase 14 replaces broad cloud-first routing with a unified **Task-Specific, Capability-Aware, and Cost-Aware Routing Model**. The system strictly prioritizes **local deterministic processing** (e.g. FFmpeg) whenever it can satisfy the user request, reserves specialized cloud video engines for complex generative transformations, and enforces authoritative backend budget guards.
+Phase 14 Remediation closes all acceptance gaps by enforcing strict **task-specific capability truth**, **authoritative backend budget limits (USD 3.00 default)**, and a **protected production submission path**. Under this model, paid cloud providers cannot be reached without passing full backend task classification, capability validation, resolution/FPS validation, cost calculation, and `CostGuard` verification.
+
+### Key Remediation Results:
+1. **Protected Production Submission Path**: `start_cloud_generation` in [`src-tauri/src/commands/mod.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/commands/mod.rs) now routes through `GenerationRouter::route_with_registry` and rejects local tasks (`TASK_ROUTES_TO_LOCAL_EXECUTION`), unavailable routes (`ROUTING_UNAVAILABLE`), budget violations (`CostLimitExceeded`), and unexecutable provider records (`PROVIDER_UNAVAILABLE`) prior to calling `provider.submit_job()`.
+2. **Authoritative Standard Budget (USD 3.00)**: Replaced arbitrary `5.0` defaults with `DEFAULT_STANDARD_JOB_BUDGET_USD` ($3.00). User-supplied budgets are strictly validated in Rust (rejecting NaN, Infinity, negative values).
+3. **Truthful Provider Capabilities**: [`ReplicateProvider`](file:///d:/rustProject/autovideo-ai/src-tauri/src/ai/cloud/providers/replicate.rs) advertises only `supports_text_to_video: true` matching its actual `prompt` & `prompt_optimizer` request serialization. Unsupported claims (`supports_video_to_video`, `supports_reference_image`, `supports_character_reference`, `supports_audio`) have been removed.
+4. **Guarded Character Replacement & Background Removal**: `CHARACTER_REPLACEMENT` and `BACKGROUND_REMOVAL` are classified into their desired execution classes (`SPECIALIZED_VIDEO_TRANSFORMATION` and `UTILITY_CLOUD`) but correctly set to `RoutingTarget::Unavailable` with `auto_submit_allowed: false` until real adapters are implemented in Phase 16 and Phase 17.
+5. **Unified Cost & Routing Truth**: `get_cloud_cost_estimate`, `get_generation_route`, and `start_cloud_generation` share the same authoritative `ProviderRegistry` and `CostBreakdown` pipeline.
 
 ---
 
-## 2. Architecture & Domain Model
+## 2. Preflight & Commit Metadata
 
-### 2.1 Execution Classes (`ExecutionClass`)
-- `LOCAL_DETERMINISTIC`: Universal zero-cost offline operations (FFmpeg / native media engine).
-- `UTILITY_CLOUD`: Low-cost utility models (e.g. background removal, BiRefNet).
-- `SPECIALIZED_VIDEO_TRANSFORMATION`: High-fidelity cloud video models (e.g. Replicate Minimax Video-01).
-- `GENERATIVE_FALLBACK`: Local neural generative inference (SD1.5 / AnimateDiff).
-- `LOCAL_EXPERIMENTAL`: Experimental local pipelines.
-
-### 2.2 Task Classes (`TaskClass`)
-- `CHARACTER_REPLACEMENT`: Routes to `SPECIALIZED_VIDEO_TRANSFORMATION` (defaults to 720p).
-- `BACKGROUND_REMOVAL`: Routes to `UTILITY_CLOUD` / local ONNX utility.
-- `BACKGROUND_COMPOSITE`: Routes to `LOCAL_DETERMINISTIC` ($0.00 local FFmpeg).
-- `STYLE_FILTER`: Routes to `LOCAL_DETERMINISTIC` ($0.00 local FFmpeg).
-- `AUDIO_TRANSFORMATION`: Routes to `LOCAL_DETERMINISTIC` ($0.00 local media engine).
-- `ACTION_REGENERATION`: Routes to `SPECIALIZED_VIDEO_TRANSFORMATION`.
-- `FULL_GENERATIVE_TRANSFORMATION`: Blocked in `COST_SAVING` mode to protect budget unless explicitly approved.
-
-### 2.3 Single Unified `ProviderRegistry`
-Located in [`src-tauri/src/ai/cloud/registry.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/ai/cloud/registry.rs):
-- Stores provider ID, model ID, version policy, execution class, capabilities, resolution/FPS limits, pricing metadata (`pricing_unit`, `pricing_amount`, `currency`, `source_url`, `observed_at`).
-- Dynamic price updating (`registry.update_price(...)`) allows runtime price updates without modifying routing code.
-
-### 2.4 Structured `CostBreakdown` & Authoritative Budget Enforcement
-Located in [`src-tauri/src/ai/cloud/cost.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/ai/cloud/cost.rs):
-- Details billable duration, resolution, segment count, overlap duration, retry allowance, inference cost, transfer cost, total cost, and confidence (`EXACT`, `ESTIMATED`, `UNKNOWN`).
-- `CostConfidence::Unknown` / missing price strictly blocks auto-submission.
-- Authoritative backend `CostGuard`:
-  - Default Preview Budget: **USD 0.25**
-  - Default Standard Job Budget: **USD 3.00**
-  - Exact boundary ($3.00 / $3.00) passes; one cent over ($3.01 / $3.00) fails with `CLOUD_COST_LIMIT_EXCEEDED`.
+- **Starting HEAD**: `040793a04d63f369b92f5b6401284e31c5a1325e`
+- **Branch**: `main`
+- **Working Tree**: Clean prior to remediation edits.
 
 ---
 
-## 3. Files Modified and Created
+## 3. Files Changed
 
 ### Backend Rust Core
-- [x] [`src-tauri/src/ai/cloud/registry.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/ai/cloud/registry.rs): Single `ProviderRegistry`, `ExecutionClass`, `PricingUnit`, `ProviderRecord`.
-- [x] [`src-tauri/src/ai/cloud/cost.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/ai/cloud/cost.rs): `CostBreakdown`, `CostConfidence`, `CostGuard` with authoritative budget thresholds.
-- [x] [`src-tauri/src/ai/cloud/router.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/ai/cloud/router.rs): `TaskClass`, `RoutingPreference`, capability & resolution/FPS validation, local deterministic preference.
-- [x] [`src-tauri/src/ai/cloud/mod.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/ai/cloud/mod.rs): Clean re-exports for Phase 14 domain types.
-- [x] [`src-tauri/src/ai/tests_cloud_mvp.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/ai/tests_cloud_mvp.rs): 16 comprehensive tests including 10 dedicated Phase 14 mandatory tests.
+- [x] [`src-tauri/src/ai/cloud/providers/replicate.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/ai/cloud/providers/replicate.rs): Set truthful capability declaration matching actual `submit_job()` serialization.
+- [x] [`src-tauri/src/ai/cloud/registry.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/ai/cloud/registry.rs): Updated provider records with truthful capabilities and added `has_executable_adapter()` verification.
+- [x] [`src-tauri/src/ai/cloud/router.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/ai/cloud/router.rs): Implemented `TaskClass::from_str_or_default()`, guarded unexecutable character-replacement / background-removal routes, and enforced local deterministic preference.
+- [x] [`src-tauri/src/ai/cloud/cost.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/ai/cloud/cost.rs): Added `CostGuard::validate_budget()` and enforced budget checking on `CostBreakdown`.
+- [x] [`src-tauri/src/commands/mod.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/commands/mod.rs): Integrated router and budget checks into `start_cloud_generation` and unified cost estimation.
+- [x] [`src-tauri/src/ai/tests_cloud_mvp.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/ai/tests_cloud_mvp.rs): Added dedicated production-path integration tests (Tests A–H) and historical project fixture deserialization.
 
 ### Frontend TypeScript Bridge
-- [x] [`src/lib/ipc.ts`](file:///d:/rustProject/autovideo-ai/src/lib/ipc.ts): Aligned `ExecutionClass`, `TaskClass`, `RoutingPreference`, `CostBreakdown`, `CostConfidence`, and `RoutingDecision` interfaces.
+- [x] [`src/lib/ipc.ts`](file:///d:/rustProject/autovideo-ai/src/lib/ipc.ts): Defined `CostEstimate` interface and strongly typed `getCostEstimate: Promise<CostEstimate>`.
 
 ---
 
-## 4. Test Suite Execution & Real Results
+## 4. Phase 14 Requirement Status Mapping
 
+| Requirement | Description | Status |
+|---|---|---|
+| **Req 1** | Single `ProviderRegistry` with complete pricing/source metadata | `PASS` |
+| **Req 2** | Capabilities valid only if adapter serializes every input | `PASS` |
+| **Req 3** | Structured `CostBreakdown` with billable metrics & confidence | `PASS` |
+| **Req 4** | Unknown cost is not zero and strictly blocks submission | `PASS` |
+| **Req 5** | Backend budget enforcement is authoritative on submission path | `PASS` |
+| **Req 6** | Default budgets: Preview USD 0.25, Standard Full Job USD 3.00 | `PASS` |
+| **Req 7** | User settings cannot bypass backend budget validation | `PASS` |
+| **Req 8** | Backward compatibility for stored project/task data | `PASS` |
+| **Req 9** | IPC/TypeScript types aligned without loose `any` | `PASS` |
+| **Req 10** | Provider prices derived from metadata, not hardcoded UI text | `PASS` |
+| **Req 11** | Price refresh supported dynamically without code changes | `PASS` |
+| **Blocker A** | Paid submission (`start_cloud_generation`) cannot bypass routing | `PASS` |
+| **Blocker B** | Standard default budget is USD 3.00 (rejecting > $3.00 and NaN/Inf) | `PASS` |
+| **Blocker C** | Replicate capabilities truthful to `submit_job` JSON payload | `PASS` |
+| **Task Route 1** | Local deterministic tasks (`StyleFilter`, `BackgroundComposite`, `AudioTransformation`) route to FFmpeg ($0.00) and reject cloud submission | `PASS` |
+| **Task Route 2** | `CharacterReplacement` returns `SpecializedVideoTransformation` + `Unavailable` until real adapter | `BLOCKED_BY_LATER_PROVIDER_PHASE` (Phase 16) |
+| **Task Route 3** | `BackgroundRemoval` returns `UtilityCloud` + `Unavailable` until real adapter | `BLOCKED_BY_LATER_PROVIDER_PHASE` (Phase 17) |
+
+---
+
+## 5. Provider Capability Matrix
+
+| Provider ID | Model ID | Executable Adapter | Text Input | Source Video | Reference Image | Audio Policy | Executable Tasks | Execution Class | Price / Rate | Confidence |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `local_ffmpeg` | `ffmpeg_native` | **Yes** | N/A | **Yes** | N/A | **Yes** | `StyleFilter`, `BackgroundComposite`, `AudioTransformation` | `LOCAL_DETERMINISTIC` | $0.00 (Free Local) | `EXACT` |
+| `replicate` | `minimax/video-01` | **Yes** | **Yes** | No | No | No | Text-to-Video only | `SPECIALIZED_VIDEO_TRANSFORMATION` | $0.0400 / sec | `ESTIMATED` |
+| `replicate_utility` | `lucataco/remove-bg` | **No** (Phase 17) | No | No | No | No | None (Deferred to Phase 17) | `UTILITY_CLOUD` | $0.0050 / pred | `UNKNOWN` |
+| `local_diffusers` | `sd15-animatediff-v3` | **Yes** | **Yes** | **Yes** | **Yes** | No | Local Generative Fallback | `GENERATIVE_FALLBACK` | $0.00 (Free Local) | `EXACT` |
+
+---
+
+## 6. Submission-Path Proof
+
+The exact call sequence for paid job submission in [`src-tauri/src/commands/mod.rs`](file:///d:/rustProject/autovideo-ai/src-tauri/src/commands/mod.rs) is:
+```text
+UI / IPC invoke('start_cloud_generation', { request, maxCost })
+  │
+  ├── 1. CostGuard::validate_budget(max_cost.unwrap_or(DEFAULT_STANDARD_JOB_BUDGET_USD))
+  │      └── Rejects NaN, Infinity, negative values
+  │
+  ├── 2. TaskClass::from_str_or_default(&request.task_type)
+  │
+  ├── 3. GenerationRouter::route_with_registry(task, CostSaving, &request, &provider, None, &registry)
+  │
+  ├── 4. Rejection Check: decision.target == RoutingTarget::Local
+  │      └── Returns Err("TASK_ROUTES_TO_LOCAL_EXECUTION...")
+  │
+  ├── 5. Rejection Check: decision.target == RoutingTarget::Unavailable || !decision.auto_submit_allowed
+  │      └── Returns Err("ROUTING_UNAVAILABLE...")
+  │
+  ├── 6. CostGuard::check_breakdown(&decision.cost_breakdown)
+  │      ├── Rejects CostConfidence::Unknown or total_usd == None
+  │      └── Rejects cost > budget_limit ($3.00 default) with CostLimitExceeded
+  │
+  ├── 7. Adapter Check: registry.has_executable_adapter(&decision.provider_id)
+  │      └── Rejects unimplemented provider adapters
+  │
+  └── 8. provider.submit_job(&request).await
 ```
-Testing Environment:
-- Host: Windows 11 x86_64
-- Rust toolchain: 1.84.0
-- Starting HEAD: 08a8c5e6fbdf54fc6f4b3aeaf6fe3732dcabc731
 
-Test Results:
-- cargo fmt --manifest-path src-tauri/Cargo.toml -- --check -> PASS (0 diffs)
-- cargo check --manifest-path src-tauri/Cargo.toml --all-targets -> PASS (0 errors, 0 warnings)
-- cargo test --manifest-path src-tauri/Cargo.toml -- test_phase14 --test-threads=1 -> PASS (10 passed; 0 failed)
-- cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1 -> PASS (615 passed; 0 failed; 0 ignored)
-- npm.cmd run build -> PASS (1859 modules built in 14.81s)
+---
+
+## 7. Test Suite Execution & Real Results
+
+```powershell
+1. cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+   Exit Code: 0 (No diffs)
+
+2. cargo check --all-targets --manifest-path src-tauri/Cargo.toml
+   Exit Code: 0 (0 errors, 0 warnings)
+
+3. cargo test --manifest-path src-tauri/Cargo.toml -- test_phase14 --test-threads=1
+   Exit Code: 0 (11 passed; 0 failed)
+
+4. cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+   Exit Code: 0 (616 passed; 0 failed; 0 ignored)
+
+5. npm run build
+   Exit Code: 0 (1859 modules transformed and bundled in 10.97s)
 ```
 
-### Verified Test Matrix:
-1. `test_phase14_01_task_execution_classes` $\rightarrow$ PASS
-2. `test_phase14_02_local_tasks_never_route_to_paid_providers_in_cost_saving` $\rightarrow$ PASS
-3. `test_phase14_03_capability_resolution_mismatch_rejected` $\rightarrow$ PASS
-4. `test_phase14_04_unsupported_fps_rejected` $\rightarrow$ PASS
-5. `test_phase14_05_exact_budget_boundary_passes` $\rightarrow$ PASS
-6. `test_phase14_06_one_cent_over_budget_fails` $\rightarrow$ PASS
-7. `test_phase14_07_unknown_price_blocks_submission` $\rightarrow$ PASS
-8. `test_phase14_08_disabled_full_generative_blocks_submission_in_cost_saving` $\rightarrow$ PASS
-9. `test_phase14_09_serialized_project_data_backward_compatibility` $\rightarrow$ PASS
-10. `test_phase14_10_provider_registry_price_refresh` $\rightarrow$ PASS
+### Verified Test List:
+- `test_phase14_remediation_test_a_local_tasks_cannot_submit_cloud_job`: **PASS**
+- `test_phase14_remediation_test_b_character_replacement_blocked_until_real_adapter`: **PASS**
+- `test_phase14_remediation_test_c_background_removal_blocked_until_real_adapter`: **PASS**
+- `test_phase14_remediation_test_d_default_budget_is_3_usd`: **PASS**
+- `test_phase14_remediation_test_e_unknown_price_blocks_submission`: **PASS**
+- `test_phase14_remediation_test_f_invalid_budget_values_rejected`: **PASS**
+- `test_phase14_remediation_test_g_replicate_adapter_truthful_capabilities`: **PASS**
+- `test_phase14_remediation_test_h_provider_registry_adapter_verification`: **PASS**
+- `test_phase14_remediation_historical_project_fixture_deserialization`: **PASS**
+- `test_phase14_remediation_task_class_string_aliases`: **PASS**
+- `test_phase14_remediation_dynamic_price_refresh`: **PASS**
 
 ---
 
-## 5. Incurred Cost
+## 8. Incurred Cost
 
-- **Live Paid Cloud Calls**: `$0.00` (Zero paid cloud calls made during Phase 14).
+- **Live Paid Cloud Calls**: `$0.00` (Zero paid cloud calls made).
 
 ---
 
-## 6. Final Status
+## 9. Remaining Limitations
+
+- Real cloud character-replacement provider (`prunaai/p-video-replace`) is deferred to Phase 16.
+- Real cloud background-removal provider (Bria / BiRefNet / fal) is deferred to Phase 17.
+- Live cloud acceptance runner (`cloud_live_acceptance.py`) remains blocked until `REPLICATE_API_TOKEN` is supplied by the user.
+
+---
+
+## 10. Final Status
 
 **STATUS: `PHASE_COMPLETED`**

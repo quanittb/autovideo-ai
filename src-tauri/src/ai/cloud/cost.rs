@@ -134,6 +134,16 @@ impl CostGuard {
         }
     }
 
+    pub fn validate_budget(budget: f64) -> Result<f64, CloudProviderError> {
+        if budget.is_nan() || budget.is_infinite() || budget < 0.0 {
+            return Err(CloudProviderError::RequestInvalid(format!(
+                "Invalid budget value: {} (must be a finite, non-negative number)",
+                budget
+            )));
+        }
+        Ok(budget)
+    }
+
     pub fn check(&self, estimate: &CostEstimate) -> Result<(), CloudProviderError> {
         if estimate.status == CostConfidence::Unknown || estimate.estimated_usd.is_none() {
             return Err(CloudProviderError::RequestInvalid(

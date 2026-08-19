@@ -1632,10 +1632,18 @@ pub fn generate_video_pipeline(
 pub fn get_cloud_cost_estimate(
     request: crate::ai::cloud::CloudJobRequest,
 ) -> Result<crate::ai::cloud::CostEstimate, String> {
+    let task_class = crate::ai::cloud::TaskClass::from_str_or_default(&request.task_type);
     let provider = crate::ai::cloud::ReplicateProvider::new();
-    Ok(crate::ai::cloud::CloudVideoProvider::estimate_cost(
-        &provider, &request,
-    ))
+    let registry = crate::ai::cloud::ProviderRegistry::new();
+    let decision = crate::ai::cloud::GenerationRouter::route_with_registry(
+        task_class,
+        crate::ai::cloud::RoutingPreference::CostSaving,
+        &request,
+        &provider,
+        None,
+        &registry,
+    );
+    Ok(decision.estimated_cost)
 }
 
 #[command]
@@ -1645,57 +1653,9 @@ pub fn get_generation_route(
     request: crate::ai::cloud::CloudJobRequest,
 ) -> Result<crate::ai::cloud::RoutingDecision, String> {
     let provider = crate::ai::cloud::ReplicateProvider::new();
-    let hw = crate::ai::generative::hardware::CapabilityReport {
-        timestamp: "2026-08-16T20:00:00Z".to_string(),
-        hardware: crate::ai::generative::hardware::HardwareProbeReport {
-            gpu: None,
-            cpu: crate::ai::generative::hardware::CpuDeviceInfo {
-                architecture: "x86_64".to_string(),
-                logical_cores: 12,
-                physical_cores: Some(6),
-                total_ram_mb: 16000,
-                available_ram_mb: 8000,
-            },
-            runtime: crate::ai::generative::hardware::MlRuntimeInfo {
-                python_version: Some("3.11.9".to_string()),
-                pytorch_version: Some("2.7.1".to_string()),
-                torch_cuda_version: Some("11.8".to_string()),
-                diffusers_version: Some("0.39.0".to_string()),
-                transformers_version: Some("5.15.0".to_string()),
-                accelerate_version: Some("1.14.0".to_string()),
-                safetensors_version: Some("0.8.0".to_string()),
-            },
-            os: crate::ai::generative::hardware::OsInfo {
-                os_name: "windows".to_string(),
-                architecture: "x86_64".to_string(),
-            },
-        },
-        precision_test: crate::ai::generative::hardware::PrecisionProbeResult {
-            tested_precision: crate::ai::generative::hardware::PrecisionMode::Fp32,
-            stable: true,
-            nan_detected: false,
-            inf_detected: false,
-            reason: "FP32 stable".to_string(),
-        },
-        benchmark: None,
-        selected_tier: crate::ai::generative::hardware::CapabilityTier::LowVram,
-        selected_profile:
-            crate::ai::generative::hardware::CapabilityClassifier::build_profile_for_tier(
-                crate::ai::generative::hardware::CapabilityTier::LowVram,
-                crate::ai::generative::hardware::PrecisionMode::Fp32,
-            ),
-        status: crate::ai::generative::hardware::HardwareStatus::HardwareSupportedWithLimitations,
-        user_override: crate::ai::generative::hardware::UserOverridePreference::Auto,
-        warnings: vec![],
-        fallback_history: vec![],
-    };
-
-    Ok(crate::ai::cloud::GenerationRouter::route(
-        task,
-        mode,
-        &request,
-        &provider,
-        Some(&hw),
+    let registry = crate::ai::cloud::ProviderRegistry::new();
+    Ok(crate::ai::cloud::GenerationRouter::route_with_registry(
+        task, mode, &request, &provider, None, &registry,
     ))
 }
 
@@ -1704,12 +1664,64 @@ pub async fn start_cloud_generation(
     request: crate::ai::cloud::CloudJobRequest,
     max_cost: Option<f64>,
 ) -> Result<crate::ai::cloud::CloudJobStatus, String> {
+    // 1. Authoritative budget validation (defaults to DEFAULT_STANDARD_JOB_BUDGET_USD: $3.00)
+    let budget_limit = match max_cost {
+        Some(val) => {
+            crate::ai::cloud::CostGuard::validate_budget(val).map_err(|e| format!("{}", e))?
+        }
+        None => crate::ai::cloud::DEFAULT_STANDARD_JOB_BUDGET_USD,
+    };
+
+    // 2. Determine real TaskClass
+    let task_class = crate::ai::cloud::TaskClass::from_str_or_default(&request.task_type);
+
+    // 3. Obtain routing decision through single GenerationRouter & ProviderRegistry
     let provider = crate::ai::cloud::ReplicateProvider::new();
-    let cost_guard = crate::ai::cloud::CostGuard::new(max_cost.unwrap_or(5.0));
-    let estimate = crate::ai::cloud::CloudVideoProvider::estimate_cost(&provider, &request);
+    let registry = crate::ai::cloud::ProviderRegistry::new();
+    let decision = crate::ai::cloud::GenerationRouter::route_with_registry(
+        task_class,
+        crate::ai::cloud::RoutingPreference::CostSaving,
+        &request,
+        &provider,
+        None,
+        &registry,
+    );
 
-    cost_guard.check(&estimate).map_err(|e| format!("{}", e))?;
+    // 4. Reject local deterministic tasks from paid cloud submission
+    if decision.target == crate::ai::cloud::RoutingTarget::Local {
+        return Err(format!(
+            "TASK_ROUTES_TO_LOCAL_EXECUTION: Task {:?} routes to local deterministic execution ($0.00) and cannot be submitted to cloud.",
+            task_class
+        ));
+    }
 
+    // 5. Reject unavailable or non-auto-submittable routes
+    if decision.target == crate::ai::cloud::RoutingTarget::Unavailable
+        || !decision.auto_submit_allowed
+    {
+        return Err(format!(
+            "ROUTING_UNAVAILABLE: Task {:?} cannot be submitted to cloud provider. Reason: {}",
+            task_class, decision.reason
+        ));
+    }
+
+    // 6. Authoritative backend CostGuard budget check
+    let cost_guard = crate::ai::cloud::CostGuard::new(budget_limit);
+    cost_guard
+        .check_breakdown(&decision.cost_breakdown)
+        .map_err(|e| format!("{}", e))?;
+
+    // 7. Verify executable provider adapter
+    if decision.provider_id != "replicate"
+        || !registry.has_executable_adapter(&decision.provider_id)
+    {
+        return Err(format!(
+            "PROVIDER_UNAVAILABLE: No executable adapter found for provider '{}'",
+            decision.provider_id
+        ));
+    }
+
+    // 8. Submit to provider
     let handle = provider
         .submit_job(&request)
         .await
@@ -1724,7 +1736,7 @@ pub async fn start_cloud_generation(
         error_message: None,
         output_url: None,
         elapsed_seconds: 0.5,
-        cost_estimate: Some(estimate),
+        cost_estimate: Some(decision.estimated_cost),
         actual_cost: None,
     })
 }

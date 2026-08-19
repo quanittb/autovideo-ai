@@ -8,20 +8,69 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TaskClass {
-    #[serde(alias = "CharacterReplacement")]
+    #[serde(alias = "CharacterReplacement", alias = "CHARACTER_REPLACEMENT")]
     CharacterReplacement,
-    #[serde(alias = "BackgroundRemoval")]
+    #[serde(alias = "BackgroundRemoval", alias = "BACKGROUND_REMOVAL")]
     BackgroundRemoval,
-    #[serde(alias = "BackgroundComposite", alias = "BackgroundReplacement")]
+    #[serde(
+        alias = "BackgroundComposite",
+        alias = "BackgroundReplacement",
+        alias = "BACKGROUND_COMPOSITE",
+        alias = "BACKGROUND_REPLACEMENT"
+    )]
     BackgroundComposite,
-    #[serde(alias = "StyleFilter", alias = "StyleTransformation")]
+    #[serde(
+        alias = "StyleFilter",
+        alias = "StyleTransformation",
+        alias = "STYLE_FILTER",
+        alias = "STYLE_TRANSFORMATION"
+    )]
     StyleFilter,
-    #[serde(alias = "AudioTransformation")]
+    #[serde(
+        alias = "AudioTransformation",
+        alias = "AUDIO_TRANSFORMATION",
+        alias = "AudioMux",
+        alias = "AUDIO_MUX"
+    )]
     AudioTransformation,
-    #[serde(alias = "ActionRegeneration", alias = "ActionTransformation")]
+    #[serde(
+        alias = "ActionRegeneration",
+        alias = "ActionTransformation",
+        alias = "ACTION_REGENERATION",
+        alias = "ACTION_TRANSFORMATION"
+    )]
     ActionRegeneration,
-    #[serde(alias = "FullGenerativeTransformation", alias = "FullTransformation")]
+    #[serde(
+        alias = "FullGenerativeTransformation",
+        alias = "FullTransformation",
+        alias = "FULL_GENERATIVE_TRANSFORMATION",
+        alias = "FULL_TRANSFORMATION"
+    )]
     FullGenerativeTransformation,
+}
+
+impl TaskClass {
+    pub fn from_str_or_default(s: &str) -> Self {
+        let normalized = s.trim().to_uppercase().replace('-', "_");
+        match normalized.as_str() {
+            "CHARACTER_REPLACEMENT" | "CHARACTER" => TaskClass::CharacterReplacement,
+            "BACKGROUND_REMOVAL" | "REMOVE_BG" | "REMOVE_BACKGROUND" => {
+                TaskClass::BackgroundRemoval
+            }
+            "BACKGROUND_COMPOSITE" | "BACKGROUND_REPLACEMENT" | "BACKGROUND" => {
+                TaskClass::BackgroundComposite
+            }
+            "STYLE_FILTER" | "STYLE_TRANSFORMATION" | "STYLE" => TaskClass::StyleFilter,
+            "AUDIO_TRANSFORMATION" | "AUDIO_MUX" | "AUDIO" => TaskClass::AudioTransformation,
+            "ACTION_REGENERATION" | "ACTION_TRANSFORMATION" | "ACTION" => {
+                TaskClass::ActionRegeneration
+            }
+            "FULL_GENERATIVE_TRANSFORMATION" | "FULL_TRANSFORMATION" | "FULL" | "GENERATIVE" => {
+                TaskClass::FullGenerativeTransformation
+            }
+            _ => TaskClass::CharacterReplacement,
+        }
+    }
 }
 
 pub type GenerationTask = TaskClass;
@@ -126,7 +175,7 @@ impl GenerationRouter {
             return Self::build_local_decision(
                 task,
                 mode,
-                "Local deterministic processing preferred for style, composite, and audio tasks",
+                "Local deterministic processing preferred for style, composite, and audio tasks ($0.00)",
                 request,
                 registry,
             );
@@ -148,7 +197,9 @@ impl GenerationRouter {
                 total_usd: None,
                 confidence: CostConfidence::Unknown,
                 currency: "USD".to_string(),
-                breakdown: "Full generative transformation is disabled in COST_SAVING mode to protect budget".to_string(),
+                breakdown:
+                    "Full generative transformation is disabled in COST_SAVING mode to protect budget"
+                        .to_string(),
             };
 
             return RoutingDecision {
@@ -168,15 +219,40 @@ impl GenerationRouter {
 
         // 4. Utility Cloud Tasks (Background Removal)
         if task == TaskClass::BackgroundRemoval {
-            if let Some(record) = registry.find_by_execution_class(ExecutionClass::UtilityCloud) {
-                return Self::build_cloud_decision(
+            // Check if executable adapter exists in providers/
+            let has_adapter = registry.has_executable_adapter("replicate_utility");
+            if !has_adapter {
+                let breakdown = CostBreakdown {
+                    provider_id: "replicate_utility".to_string(),
+                    model_id: "lucataco/remove-bg".to_string(),
+                    billable_duration_sec: duration,
+                    resolution: target_res,
+                    segment_count: 1,
+                    overlap_duration_sec: 0.0,
+                    retry_allowance_usd: 0.0,
+                    inference_cost_usd: None,
+                    transfer_storage_cost_usd: None,
+                    total_usd: None,
+                    confidence: CostConfidence::Unknown,
+                    currency: "USD".to_string(),
+                    breakdown:
+                        "Utility background-removal provider adapter not implemented (deferred to Phase 17)"
+                            .to_string(),
+                };
+
+                return RoutingDecision {
+                    target: RoutingTarget::Unavailable,
+                    execution_class: ExecutionClass::UtilityCloud,
+                    provider_id: "replicate_utility".to_string(),
+                    model_id: "lucataco/remove-bg".to_string(),
                     task,
                     mode,
-                    record,
-                    request,
-                    is_cloud_auth_configured,
-                    "Low-cost utility cloud provider selected for background removal",
-                );
+                    reason: "Utility background-removal provider adapter not implemented (deferred to Phase 17)".to_string(),
+                    estimated_cost: breakdown.to_estimate(),
+                    cost_breakdown: breakdown,
+                    fallback_available: false,
+                    auto_submit_allowed: false,
+                };
             }
         }
 
@@ -185,10 +261,50 @@ impl GenerationRouter {
             task,
             TaskClass::CharacterReplacement | TaskClass::ActionRegeneration
         ) {
-            if let Some(record) =
-                registry.find_by_execution_class(ExecutionClass::SpecializedVideoTransformation)
-            {
-                // Check if resolution or FPS constraints are violated
+            // Capability truth check: Character replacement requires video-to-video / character reference serialization.
+            // Current Replicate MiniMax adapter only serializes prompt & prompt_optimizer (text-to-video).
+            // Therefore, character replacement cannot be executed by the current MiniMax adapter.
+            let record_opt =
+                registry.find_by_execution_class(ExecutionClass::SpecializedVideoTransformation);
+            if let Some(record) = record_opt {
+                let adapter_supports_character_inputs = record.capabilities.supports_video_to_video
+                    && record.capabilities.supports_character_reference;
+
+                if !adapter_supports_character_inputs {
+                    let breakdown = CostBreakdown {
+                        provider_id: record.provider_id.clone(),
+                        model_id: record.model_id.clone(),
+                        billable_duration_sec: duration,
+                        resolution: target_res,
+                        segment_count: 1,
+                        overlap_duration_sec: 0.0,
+                        retry_allowance_usd: 0.0,
+                        inference_cost_usd: None,
+                        transfer_storage_cost_usd: None,
+                        total_usd: None,
+                        confidence: CostConfidence::Unknown,
+                        currency: "USD".to_string(),
+                        breakdown:
+                            "Specialized provider adapter not implemented for required character replacement inputs (deferred to Phase 16)"
+                                .to_string(),
+                    };
+
+                    return RoutingDecision {
+                        target: RoutingTarget::Unavailable,
+                        execution_class: record.execution_class,
+                        provider_id: record.provider_id.clone(),
+                        model_id: record.model_id.clone(),
+                        task,
+                        mode,
+                        reason: "Specialized provider adapter not implemented for required character replacement inputs (deferred to Phase 16)".to_string(),
+                        estimated_cost: breakdown.to_estimate(),
+                        cost_breakdown: breakdown,
+                        fallback_available: false,
+                        auto_submit_allowed: false,
+                    };
+                }
+
+                // Check resolution & FPS constraints
                 if !Self::check_resolution_supported(record, target_res) {
                     let breakdown = CostBreakdown {
                         provider_id: record.provider_id.clone(),

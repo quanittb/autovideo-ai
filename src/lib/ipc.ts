@@ -609,6 +609,18 @@ export interface CloudJobRequest {
   taskType: string;
 }
 
+export interface CostEstimate {
+  provider: string;
+  model: string;
+  estimatedUsd?: number;
+  minUsd?: number;
+  maxUsd?: number;
+  confidence: number;
+  currency: string;
+  status: CostConfidence | 'Exact' | 'Estimated' | 'Unknown';
+  breakdown: string;
+}
+
 export interface CloudJobStatus {
   jobId: string;
   state: 'Queued' | 'Submitting' | 'Processing' | 'Downloading' | 'Validating' | 'Completed' | 'Failed' | 'Cancelled';
@@ -618,14 +630,7 @@ export interface CloudJobStatus {
   errorMessage?: string;
   outputUrl?: string;
   elapsedSeconds: number;
-  costEstimate?: {
-    provider: string;
-    model: string;
-    estimatedUsd?: number;
-    currency: string;
-    status: 'EXACT' | 'ESTIMATED' | 'UNKNOWN' | 'Exact' | 'Estimated' | 'Unknown';
-    breakdown: string;
-  };
+  costEstimate?: CostEstimate;
   actualCost?: number;
 }
 
@@ -638,20 +643,13 @@ export interface RoutingDecision {
   mode: RoutingPreference | string;
   reason: string;
   costBreakdown: CostBreakdown;
-  estimatedCost: {
-    provider: string;
-    model: string;
-    estimatedUsd?: number;
-    currency: string;
-    status: 'EXACT' | 'ESTIMATED' | 'UNKNOWN' | 'Exact' | 'Estimated' | 'Unknown';
-    breakdown: string;
-  };
+  estimatedCost: CostEstimate;
   fallbackAvailable: boolean;
   autoSubmitAllowed: boolean;
 }
 
 export const cloudApi = {
-  getCostEstimate: async (request: CloudJobRequest): Promise<any> => {
+  getCostEstimate: async (request: CloudJobRequest): Promise<CostEstimate> => {
     return await invoke('get_cloud_cost_estimate', { request });
   },
 

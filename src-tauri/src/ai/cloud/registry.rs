@@ -104,6 +104,7 @@ impl ProviderRegistry {
         });
 
         // 2. Specialized Cloud Video Transformation (Replicate Minimax Video-01)
+        // Truthful capability declaration: Current adapter only serializes prompt & prompt_optimizer (text-to-video)
         self.records.push(ProviderRecord {
             provider_id: "replicate".to_string(),
             model_id: "minimax/video-01".to_string(),
@@ -111,11 +112,11 @@ impl ProviderRegistry {
             execution_class: ExecutionClass::SpecializedVideoTransformation,
             capabilities: ProviderCapabilities {
                 supports_text_to_video: true,
-                supports_image_to_video: true,
-                supports_video_to_video: true,
-                supports_reference_image: true,
-                supports_character_reference: true,
-                supports_audio: true,
+                supports_image_to_video: false,
+                supports_video_to_video: false,
+                supports_reference_image: false,
+                supports_character_reference: false,
+                supports_audio: false,
                 max_duration_sec: 10.0,
                 supported_resolutions: vec![(512, 512), (576, 1024), (720, 1280), (1080, 1920)],
                 estimated_cost_per_second: Some(0.04),
@@ -131,6 +132,7 @@ impl ProviderRegistry {
         });
 
         // 3. Utility Cloud (Low-Cost Background Removal)
+        // Note: Adapter in providers/ is not yet implemented (deferred to Phase 17).
         self.records.push(ProviderRecord {
             provider_id: "replicate_utility".to_string(),
             model_id: "lucataco/remove-bg".to_string(),
@@ -198,6 +200,13 @@ impl ProviderRegistry {
         self.records
             .iter()
             .find(|r| r.execution_class == exec_class)
+    }
+
+    pub fn has_executable_adapter(&self, provider_id: &str) -> bool {
+        match provider_id {
+            "local_ffmpeg" | "replicate" | "local_diffusers" => true,
+            _ => false,
+        }
     }
 
     pub fn update_price(
