@@ -1,6 +1,6 @@
-use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
 use crate::error::AppError;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

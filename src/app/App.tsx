@@ -8,7 +8,9 @@ import { ResultView } from '../features/result/ResultView';
 import { StepExport } from '../features/export/StepExport';
 import { SettingsView } from '../features/settings/SettingsView';
 import { ModelsView } from '../features/models/ModelsView';
+import { HistoryView } from '../features/history/HistoryView';
 import { MediaVerificationRunner } from '../features/media/MediaVerificationRunner';
+import { GenerativeStudioView } from '../features/generation/GenerativeStudioView';
 import { useUiStore } from '../stores/uiStore';
 
 export const App: React.FC = () => {
@@ -18,12 +20,16 @@ export const App: React.FC = () => {
     switch (activeTab) {
       case 'home':
         return <HomeView />;
+      case 'generation':
+        return <GenerativeStudioView />;
       case 'verification':
         return <MediaVerificationRunner />;
       case 'settings':
         return <SettingsView />;
       case 'models':
         return <ModelsView />;
+      case 'history':
+        return <HistoryView />;
       case 'jobs':
         return <JobMonitor />;
       case 'workspace':

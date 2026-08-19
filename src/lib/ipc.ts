@@ -47,6 +47,10 @@ export const mediaApi = {
   openDirectory: async (path: string): Promise<void> => {
     return await invoke<void>('open_directory', { path });
   },
+
+  openFilePath: async (path: string): Promise<void> => {
+    return await invoke<void>('open_file_path', { path });
+  },
 };
 
 export const editorApi = {
@@ -67,6 +71,60 @@ export const renderApi = {
     request: import('../types/contracts').RenderRequest
   ): Promise<import('../types/contracts').RenderResult> => {
     return await invoke<import('../types/contracts').RenderResult>('render_test_video', { request });
+  },
+};
+
+export const jobApi = {
+  createPipelineJob: async (
+    projectId: string,
+    jobType?: string,
+    inputFiles?: string[]
+  ): Promise<import('../types/contracts').Job> => {
+    return await invoke<import('../types/contracts').Job>('create_pipeline_job', {
+      projectId,
+      jobType,
+      inputFiles,
+    });
+  },
+
+  startJob: async (jobId: string): Promise<import('../types/contracts').Job> => {
+    return await invoke<import('../types/contracts').Job>('start_pipeline_job', { jobId });
+  },
+
+  cancelJob: async (jobId: string): Promise<import('../types/contracts').Job> => {
+    return await invoke<import('../types/contracts').Job>('cancel_pipeline_job', { jobId });
+  },
+
+  retryJob: async (jobId: string): Promise<import('../types/contracts').Job> => {
+    return await invoke<import('../types/contracts').Job>('retry_pipeline_job', { jobId });
+  },
+
+  deleteJob: async (jobId: string): Promise<void> => {
+    return await invoke<void>('delete_pipeline_job', { jobId });
+  },
+
+  getJob: async (jobId: string): Promise<import('../types/contracts').Job> => {
+    return await invoke<import('../types/contracts').Job>('get_pipeline_job', { jobId });
+  },
+
+  listJobs: async (projectId?: string): Promise<import('../types/contracts').Job[]> => {
+    return await invoke<import('../types/contracts').Job[]>('list_pipeline_jobs', { projectId });
+  },
+
+  getJobLogs: async (jobId: string): Promise<string[]> => {
+    return await invoke<string[]>('get_job_logs', { jobId });
+  },
+
+  getJobArtifacts: async (jobId: string): Promise<import('../types/contracts').Artifact[]> => {
+    return await invoke<import('../types/contracts').Artifact[]>('get_job_artifacts', { jobId });
+  },
+
+  validateJob: async (jobId: string): Promise<import('../types/contracts').JobValidationReport> => {
+    return await invoke<import('../types/contracts').JobValidationReport>('validate_pipeline_job', { jobId });
+  },
+
+  getAllJobHistory: async (): Promise<import('../types/contracts').Job[]> => {
+    return await invoke<import('../types/contracts').Job[]>('get_all_job_history');
   },
 };
 
@@ -110,6 +168,18 @@ export const api = {
         tempDir: './.autovideo_data/temp',
       };
     }
+  },
+
+  getStorageUsage: async (): Promise<import('../types/contracts').StorageUsageReport> => {
+    return await invoke<import('../types/contracts').StorageUsageReport>('get_storage_usage');
+  },
+
+  clearStorageCache: async (): Promise<number> => {
+    return await invoke<number>('clear_storage_cache');
+  },
+
+  cleanupTempStorage: async (): Promise<number> => {
+    return await invoke<number>('cleanup_temp_storage');
   },
 
   listProjects: async (): Promise<ProjectSummary[]> => {
@@ -156,3 +226,412 @@ export const api = {
     return await invoke<string>('get_ai_status');
   },
 };
+
+export const aiApi = {
+  listModels: async (): Promise<import('../types/contracts').AiModelManifest[]> => {
+    return await invoke<import('../types/contracts').AiModelManifest[]>('list_ai_models');
+  },
+
+  getModel: async (modelId: string): Promise<import('../types/contracts').AiModelManifest> => {
+    return await invoke<import('../types/contracts').AiModelManifest>('get_ai_model', { modelId });
+  },
+
+  registerModel: async (
+    manifest: import('../types/contracts').AiModelManifest
+  ): Promise<import('../types/contracts').AiModelManifest> => {
+    return await invoke<import('../types/contracts').AiModelManifest>('register_ai_model', { manifest });
+  },
+
+  unregisterModel: async (modelId: string): Promise<void> => {
+    return await invoke<void>('unregister_ai_model', { modelId });
+  },
+
+  getRuntimeStatus: async (): Promise<import('../types/contracts').RuntimeStatus> => {
+    return await invoke<import('../types/contracts').RuntimeStatus>('get_ai_runtime_status');
+  },
+
+  getDevices: async (): Promise<import('../types/contracts').DeviceInfo> => {
+    return await invoke<import('../types/contracts').DeviceInfo>('get_ai_devices');
+  },
+
+  getProviders: async (): Promise<import('../types/contracts').ProviderInfo[]> => {
+    return await invoke<import('../types/contracts').ProviderInfo[]>('get_ai_providers');
+  },
+
+  loadModel: async (
+    modelId: string,
+    provider?: import('../types/contracts').ExecutionProvider
+  ): Promise<import('../types/contracts').OnnxModelMetadata> => {
+    return await invoke<import('../types/contracts').OnnxModelMetadata>('load_ai_model', { modelId, provider });
+  },
+
+  unloadModel: async (): Promise<void> => {
+    return await invoke<void>('unload_ai_model');
+  },
+
+  inspectModel: async (): Promise<import('../types/contracts').OnnxModelMetadata> => {
+    return await invoke<import('../types/contracts').OnnxModelMetadata>('inspect_ai_model');
+  },
+
+  runInference: async (
+    request: import('../types/contracts').InferenceRequest
+  ): Promise<import('../types/contracts').InferenceResult> => {
+    return await invoke<import('../types/contracts').InferenceResult>('run_ai_inference', { request });
+  },
+
+  generateTestModel: async (
+    targetPath?: string
+  ): Promise<import('../types/contracts').AiModelManifest> => {
+    return await invoke<import('../types/contracts').AiModelManifest>('generate_test_model', { targetPath });
+  },
+
+  generateImageTestModel: async (
+    targetPath?: string
+  ): Promise<import('../types/contracts').AiModelManifest> => {
+    return await invoke<import('../types/contracts').AiModelManifest>('generate_image_test_model', { targetPath });
+  },
+
+  previewPreprocess: async (
+    imagePath: string,
+    config: import('../types/contracts').PreprocessConfig
+  ): Promise<import('../types/contracts').PreprocessResult> => {
+    return await invoke<import('../types/contracts').PreprocessResult>('preview_ai_preprocess', { imagePath, config });
+  },
+
+  validatePreprocess: async (
+    modelId: string,
+    config: import('../types/contracts').PreprocessConfig
+  ): Promise<import('../types/contracts').PreprocessValidationResult> => {
+    return await invoke<import('../types/contracts').PreprocessValidationResult>('validate_ai_preprocess', { modelId, config });
+  },
+
+  runPipeline: async (
+    modelId: string,
+    imagePath: string,
+    preprocessConfig: import('../types/contracts').PreprocessConfig,
+    postprocessConfig?: import('../types/contracts').PostprocessConfig
+  ): Promise<import('../types/contracts').PipelineExecutionReport> => {
+    return await invoke<import('../types/contracts').PipelineExecutionReport>('run_ai_pipeline', {
+      modelId,
+      imagePath,
+      preprocessConfig,
+      postprocessConfig,
+    });
+  },
+
+  decodeMask: async (
+    tensor: import('../types/contracts').AiTensorOutput,
+    threshold?: number
+  ): Promise<import('../types/contracts').Mask> => {
+    return await invoke<import('../types/contracts').Mask>('decode_ai_mask', { tensor, threshold });
+  },
+
+  createAiPipelineJob: async (
+    projectId: string,
+    inputFiles: string[],
+    aiConfig: import('../types/contracts').AiJobConfig
+  ): Promise<import('../types/contracts').Job> => {
+    return await invoke<import('../types/contracts').Job>('create_ai_pipeline_job', {
+      projectId,
+      inputFiles,
+      aiConfig,
+    });
+  },
+
+  getAiJobMetrics: async (
+    jobId: string
+  ): Promise<import('../types/contracts').AiJobMetrics | null> => {
+    return await invoke<import('../types/contracts').AiJobMetrics | null>('get_ai_job_metrics', {
+      jobId,
+    });
+  },
+
+  validateAiFrameArtifacts: async (
+    projectId: string,
+    jobId: string
+  ): Promise<{ validCount: number; totalCount: number; isValid: boolean }> => {
+    return await invoke<{ validCount: number; totalCount: number; isValid: boolean }>(
+      'validate_ai_frame_artifacts',
+      { projectId, jobId }
+    );
+  },
+
+  listModelFamilies: async (): Promise<import('../types/contracts').AiModelFamily[]> => {
+    return await invoke<import('../types/contracts').AiModelFamily[]>('list_ai_model_families');
+  },
+
+  listModelPackages: async (): Promise<import('../types/contracts').AiModelPackage[]> => {
+    return await invoke<import('../types/contracts').AiModelPackage[]>('list_ai_model_packages');
+  },
+
+  getModelPackage: async (
+    modelId: string,
+    version?: string
+  ): Promise<import('../types/contracts').AiModelPackage> => {
+    return await invoke<import('../types/contracts').AiModelPackage>('get_ai_model_package', {
+      modelId,
+      version,
+    });
+  },
+
+  validateModelPackage: async (
+    modelId: string,
+    version: string
+  ): Promise<import('../types/contracts').ModelValidationReport> => {
+    return await invoke<import('../types/contracts').ModelValidationReport>(
+      'validate_ai_model_package',
+      { modelId, version }
+    );
+  },
+
+  importModel: async (
+    req: import('../types/contracts').ImportModelRequest
+  ): Promise<import('../types/contracts').AiModelPackage> => {
+    return await invoke<import('../types/contracts').AiModelPackage>('import_ai_model', req as any);
+  },
+
+  activateModelVersion: async (
+    modelId: string,
+    version: string
+  ): Promise<import('../types/contracts').AiModelPackage> => {
+    return await invoke<import('../types/contracts').AiModelPackage>(
+      'activate_ai_model_version',
+      { modelId, version }
+    );
+  },
+
+  rollbackModel: async (
+    modelId: string
+  ): Promise<import('../types/contracts').AiModelPackage> => {
+    return await invoke<import('../types/contracts').AiModelPackage>('rollback_ai_model', {
+      modelId,
+    });
+  },
+
+  removeModelVersion: async (
+    modelId: string,
+    version: string
+  ): Promise<import('../types/contracts').AiModelPackage> => {
+    return await invoke<import('../types/contracts').AiModelPackage>(
+      'remove_ai_model_version',
+      { modelId, version }
+    );
+  },
+
+  resolveProductionModel: async (
+    modelId?: string,
+    version?: string,
+    provider?: import('../types/contracts').ExecutionProvider
+  ): Promise<import('../types/contracts').ResolvedProductionModel> => {
+    return await invoke<import('../types/contracts').ResolvedProductionModel>(
+      'resolve_production_model',
+      { modelId, version, provider }
+    );
+  },
+
+  validateJobPreflight: async (
+    sourcePath: string,
+    aiConfig: import('../types/contracts').AiJobConfig
+  ): Promise<import('../types/contracts').AiJobPreflightReport> => {
+    return await invoke<import('../types/contracts').AiJobPreflightReport>(
+      'validate_ai_job_preflight',
+      { sourcePath, aiConfig }
+    );
+  },
+
+  createProductionAiJob: async (
+    projectId: string,
+    inputFiles: string[],
+    aiConfig: import('../types/contracts').AiJobConfig
+  ): Promise<import('../types/contracts').Job> => {
+    return await invoke<import('../types/contracts').Job>('create_production_ai_job', {
+      projectId,
+      inputFiles,
+      aiConfig,
+    });
+  },
+
+  getResourceLimits: async (): Promise<import('../types/contracts').AiResourceLimits> => {
+    return await invoke<import('../types/contracts').AiResourceLimits>('get_ai_resource_limits');
+  },
+
+  getRuntimeResources: async (
+    modelId?: string
+  ): Promise<import('../types/contracts').AiRuntimeResources> => {
+    return await invoke<import('../types/contracts').AiRuntimeResources>(
+      'get_ai_runtime_resources',
+      { modelId }
+    );
+  },
+
+  getExecutionReport: async (
+    projectId: string,
+    jobId: string
+  ): Promise<import('../types/contracts').AiProductionExecutionReport> => {
+    return await invoke<import('../types/contracts').AiProductionExecutionReport>(
+      'get_ai_execution_report',
+      { projectId, jobId }
+    );
+  },
+
+  validateAiArtifacts: async (
+    projectId: string,
+    jobId: string
+  ): Promise<import('../types/contracts').AiFrameMetadata[]> => {
+    return await invoke<import('../types/contracts').AiFrameMetadata[]>(
+      'validate_ai_artifacts',
+      { projectId, jobId }
+    );
+  },
+
+  // =========================================================================
+  // PHASE 7B: GENERATIVE STUDIO IPC METHODS
+  // =========================================================================
+
+  getGenerativeCapabilities: async (): Promise<import('../types/contracts').BackendCapabilities> => {
+    return await invoke<import('../types/contracts').BackendCapabilities>(
+      'get_generative_capabilities'
+    );
+  },
+
+  checkGenerativePreflight: async (): Promise<import('../types/contracts').GenerativePreflightReport> => {
+    return await invoke<import('../types/contracts').GenerativePreflightReport>(
+      'check_generative_preflight'
+    );
+  },
+
+  generateKeyframe: async (
+    request: {
+      jobId: string;
+      sourceVideoPath: string;
+      sourceFrameIndex: number;
+      characterReferencePaths: string[];
+      positivePrompt: string;
+      negativePrompt: string;
+      stylePreset: string;
+      steps: number;
+      cfgScale: number;
+      denoiseStrength: number;
+      seed: number;
+      width: number;
+      height: number;
+    }
+  ): Promise<{
+    result: import('../types/contracts').KeyframeGenerationResult;
+    quality: import('../types/contracts').KeyframeQualityReport;
+  }> => {
+    return await invoke<{
+      result: import('../types/contracts').KeyframeGenerationResult;
+      quality: import('../types/contracts').KeyframeQualityReport;
+    }>('generate_keyframe', { request });
+  },
+
+  generateVideoPipeline: async (
+    request: {
+      jobId: string;
+      sourceVideoPath: string;
+      characterReferencePaths: string[];
+      positivePrompt: string;
+      negativePrompt: string;
+      stylePreset: string;
+      steps: number;
+      cfgScale: number;
+      denoiseStrength: number;
+      seed: number;
+      width: number;
+      height: number;
+      contextSize: number;
+      overlap: number;
+    }
+  ): Promise<import('../types/contracts').GenerativeVideoReport> => {
+    return await invoke<import('../types/contracts').GenerativeVideoReport>(
+      'generate_video_pipeline',
+      { request }
+    );
+  },
+
+  importControlModel: async (
+    modelId: string,
+    filePath: string,
+    version?: string
+  ): Promise<import('../types/contracts').AiModelPackage> => {
+    return await invoke<import('../types/contracts').AiModelPackage>(
+      'import_control_model',
+      { modelId, filePath, version }
+    );
+  },
+};
+
+export interface CloudJobRequest {
+  jobId: string;
+  prompt: string;
+  negativePrompt?: string;
+  sourceVideo?: string;
+  referenceImage?: string;
+  durationSeconds: number;
+  fps: number;
+  resolution: [number, number];
+  taskType: string;
+}
+
+export interface CloudJobStatus {
+  jobId: string;
+  state: 'Queued' | 'Submitting' | 'Processing' | 'Downloading' | 'Validating' | 'Completed' | 'Failed' | 'Cancelled';
+  progressPct: number;
+  remoteId?: string;
+  remoteStatus?: string;
+  errorMessage?: string;
+  outputUrl?: string;
+  elapsedSeconds: number;
+  costEstimate?: {
+    provider: string;
+    model: string;
+    estimatedUsd?: number;
+    currency: string;
+    status: 'Exact' | 'Estimated' | 'Unknown';
+    breakdown: string;
+  };
+  actualCost?: number;
+}
+
+export interface RoutingDecision {
+  target: 'Cloud' | 'Local' | 'Hybrid' | 'Unavailable';
+  providerId: string;
+  task: string;
+  mode: 'Auto' | 'Cloud' | 'Local';
+  reason: string;
+  estimatedCost: {
+    provider: string;
+    model: string;
+    estimatedUsd?: number;
+    currency: string;
+    status: 'Exact' | 'Estimated' | 'Unknown';
+    breakdown: string;
+  };
+  fallbackAvailable: boolean;
+}
+
+export const cloudApi = {
+  getCostEstimate: async (request: CloudJobRequest): Promise<any> => {
+    return await invoke('get_cloud_cost_estimate', { request });
+  },
+
+  getGenerationRoute: async (task: string, mode: string, request: CloudJobRequest): Promise<RoutingDecision> => {
+    return await invoke('get_generation_route', { task, mode, request });
+  },
+
+  startCloudGeneration: async (request: CloudJobRequest, maxCost?: number): Promise<CloudJobStatus> => {
+    return await invoke('start_cloud_generation', { request, maxCost });
+  },
+
+  getCloudJobStatus: async (jobId: string, remoteId?: string): Promise<CloudJobStatus> => {
+    return await invoke('get_cloud_job_status', { jobId, remoteId });
+  },
+
+  cancelCloudGeneration: async (remoteId: string): Promise<void> => {
+    return await invoke('cancel_cloud_generation', { remoteId });
+  },
+};
+
+
+

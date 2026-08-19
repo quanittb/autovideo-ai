@@ -12,9 +12,16 @@ pub mod runtime;
 pub mod system;
 
 use commands::*;
+use jobs::JobEngine;
+use system::StoragePaths;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Perform startup recovery on interrupted jobs
+    let storage_paths = StoragePaths::default_paths();
+    let engine = JobEngine::new(storage_paths);
+    let _ = engine.recover_interrupted_jobs();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -37,9 +44,69 @@ pub fn run() {
             extract_media_audio,
             validate_media_cache,
             open_directory,
+            open_file_path,
             resolve_project_media,
             persist_editor_state,
             render_test_video,
+            create_pipeline_job,
+            start_pipeline_job,
+            cancel_pipeline_job,
+            retry_pipeline_job,
+            delete_pipeline_job,
+            get_pipeline_job,
+            list_pipeline_jobs,
+            get_job_logs,
+            get_job_artifacts,
+            validate_pipeline_job,
+            list_ai_models,
+            get_ai_model,
+            register_ai_model,
+            unregister_ai_model,
+            get_ai_runtime_status,
+            get_ai_devices,
+            get_ai_providers,
+            load_ai_model,
+            unload_ai_model,
+            inspect_ai_model,
+            run_ai_inference,
+            generate_test_model,
+            generate_image_test_model,
+            preview_ai_preprocess,
+            validate_ai_preprocess,
+            run_ai_pipeline,
+            decode_ai_mask,
+            create_ai_pipeline_job,
+            get_ai_job_metrics,
+            validate_ai_frame_artifacts,
+            list_ai_model_families,
+            list_ai_model_packages,
+            get_ai_model_package,
+            validate_ai_model_package,
+            import_ai_model,
+            activate_ai_model_version,
+            rollback_ai_model,
+            remove_ai_model_version,
+            resolve_production_model,
+            validate_ai_job_preflight,
+            create_production_ai_job,
+            get_ai_resource_limits,
+            get_ai_runtime_resources,
+            get_ai_execution_report,
+            validate_ai_artifacts,
+            get_storage_usage,
+            clear_storage_cache,
+            cleanup_temp_storage,
+            get_all_job_history,
+            get_generative_capabilities,
+            check_generative_preflight,
+            generate_keyframe,
+            generate_video_pipeline,
+            import_control_model,
+            get_cloud_cost_estimate,
+            get_generation_route,
+            start_cloud_generation,
+            get_cloud_job_status,
+            cancel_cloud_generation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

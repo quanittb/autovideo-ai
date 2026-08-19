@@ -23,8 +23,8 @@ interface TransformPanelProps {
 
 export const TransformPanel: React.FC<TransformPanelProps> = ({ className = '' }) => {
   const { activeProject, updateTransformationRequest } = useProjectStore();
-  const { setCurrentStep, setActiveTab } = useUiStore();
-  const { setActiveJob } = useJobStore();
+  const { setActiveTab } = useUiStore();
+  const { createJob, startJob } = useJobStore();
 
   const [activeCategory, setActiveCategory] = useState<TransformationRequest['category']>('character');
 
@@ -60,31 +60,15 @@ export const TransformPanel: React.FC<TransformPanelProps> = ({ className = '' }
     });
   };
 
-  const handleGenerate = () => {
-    // Spawn demo/fixture job contract and transition to processing screen
-    setActiveJob({
-      id: `job-${Date.now()}`,
-      projectId: activeProject?.id || 'proj-fox-rabbit',
-      state: 'RUNNING',
-      stage: 'TRANSFORMATION',
-      progress: {
-        stage: 'TRANSFORMATION',
-        stageIndex: 4,
-        totalStages: 8,
-        currentFrame: 420,
-        totalFrames: 1860,
-        percentage: 45.2,
-        estimatedSecondsRemaining: 74,
-        currentSceneName: 'Scene #1 - Snowy Woodland',
-        gpuDevice: 'DirectX 12 GPU (DirectML)',
-        vramUsageMB: 4820,
-      },
-      createdAt: 'Just now',
-      updatedAt: 'Just now',
-      isFixture: true,
-    });
-    setCurrentStep('processing');
-    setActiveTab('projects');
+  const handleGenerate = async () => {
+    if (!activeProject) return;
+    try {
+      const created = await createJob(activeProject.id, 'video_pipeline');
+      await startJob(created.id);
+      setActiveTab('jobs');
+    } catch (err) {
+      console.error('Failed to create and start pipeline job:', err);
+    }
   };
 
   return (

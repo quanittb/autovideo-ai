@@ -1,11 +1,15 @@
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::error::AppError;
+use crate::events::parse_ffmpeg_progress_line;
 use crate::media::MediaService;
 use crate::projects::{ProjectOutput, SourceMedia};
 
@@ -113,10 +117,58 @@ impl RenderService {
         source_media: &SourceMedia,
         request: &RenderRequest,
     ) -> Result<RenderResult, AppError> {
+        self.render_video_with_progress(project_dir, source_media, request, &mut |_| {})
+    }
+
+    /// Validates frame sequence on disk, executes real FFmpeg assembly with audio muxing and live progress reporting.
+    pub fn render_video_with_progress<F>(
+        &self,
+        project_dir: &Path,
+        source_media: &SourceMedia,
+        request: &RenderRequest,
+        progress_callback: &mut F,
+    ) -> Result<RenderResult, AppError>
+    where
+        F: FnMut(f32),
+    {
+        self.render_video_with_progress_and_cancel(
+            project_dir,
+            source_media,
+            request,
+            progress_callback,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Validates frame sequence on disk, executes real FFmpeg assembly with audio muxing, live progress reporting, and cancellation support.
+    pub fn render_video_with_progress_and_cancel<F>(
+        &self,
+        project_dir: &Path,
+        source_media: &SourceMedia,
+        request: &RenderRequest,
+        progress_callback: &mut F,
+        cancel_token: Option<Arc<AtomicBool>>,
+        mut on_spawn_pid: Option<&mut dyn FnMut(u32)>,
+        mut on_exit_pid: Option<&mut dyn FnMut(u32)>,
+    ) -> Result<RenderResult, AppError>
+    where
+        F: FnMut(f32),
+    {
         let media_service = MediaService::new();
         let runtime = media_service.check_runtime_status();
         if !runtime.ffmpeg.available {
-            return Err(AppError::ffmpeg_not_available("FFmpeg is required for video rendering"));
+            return Err(AppError::ffmpeg_not_available(
+                "FFmpeg is required for video rendering",
+            ));
+        }
+
+        // Check cancellation before start
+        if let Some(ref ct) = cancel_token {
+            if ct.load(Ordering::SeqCst) {
+                return Err(AppError::cancelled());
+            }
         }
 
         let mode_raw = request.mode.as_deref().unwrap_or("test_1s");
@@ -127,10 +179,13 @@ impl RenderService {
         };
 
         // 1. Resolve and validate frames directory
-        let frames_dir = request
-            .frame_directory
-            .clone()
-            .unwrap_or_else(|| project_dir.join("cache").join("media").join(&request.media_id).join("frames"));
+        let frames_dir = request.frame_directory.clone().unwrap_or_else(|| {
+            project_dir
+                .join("cache")
+                .join("media")
+                .join(&request.media_id)
+                .join("frames")
+        });
 
         if !frames_dir.exists() || !frames_dir.is_dir() {
             return Err(AppError::output_not_found(format!(
@@ -166,7 +221,10 @@ impl RenderService {
         // Validate frame files exist & have non-zero length
         for frame in &frame_entries {
             let metadata = fs::metadata(frame).map_err(|e| {
-                AppError::frame_sequence_invalid("Failed to read frame file metadata", e.to_string())
+                AppError::frame_sequence_invalid(
+                    "Failed to read frame file metadata",
+                    e.to_string(),
+                )
             })?;
             if metadata.len() == 0 {
                 return Err(AppError::frame_sequence_invalid(
@@ -191,10 +249,7 @@ impl RenderService {
             _ => "reconstructed_1s.mp4".to_string(),
         };
 
-        let output_file_name = request
-            .output_name
-            .clone()
-            .unwrap_or(default_output_name);
+        let output_file_name = request.output_name.clone().unwrap_or(default_output_name);
         let output_path = output_folder.join(&output_file_name);
 
         // 3. Resolve audio path
@@ -217,6 +272,7 @@ impl RenderService {
         // 5. Construct FFmpeg command
         let mut cmd = Command::new("ffmpeg");
         cmd.arg("-y"); // Overwrite output file
+        cmd.arg("-progress").arg("pipe:1"); // Machine readable progress on stdout
         cmd.arg("-framerate").arg(format!("{:.3}", target_fps));
         cmd.arg("-start_number").arg("0");
         cmd.arg("-i").arg(input_pattern.to_str().unwrap());
@@ -232,16 +288,96 @@ impl RenderService {
             cmd.arg("-c:a").arg("aac");
             cmd.arg("-b:a").arg("128k");
             // Accurately cut audio to match frame sequence duration without truncation artifacts
-            cmd.arg("-t").arg(format!("{:.3}", expected_duration_seconds));
+            cmd.arg("-t")
+                .arg(format!("{:.3}", expected_duration_seconds));
         }
 
         cmd.arg(output_path.to_str().unwrap());
 
-        let output = cmd.output().map_err(|e| {
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let total_frames_f64 = actual_frame_count as f64;
+
+        let mut child = cmd.spawn().map_err(|e| {
             AppError::render_failed("Failed to invoke ffmpeg encoding process", e.to_string())
         })?;
 
+        let pid = child.id();
+        if let Some(ref mut cb) = on_spawn_pid {
+            cb(pid);
+        }
+
+        let mut was_cancelled = false;
+        if let Some(stdout) = child.stdout.take() {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().flatten() {
+                if let Some(ref ct) = cancel_token {
+                    if ct.load(Ordering::SeqCst) {
+                        was_cancelled = true;
+                        break;
+                    }
+                }
+                if let Some((k, v)) = parse_ffmpeg_progress_line(&line) {
+                    if k == "frame" {
+                        if let Ok(frame_num) = v.parse::<f64>() {
+                            let percent =
+                                ((frame_num / total_frames_f64) * 100.0).clamp(0.0, 99.0) as f32;
+                            progress_callback(percent);
+                        }
+                    } else if k == "progress" && v == "end" {
+                        progress_callback(100.0);
+                    }
+                }
+            }
+        }
+
+        if was_cancelled
+            || cancel_token
+                .as_ref()
+                .map(|ct| ct.load(Ordering::SeqCst))
+                .unwrap_or(false)
+        {
+            #[cfg(target_os = "windows")]
+            {
+                let _ = Command::new("taskkill")
+                    .args(["/F", "/T", "/PID", &pid.to_string()])
+                    .output();
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Some(ref mut cb) = on_exit_pid {
+                cb(pid);
+            }
+            if output_path.exists() {
+                let _ = fs::remove_file(&output_path);
+            }
+            return Err(AppError::cancelled());
+        }
+
+        let output = child.wait_with_output().map_err(|e| {
+            AppError::render_failed("Failed to wait on ffmpeg process", e.to_string())
+        })?;
+
+        if let Some(ref mut cb) = on_exit_pid {
+            cb(pid);
+        }
+
         if !output.status.success() {
+            if cancel_token
+                .as_ref()
+                .map(|ct| ct.load(Ordering::SeqCst))
+                .unwrap_or(false)
+            {
+                if output_path.exists() {
+                    let _ = fs::remove_file(&output_path);
+                }
+                return Err(AppError::cancelled());
+            }
             let stderr_msg = String::from_utf8_lossy(&output.stderr);
             return Err(AppError::render_failed(
                 "FFmpeg video reconstruction failed with non-zero exit code",
@@ -249,13 +385,20 @@ impl RenderService {
             ));
         }
 
+        progress_callback(100.0);
+
         // 6. Validate generated video output on disk with FFprobe
         if !output_path.exists() {
-            return Err(AppError::output_not_found(output_path.display().to_string()));
+            return Err(AppError::output_not_found(
+                output_path.display().to_string(),
+            ));
         }
 
         let output_probe = media_service.probe(&output_path).map_err(|e| {
-            AppError::output_metadata_failed("FFprobe validation failed on reconstructed MP4", e.message)
+            AppError::output_metadata_failed(
+                "FFprobe validation failed on reconstructed MP4",
+                e.message,
+            )
         })?;
 
         let now = Utc::now().to_rfc3339();
@@ -289,8 +432,17 @@ impl RenderService {
             _ => 0.05,
         };
 
-        let delta_sec = (out_dur_sec - if render_mode == "FULL" { source_dur_sec } else { expected_duration_seconds }).abs();
-        let is_full_match = render_mode == "FULL" && delta_sec <= 0.10 && source_media.width == output_metadata.width && source_media.height == output_metadata.height;
+        let delta_sec = (out_dur_sec
+            - if render_mode == "FULL" {
+                source_dur_sec
+            } else {
+                expected_duration_seconds
+            })
+        .abs();
+        let is_full_match = render_mode == "FULL"
+            && delta_sec <= 0.10
+            && source_media.width == output_metadata.width
+            && source_media.height == output_metadata.height;
 
         let timing_explanation = format!(
             "Mode: {}, Extracted: {} frames @ {:.2} FPS (expected: {} frames). Render Duration: {:.2}s (delta: {:.3}s)",
@@ -313,12 +465,14 @@ impl RenderService {
             output_fps: output_metadata.fps,
             source_has_audio: source_media.has_audio,
             output_has_audio: output_metadata.has_audio,
-            resolution_matches: source_media.width == output_metadata.width && source_media.height == output_metadata.height,
+            resolution_matches: source_media.width == output_metadata.width
+                && source_media.height == output_metadata.height,
             fps_matches: (source_media.fps - output_metadata.fps).abs() < 0.1,
             audio_matches: source_media.has_audio == output_metadata.has_audio,
             expected_frame_count,
             actual_frame_count,
-            frame_count_matches: actual_frame_count == expected_frame_count || (actual_frame_count as i64 - expected_frame_count as i64).abs() <= 1,
+            frame_count_matches: actual_frame_count == expected_frame_count
+                || (actual_frame_count as i64 - expected_frame_count as i64).abs() <= 1,
             duration_tolerance_seconds,
             is_full_match,
             timing_explanation,
@@ -335,7 +489,11 @@ impl RenderService {
             fps: target_fps,
             width: output_metadata.width,
             height: output_metadata.height,
-            audio_source: if has_usable_audio { Some(audio_candidate.display().to_string()) } else { None },
+            audio_source: if has_usable_audio {
+                Some(audio_candidate.display().to_string())
+            } else {
+                None
+            },
             output_path: output_path.display().to_string(),
             created_at: now.clone(),
             output_metadata: output_metadata.clone(),
@@ -392,10 +550,20 @@ mod tests {
         let gen_status = Command::new("ffmpeg")
             .args([
                 "-y",
-                "-f", "lavfi", "-i", "testsrc=duration=3:size=320x240:rate=30",
-                "-f", "lavfi", "-i", "sine=frequency=1000:duration=3",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                "-c:a", "aac",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=3:size=320x240:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:duration=3",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
                 source_video.to_str().unwrap(),
             ])
             .output();
@@ -408,7 +576,9 @@ mod tests {
             return;
         }
 
-        let imported = media_service.import_to_project(&proj_dir, &source_video).expect("Import failed");
+        let imported = media_service
+            .import_to_project(&proj_dir, &source_video)
+            .expect("Import failed");
 
         // Extract exactly 1.0s (30 frames at 30 FPS)
         let frame_req = crate::media::FrameExtractionRequest {
@@ -422,10 +592,14 @@ mod tests {
             format: Some("png".to_string()),
         };
 
-        let frame_res = media_service.extract_frames(&proj_dir, &imported.source_path, &frame_req).expect("Extract frames failed");
+        let frame_res = media_service
+            .extract_frames(&proj_dir, &imported.source_path, &frame_req)
+            .expect("Extract frames failed");
         assert_eq!(frame_res.frame_count, 30); // 30 frames for 1.0s
 
-        let audio_res = media_service.extract_audio(&proj_dir, &imported.source_path, &imported.media_id).expect("Extract audio failed");
+        let audio_res = media_service
+            .extract_audio(&proj_dir, &imported.source_path, &imported.media_id)
+            .expect("Extract audio failed");
 
         let render_service = RenderService::new();
         let render_req = RenderRequest {
@@ -441,7 +615,9 @@ mod tests {
             mode: Some("test_1s".to_string()),
         };
 
-        let result = render_service.render_video(&proj_dir, &imported, &render_req).expect("Render test 1s failed");
+        let result = render_service
+            .render_video(&proj_dir, &imported, &render_req)
+            .expect("Render test 1s failed");
         assert_eq!(result.mode, "TEST_1S");
         assert!(result.output_metadata.valid);
         assert!((result.output_metadata.duration_seconds - 1.0).abs() <= 0.05);
@@ -463,10 +639,20 @@ mod tests {
         let gen_status = Command::new("ffmpeg")
             .args([
                 "-y",
-                "-f", "lavfi", "-i", "testsrc=duration=5:size=320x240:rate=30",
-                "-f", "lavfi", "-i", "sine=frequency=1000:duration=5",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                "-c:a", "aac",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=5:size=320x240:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:duration=5",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
                 source_video.to_str().unwrap(),
             ])
             .output();
@@ -479,7 +665,9 @@ mod tests {
             return;
         }
 
-        let imported = media_service.import_to_project(&proj_dir, &source_video).expect("Import failed");
+        let imported = media_service
+            .import_to_project(&proj_dir, &source_video)
+            .expect("Import failed");
 
         // Extract exactly 3.0s (90 frames at 30 FPS)
         let frame_req = crate::media::FrameExtractionRequest {
@@ -493,10 +681,14 @@ mod tests {
             format: Some("png".to_string()),
         };
 
-        let frame_res = media_service.extract_frames(&proj_dir, &imported.source_path, &frame_req).expect("Extract frames failed");
+        let frame_res = media_service
+            .extract_frames(&proj_dir, &imported.source_path, &frame_req)
+            .expect("Extract frames failed");
         assert_eq!(frame_res.frame_count, 90); // 90 frames for 3.0s
 
-        let audio_res = media_service.extract_audio(&proj_dir, &imported.source_path, &imported.media_id).expect("Extract audio failed");
+        let audio_res = media_service
+            .extract_audio(&proj_dir, &imported.source_path, &imported.media_id)
+            .expect("Extract audio failed");
 
         let render_service = RenderService::new();
         let render_req = RenderRequest {
@@ -512,7 +704,9 @@ mod tests {
             mode: Some("test_3s".to_string()),
         };
 
-        let result = render_service.render_video(&proj_dir, &imported, &render_req).expect("Render test 3s failed");
+        let result = render_service
+            .render_video(&proj_dir, &imported, &render_req)
+            .expect("Render test 3s failed");
         assert_eq!(result.mode, "TEST_3S");
         assert!(result.output_metadata.valid);
         assert!((result.output_metadata.duration_seconds - 3.0).abs() <= 0.05);
@@ -521,17 +715,22 @@ mod tests {
 
     #[test]
     fn test_render_service_full_reconstruction_live() {
-        let video_path = PathBuf::from(r"d:\rustProject\autovideo-ai\.autovideo_data\sample_portrait_video.mp4");
+        let video_path =
+            PathBuf::from(r"d:\rustProject\autovideo-ai\.autovideo_data\sample_portrait_video.mp4");
         if !video_path.exists() {
             return;
         }
 
         let media_service = MediaService::new();
         let render_service = RenderService::new();
-        let proj_dir = PathBuf::from(r"d:\rustProject\autovideo-ai\.autovideo_data\projects\proj_render_full_live");
+        let proj_dir = PathBuf::from(
+            r"d:\rustProject\autovideo-ai\.autovideo_data\projects\proj_render_full_live",
+        );
         let _ = fs::create_dir_all(&proj_dir);
 
-        let imported = media_service.import_to_project(&proj_dir, &video_path).expect("Import failed");
+        let imported = media_service
+            .import_to_project(&proj_dir, &video_path)
+            .expect("Import failed");
 
         // 1. Extract ALL frames at source FPS (30 FPS for 5.0s = 150 frames)
         let frame_req = crate::media::FrameExtractionRequest {
@@ -544,10 +743,14 @@ mod tests {
             height: None,
             format: Some("png".to_string()),
         };
-        let frame_res = media_service.extract_frames(&proj_dir, &imported.source_path, &frame_req).expect("Extract all frames failed");
+        let frame_res = media_service
+            .extract_frames(&proj_dir, &imported.source_path, &frame_req)
+            .expect("Extract all frames failed");
         assert_eq!(frame_res.frame_count, 150);
 
-        let audio_res = media_service.extract_audio(&proj_dir, &imported.source_path, &imported.media_id).expect("Extract audio failed");
+        let audio_res = media_service
+            .extract_audio(&proj_dir, &imported.source_path, &imported.media_id)
+            .expect("Extract audio failed");
 
         let render_req = RenderRequest {
             project_id: "proj_render_full_live".to_string(),
@@ -562,18 +765,30 @@ mod tests {
             mode: Some("full".to_string()),
         };
 
-        let result = render_service.render_video(&proj_dir, &imported, &render_req).expect("Full render failed");
+        let result = render_service
+            .render_video(&proj_dir, &imported, &render_req)
+            .expect("Full render failed");
 
         println!("[PHASE 4C FULL RECONSTRUCTION PASS]");
-        println!("Output Video: {}", result.output_metadata.output_path.display());
-        println!("Source Duration: {:.2}s | Output Duration: {:.2}s (Delta: {:.3}s)",
+        println!(
+            "Output Video: {}",
+            result.output_metadata.output_path.display()
+        );
+        println!(
+            "Source Duration: {:.2}s | Output Duration: {:.2}s (Delta: {:.3}s)",
             result.comparison.source_duration_seconds,
             result.comparison.output_duration_seconds,
             result.comparison.duration_delta_seconds
         );
-        println!("Resolution: {}x{}", result.output_metadata.width, result.output_metadata.height);
+        println!(
+            "Resolution: {}x{}",
+            result.output_metadata.width, result.output_metadata.height
+        );
         println!("FPS: {:.2}", result.output_metadata.fps);
-        println!("Frames: {} / {}", result.comparison.actual_frame_count, result.comparison.expected_frame_count);
+        println!(
+            "Frames: {} / {}",
+            result.comparison.actual_frame_count, result.comparison.expected_frame_count
+        );
         println!("Is Full Match: {}", result.comparison.is_full_match);
 
         assert!(result.output_metadata.valid);
@@ -586,18 +801,25 @@ mod tests {
 
     #[test]
     fn test_render_service_douyin_modes() {
-        let video_path = PathBuf::from(r"C:\Users\quant\Dropbox\PC\Downloads\Douyin_1782229041.mp4");
+        let video_path =
+            PathBuf::from(r"C:\Users\quant\Dropbox\PC\Downloads\Douyin_1782229041.mp4");
         if !video_path.exists() {
             return;
         }
 
         let media_service = MediaService::new();
         let render_service = RenderService::new();
-        let proj_dir = PathBuf::from(r"d:\rustProject\autovideo-ai\.autovideo_data\projects\proj_render_douyin_audit");
+        let proj_dir = PathBuf::from(
+            r"d:\rustProject\autovideo-ai\.autovideo_data\projects\proj_render_douyin_audit",
+        );
         let _ = fs::create_dir_all(&proj_dir);
 
-        let imported = media_service.import_to_project(&proj_dir, &video_path).expect("Import failed");
-        let audio_res = media_service.extract_audio(&proj_dir, &imported.source_path, &imported.media_id).expect("Audio failed");
+        let imported = media_service
+            .import_to_project(&proj_dir, &video_path)
+            .expect("Import failed");
+        let audio_res = media_service
+            .extract_audio(&proj_dir, &imported.source_path, &imported.media_id)
+            .expect("Audio failed");
 
         // TEST 1: 1-Second Reconstruction (30 frames at 30 FPS)
         let frame_req_1s = crate::media::FrameExtractionRequest {
@@ -610,7 +832,9 @@ mod tests {
             height: None,
             format: Some("png".to_string()),
         };
-        let frame_res_1s = media_service.extract_frames(&proj_dir, &imported.source_path, &frame_req_1s).expect("1s frame extraction failed");
+        let frame_res_1s = media_service
+            .extract_frames(&proj_dir, &imported.source_path, &frame_req_1s)
+            .expect("1s frame extraction failed");
         assert_eq!(frame_res_1s.frame_count, 30);
 
         let render_req_1s = RenderRequest {
@@ -625,8 +849,11 @@ mod tests {
             output_name: Some("reconstructed_1s.mp4".to_string()),
             mode: Some("test_1s".to_string()),
         };
-        let res_1s = render_service.render_video(&proj_dir, &imported, &render_req_1s).expect("Render 1s failed");
-        println!("[TEST 1 — 1 SECOND RECONSTRUCTION]: Output={}, Duration={:.2}s, Frames={}, FPS={:.2}",
+        let res_1s = render_service
+            .render_video(&proj_dir, &imported, &render_req_1s)
+            .expect("Render 1s failed");
+        println!(
+            "[TEST 1 — 1 SECOND RECONSTRUCTION]: Output={}, Duration={:.2}s, Frames={}, FPS={:.2}",
             res_1s.output_metadata.output_path.display(),
             res_1s.output_metadata.duration_seconds,
             res_1s.comparison.actual_frame_count,
@@ -645,7 +872,9 @@ mod tests {
             height: None,
             format: Some("png".to_string()),
         };
-        let frame_res_3s = media_service.extract_frames(&proj_dir, &imported.source_path, &frame_req_3s).expect("3s frame extraction failed");
+        let frame_res_3s = media_service
+            .extract_frames(&proj_dir, &imported.source_path, &frame_req_3s)
+            .expect("3s frame extraction failed");
         assert_eq!(frame_res_3s.frame_count, 90);
 
         let render_req_3s = RenderRequest {
@@ -660,8 +889,11 @@ mod tests {
             output_name: Some("reconstructed_3s.mp4".to_string()),
             mode: Some("test_3s".to_string()),
         };
-        let res_3s = render_service.render_video(&proj_dir, &imported, &render_req_3s).expect("Render 3s failed");
-        println!("[TEST 2 — 3 SECOND RECONSTRUCTION]: Output={}, Duration={:.2}s, Frames={}, FPS={:.2}",
+        let res_3s = render_service
+            .render_video(&proj_dir, &imported, &render_req_3s)
+            .expect("Render 3s failed");
+        println!(
+            "[TEST 2 — 3 SECOND RECONSTRUCTION]: Output={}, Duration={:.2}s, Frames={}, FPS={:.2}",
             res_3s.output_metadata.output_path.display(),
             res_3s.output_metadata.duration_seconds,
             res_3s.comparison.actual_frame_count,
@@ -680,7 +912,9 @@ mod tests {
             height: None,
             format: Some("png".to_string()),
         };
-        let frame_res_full = media_service.extract_frames(&proj_dir, &imported.source_path, &frame_req_full).expect("Full frame extraction failed");
+        let frame_res_full = media_service
+            .extract_frames(&proj_dir, &imported.source_path, &frame_req_full)
+            .expect("Full frame extraction failed");
         assert_eq!(frame_res_full.frame_count, 730);
 
         let render_req_full = RenderRequest {
@@ -695,7 +929,9 @@ mod tests {
             output_name: Some("reconstructed_full.mp4".to_string()),
             mode: Some("full".to_string()),
         };
-        let res_full = render_service.render_video(&proj_dir, &imported, &render_req_full).expect("Full render failed");
+        let res_full = render_service
+            .render_video(&proj_dir, &imported, &render_req_full)
+            .expect("Full render failed");
         println!("[TEST 3 — FULL RECONSTRUCTION]: Output={}, Duration={:.2}s (Source={:.2}s, Delta={:.3}s), Frames={}, FPS={:.2}",
             res_full.output_metadata.output_path.display(),
             res_full.output_metadata.duration_seconds,

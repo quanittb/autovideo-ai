@@ -1,7 +1,7 @@
-use std::fs;
-use std::path::PathBuf;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::error::AppError;
@@ -393,7 +393,9 @@ mod tests {
         let (paths, _temp) = create_test_storage();
         let manager = ProjectManager::new(paths);
 
-        let created = manager.create_project("Fox to Rabbit Transformation").expect("Failed to create");
+        let created = manager
+            .create_project("Fox to Rabbit Transformation")
+            .expect("Failed to create");
         assert_eq!(created.name, "Fox to Rabbit Transformation");
         assert_eq!(created.schema_version, 1);
         assert_eq!(created.status, ProjectStatus::Empty);
@@ -416,8 +418,12 @@ mod tests {
         let (paths, _temp) = create_test_storage();
         let manager = ProjectManager::new(paths);
 
-        let p1 = manager.create_project("Project Alpha").expect("Create p1 failed");
-        let _p2 = manager.create_project("Project Beta").expect("Create p2 failed");
+        let p1 = manager
+            .create_project("Project Alpha")
+            .expect("Create p1 failed");
+        let _p2 = manager
+            .create_project("Project Beta")
+            .expect("Create p2 failed");
 
         let list = manager.list_projects().expect("List projects failed");
         assert_eq!(list.len(), 2);
@@ -429,11 +435,17 @@ mod tests {
 
         let updated = manager.update_project(&to_update).expect("Update failed");
         assert_eq!(updated.status, ProjectStatus::Imported);
-        assert_eq!(updated.transformation_config.prompt, "A majestic silver rabbit");
+        assert_eq!(
+            updated.transformation_config.prompt,
+            "A majestic silver rabbit"
+        );
 
         let reloaded = manager.get_project(&p1.id).expect("Reload failed");
         assert_eq!(reloaded.status, ProjectStatus::Imported);
-        assert_eq!(reloaded.transformation_config.prompt, "A majestic silver rabbit");
+        assert_eq!(
+            reloaded.transformation_config.prompt,
+            "A majestic silver rabbit"
+        );
     }
 
     #[test]
@@ -441,7 +453,9 @@ mod tests {
         let (paths, _temp) = create_test_storage();
         let manager = ProjectManager::new(paths);
 
-        let created = manager.create_project("Temporary Project").expect("Create failed");
+        let created = manager
+            .create_project("Temporary Project")
+            .expect("Create failed");
         assert!(manager.project_manifest_path(&created.id).exists());
 
         manager.delete_project(&created.id).expect("Delete failed");

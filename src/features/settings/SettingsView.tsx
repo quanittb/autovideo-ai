@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Cpu, 
   Folder, 
@@ -7,15 +7,78 @@ import {
   Info, 
   Sparkles, 
   Zap, 
-  CheckCircle2
+  CheckCircle2,
+  Trash2,
+  RotateCw
 } from 'lucide-react';
 import { useHardwareProfile } from '../../hooks/useHardwareProfile';
 import { useAppInfo } from '../../hooks/useAppInfo';
+import { api } from '../../lib/ipc';
+import { StorageUsageReport } from '../../types/contracts';
 
 export const SettingsView: React.FC = () => {
   const { hardware, storage } = useHardwareProfile();
   const { appInfo } = useAppInfo();
   const [activeTab, setActiveTab] = useState<'general' | 'models' | 'gpu' | 'storage' | 'performance' | 'privacy' | 'about'>('gpu');
+  const [storageReport, setStorageReport] = useState<StorageUsageReport | null>(null);
+  const [isLoadingStorage, setIsLoadingStorage] = useState<boolean>(false);
+  const [isClearingCache, setIsClearingCache] = useState<boolean>(false);
+  const [isCleaningTemp, setIsCleaningTemp] = useState<boolean>(false);
+  const [storageActionMessage, setStorageActionMessage] = useState<string | null>(null);
+
+  const fetchStorageUsage = async () => {
+    setIsLoadingStorage(true);
+    try {
+      const rep = await api.getStorageUsage();
+      setStorageReport(rep);
+    } catch (err) {
+      console.error('Failed to get storage usage:', err);
+    } finally {
+      setIsLoadingStorage(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'storage') {
+      fetchStorageUsage();
+    }
+  }, [activeTab]);
+
+  const handleClearCache = async () => {
+    setIsClearingCache(true);
+    setStorageActionMessage(null);
+    try {
+      const freed = await api.clearStorageCache();
+      setStorageActionMessage(`Cleared ${formatBytes(freed)} of cache data successfully.`);
+      await fetchStorageUsage();
+    } catch (err) {
+      console.error('Failed to clear cache:', err);
+    } finally {
+      setIsClearingCache(false);
+    }
+  };
+
+  const handleCleanupTemp = async () => {
+    setIsCleaningTemp(true);
+    setStorageActionMessage(null);
+    try {
+      const freed = await api.cleanupTempStorage();
+      setStorageActionMessage(`Cleaned ${formatBytes(freed)} of temporary workspace files.`);
+      await fetchStorageUsage();
+    } catch (err) {
+      console.error('Failed to clean temp files:', err);
+    } finally {
+      setIsCleaningTemp(false);
+    }
+  };
+
+  const formatBytes = (bytes: number): string => {
+    if (!bytes || bytes <= 0) return '0 B';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  };
 
   const tabs: { id: typeof activeTab; label: string; icon: React.ReactNode }[] = [
     { id: 'general', label: 'General', icon: <Sliders className="w-4 h-4" /> },
@@ -136,11 +199,92 @@ export const SettingsView: React.FC = () => {
 
           {/* Tab 4: Storage */}
           {activeTab === 'storage' && (
-            <div className="space-y-5">
-              <h3 className="text-base font-bold text-slate-200">Storage Locations</h3>
-              <div className="space-y-3 text-xs">
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
                 <div>
-                  <span className="text-slate-400 block mb-1 font-semibold">Projects Data Directory:</span>
+                  <h3 className="text-base font-bold text-slate-200">Storage & Cache Management</h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Monitor disk space consumed by project files, AI artifact caches, model weights, and temporary frames.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={fetchStorageUsage}
+                  disabled={isLoadingStorage}
+                  className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <RotateCw className={`w-3.5 h-3.5 text-indigo-400 ${isLoadingStorage ? 'animate-spin' : ''}`} />
+                  <span>Refresh</span>
+                </button>
+              </div>
+
+              {storageActionMessage && (
+                <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-300 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>{storageActionMessage}</span>
+                </div>
+              )}
+
+              {/* Disk Usage Overview Card */}
+              <div className="p-5 rounded-2xl bg-slate-950 border border-slate-800 space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                    Total Storage Allocated
+                  </span>
+                  <span className="text-sm font-bold font-mono text-indigo-300">
+                    {formatBytes(storageReport?.totalBytes || 0)}
+                  </span>
+                </div>
+
+                {/* Storage Distribution Breakdown */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                  <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800 space-y-1">
+                    <span className="text-[10px] text-slate-500 block uppercase font-semibold">Projects</span>
+                    <span className="font-mono font-bold text-slate-200">{formatBytes(storageReport?.projectsBytes || 0)}</span>
+                  </div>
+                  <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800 space-y-1">
+                    <span className="text-[10px] text-slate-500 block uppercase font-semibold">Media / AI Cache</span>
+                    <span className="font-mono font-bold text-purple-300">{formatBytes((storageReport?.cacheBytes || 0) + (storageReport?.aiCacheBytes || 0))}</span>
+                  </div>
+                  <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800 space-y-1">
+                    <span className="text-[10px] text-slate-500 block uppercase font-semibold">Model Packages</span>
+                    <span className="font-mono font-bold text-emerald-300">{formatBytes(storageReport?.modelsBytes || 0)}</span>
+                  </div>
+                  <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800 space-y-1">
+                    <span className="text-[10px] text-slate-500 block uppercase font-semibold">Temp Workspaces</span>
+                    <span className="font-mono font-bold text-amber-300">{formatBytes(storageReport?.tempBytes || 0)}</span>
+                  </div>
+                </div>
+
+                {/* Cleanup Actions */}
+                <div className="pt-2 flex flex-wrap items-center gap-3 border-t border-slate-800/80">
+                  <button
+                    type="button"
+                    onClick={handleClearCache}
+                    disabled={isClearingCache}
+                    className="px-4 py-2 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>{isClearingCache ? 'Clearing Cache...' : 'Clear Media Cache'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleCleanupTemp}
+                    disabled={isCleaningTemp}
+                    className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer"
+                  >
+                    <Folder className="w-3.5 h-3.5 text-amber-400" />
+                    <span>{isCleaningTemp ? 'Cleaning Temp...' : 'Clean Temporary Files'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Directory Paths Reference */}
+              <div className="space-y-3 text-xs">
+                <span className="text-slate-400 block font-semibold">Local Storage Paths:</span>
+                <div>
+                  <span className="text-slate-500 block mb-1">Projects Directory:</span>
                   <input
                     type="text"
                     readOnly
@@ -150,7 +294,7 @@ export const SettingsView: React.FC = () => {
                 </div>
 
                 <div>
-                  <span className="text-slate-400 block mb-1 font-semibold">Model Weights Directory:</span>
+                  <span className="text-slate-500 block mb-1">Model Weights Directory:</span>
                   <input
                     type="text"
                     readOnly
@@ -160,7 +304,7 @@ export const SettingsView: React.FC = () => {
                 </div>
 
                 <div>
-                  <span className="text-slate-400 block mb-1 font-semibold">Temporary Video Frame Buffer:</span>
+                  <span className="text-slate-500 block mb-1">Temporary Buffer Directory:</span>
                   <input
                     type="text"
                     readOnly

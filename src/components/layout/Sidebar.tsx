@@ -8,7 +8,8 @@ import {
   Settings as SettingsIcon,
   Video,
   HardDrive,
-  CheckCircle2
+  CheckCircle2,
+  History as HistoryIcon
 } from 'lucide-react';
 import { useUiStore } from '../../stores/uiStore';
 import { useHardwareProfile } from '../../hooks/useHardwareProfile';
@@ -20,10 +21,12 @@ export const Sidebar: React.FC = () => {
 
   const navItems: { id: NavTab; label: string; icon: React.ReactNode }[] = [
     { id: 'home', label: 'Home', icon: <Home className="w-4 h-4" /> },
+    { id: 'generation', label: 'Generative Studio', icon: <Sparkles className="w-4 h-4 text-purple-400" /> },
     { id: 'workspace', label: 'Workspace', icon: <Video className="w-4 h-4" /> },
     { id: 'projects', label: 'Projects', icon: <FolderKanban className="w-4 h-4" /> },
     { id: 'jobs', label: 'Jobs & Pipeline', icon: <Activity className="w-4 h-4" /> },
     { id: 'models', label: 'AI Models', icon: <Cpu className="w-4 h-4" /> },
+    { id: 'history', label: 'History', icon: <HistoryIcon className="w-4 h-4" /> },
     { id: 'verification', label: 'Media Engine Test', icon: <Activity className="w-4 h-4 text-purple-400" /> },
     { id: 'settings', label: 'Settings', icon: <SettingsIcon className="w-4 h-4" /> },
   ];

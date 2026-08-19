@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -19,7 +19,9 @@ impl HardwareProfile {
     pub fn detect() -> Self {
         let os = std::env::consts::OS.to_string();
         let arch = std::env::consts::ARCH.to_string();
-        let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let cpu_cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
 
         let is_directml_supported = os == "windows";
         let is_metal_supported = os == "macos";

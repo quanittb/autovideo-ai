@@ -39,11 +39,18 @@ export const ProjectWorkspace: React.FC = () => {
 
         <div className="flex items-center gap-3">
           <button
+            onClick={() => setActiveTab('jobs')}
+            className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-xs font-bold shadow-md shadow-purple-900/30 flex items-center gap-1.5 transition-all cursor-pointer"
+          >
+            <Activity className="w-3.5 h-3.5" />
+            <span>Jobs & Pipeline</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('verification')}
             className="px-3 py-1.5 rounded-xl bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 border border-purple-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors"
           >
-            <Activity className="w-3.5 h-3.5" />
-            <span>Media Engine Diagnostic</span>
+            <span>Media Diagnostics</span>
           </button>
 
           <button

@@ -8,6 +8,21 @@ pub enum ErrorCode {
     FileNotFound,
     UnsupportedMedia,
     ModelNotAvailable,
+    ModelIntegrityMismatch,
+    ModelProfileMismatch,
+    ModelVersionExists,
+    ModelValidationFailed,
+    ModelNotFound,
+    ModelVersionNotFound,
+    ModelNotActive,
+    ModelProviderUnsupported,
+    ProviderUnavailable,
+    ModelGraphInvalid,
+    PreflightFailed,
+    AiJobConfigurationInvalid,
+    ResourceLimitExceeded,
+    FrameQualityFailed,
+    DiskQuotaExceeded,
     RuntimeNotAvailable,
     InsufficientResources,
     ProcessFailed,
@@ -38,6 +53,11 @@ pub enum ErrorCode {
     OutputMetadataFailed,
     AudioMuxFailed,
     FrameSequenceInvalid,
+    JobNotFound,
+    JobFailed,
+    JobCancelled,
+    JobInterrupted,
+    StorageError,
     UnknownError,
 }
 
@@ -64,7 +84,11 @@ impl AppError {
         }
     }
 
-    pub fn with_details(code: ErrorCode, message: impl Into<String>, details: impl Into<String>) -> Self {
+    pub fn with_details(
+        code: ErrorCode,
+        message: impl Into<String>,
+        details: impl Into<String>,
+    ) -> Self {
         Self {
             code,
             message: message.into(),
@@ -81,7 +105,11 @@ impl AppError {
     }
 
     pub fn unsupported_media(format: impl Into<String>) -> Self {
-        Self::with_details(ErrorCode::UnsupportedMedia, "Unsupported video format", format)
+        Self::with_details(
+            ErrorCode::UnsupportedMedia,
+            "Unsupported video format",
+            format,
+        )
     }
 
     pub fn model_not_available(model: impl Into<String>, guidance: impl Into<String>) -> Self {
@@ -90,6 +118,124 @@ impl AppError {
             format!("Model '{}' is not available", model.into()),
             guidance,
         )
+    }
+
+    pub fn model_integrity_mismatch(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::ModelIntegrityMismatch, msg, details)
+    }
+
+    pub fn model_profile_mismatch(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::ModelProfileMismatch, msg, details)
+    }
+
+    pub fn model_version_exists(model_id: impl Into<String>, version: impl Into<String>) -> Self {
+        Self::with_details(
+            ErrorCode::ModelVersionExists,
+            format!(
+                "Model '{}' version '{}' already exists in registry",
+                model_id.into(),
+                version.into()
+            ),
+            "Specify a new version or use update operation",
+        )
+    }
+
+    pub fn model_validation_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::ModelValidationFailed, msg, details)
+    }
+
+    pub fn model_not_found(model_id: impl Into<String>) -> Self {
+        let id = model_id.into();
+        Self::with_details(
+            ErrorCode::ModelNotFound,
+            format!("AI model '{}' was not found in registry", id),
+            "Verify the model is installed in the local model directory",
+        )
+    }
+
+    pub fn model_version_not_found(
+        model_id: impl Into<String>,
+        version: impl Into<String>,
+    ) -> Self {
+        let id = model_id.into();
+        let ver = version.into();
+        Self::with_details(
+            ErrorCode::ModelVersionNotFound,
+            format!("Version '{}' of model '{}' was not found", ver, id),
+            "Check available model versions in the model registry",
+        )
+    }
+
+    pub fn model_not_active(model_id: impl Into<String>) -> Self {
+        let id = model_id.into();
+        Self::with_details(
+            ErrorCode::ModelNotActive,
+            format!("Model '{}' does not have an active production version", id),
+            "Activate a valid version in the Model Registry before creating jobs",
+        )
+    }
+
+    pub fn model_provider_unsupported(
+        model_id: impl Into<String>,
+        provider: impl Into<String>,
+    ) -> Self {
+        let id = model_id.into();
+        let prov = provider.into();
+        Self::with_details(
+            ErrorCode::ModelProviderUnsupported,
+            format!(
+                "Execution provider '{}' is not supported by model '{}'",
+                prov, id
+            ),
+            "Choose a provider supported by this model package",
+        )
+    }
+
+    pub fn provider_unavailable(provider: impl Into<String>, reason: impl Into<String>) -> Self {
+        let prov = provider.into();
+        Self::with_details(
+            ErrorCode::ProviderUnavailable,
+            format!(
+                "Hardware execution provider '{}' is not available on host",
+                prov
+            ),
+            reason,
+        )
+    }
+
+    pub fn model_graph_invalid(model_id: impl Into<String>, details: impl Into<String>) -> Self {
+        let id = model_id.into();
+        Self::with_details(
+            ErrorCode::ModelGraphInvalid,
+            format!(
+                "ONNX computation graph for model '{}' is invalid or corrupt",
+                id
+            ),
+            details,
+        )
+    }
+
+    pub fn preflight_failed(summary: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::PreflightFailed, summary, details)
+    }
+
+    pub fn ai_job_configuration_invalid(
+        msg: impl Into<String>,
+        details: impl Into<String>,
+    ) -> Self {
+        Self::with_details(ErrorCode::AiJobConfigurationInvalid, msg, details)
+    }
+
+    pub fn resource_limit_exceeded(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::ResourceLimitExceeded, msg, details)
+    }
+
+    pub fn frame_quality_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::FrameQualityFailed, msg, details)
+    }
+
+    pub fn disk_quota_exceeded(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::DiskQuotaExceeded, msg, details)
     }
 
     pub fn runtime_not_available(runtime: impl Into<String>) -> Self {
@@ -129,7 +275,11 @@ impl AppError {
     }
 
     pub fn media_file_not_found(path: impl Into<String>) -> Self {
-        Self::with_details(ErrorCode::MediaFileNotFound, "Source media file not found", path)
+        Self::with_details(
+            ErrorCode::MediaFileNotFound,
+            "Source media file not found",
+            path,
+        )
     }
 
     pub fn media_unsupported_format(format: impl Into<String>) -> Self {
@@ -144,7 +294,10 @@ impl AppError {
         Self::with_details(
             ErrorCode::MediaTooLarge,
             "Video file size exceeds maximum limit of 2 GB",
-            format!("File size: {} bytes, Maximum allowed: {} bytes", size_bytes, max_bytes),
+            format!(
+                "File size: {} bytes, Maximum allowed: {} bytes",
+                size_bytes, max_bytes
+            ),
         )
     }
 
@@ -209,7 +362,10 @@ impl AppError {
     }
 
     pub fn render_cancelled() -> Self {
-        Self::new(ErrorCode::RenderCancelled, "Video render operation was cancelled")
+        Self::new(
+            ErrorCode::RenderCancelled,
+            "Video render operation was cancelled",
+        )
     }
 
     pub fn output_invalid(msg: impl Into<String>, details: impl Into<String>) -> Self {
@@ -217,7 +373,11 @@ impl AppError {
     }
 
     pub fn output_not_found(path: impl Into<String>) -> Self {
-        Self::with_details(ErrorCode::OutputNotFound, "Render output file was not found on disk", path)
+        Self::with_details(
+            ErrorCode::OutputNotFound,
+            "Render output file was not found on disk",
+            path,
+        )
     }
 
     pub fn output_metadata_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
@@ -230,6 +390,37 @@ impl AppError {
 
     pub fn frame_sequence_invalid(msg: impl Into<String>, details: impl Into<String>) -> Self {
         Self::with_details(ErrorCode::FrameSequenceInvalid, msg, details)
+    }
+
+    pub fn storage_error(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::StorageError, msg, details)
+    }
+
+    pub fn job_not_found(id: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::JobNotFound, "Job not found", id)
+    }
+
+    pub fn job_failed(msg: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(ErrorCode::JobFailed, msg, details)
+    }
+
+    pub fn job_cancelled() -> Self {
+        Self::new(ErrorCode::JobCancelled, "Job was cancelled by user")
+    }
+
+    pub fn job_interrupted() -> Self {
+        Self::new(
+            ErrorCode::JobInterrupted,
+            "Job was interrupted by system shutdown/restart",
+        )
+    }
+
+    pub fn storage_write_failed(path: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::with_details(
+            ErrorCode::StorageError,
+            "Failed to write to persistent storage",
+            format!("{}: {}", path.into(), details.into()),
+        )
     }
 }
 
