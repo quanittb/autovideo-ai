@@ -132,37 +132,21 @@ impl CloudVideoProvider for ReplicateBriaBgRemovalProvider {
             supports_audio: true,
             max_duration_sec: Some(60.0),
             supported_resolutions: vec![],
-            estimated_cost_per_second: Some(0.0042),
+            estimated_cost_per_second: None,
         }
     }
 
-    fn estimate_cost(&self, req: &CloudJobRequest) -> CostEstimate {
-        let registry = crate::ai::cloud::ProviderRegistry::new();
-        let dur = if req.duration_seconds <= 0.0 {
-            6.0
-        } else {
-            req.duration_seconds
-        };
-
-        let rate = registry
-            .find(self.provider_id(), self.model_id())
-            .and_then(|r| r.pricing_amount)
-            .unwrap_or(0.0042);
-        let estimated_total = dur * rate;
-
+    fn estimate_cost(&self, _req: &CloudJobRequest) -> CostEstimate {
         CostEstimate {
             provider: self.provider_id().to_string(),
             model: self.model_id().to_string(),
-            estimated_usd: Some(estimated_total),
-            min_usd: Some(estimated_total * 0.9),
-            max_usd: Some(estimated_total * 1.2),
-            confidence: 0.85,
+            estimated_usd: None,
+            min_usd: None,
+            max_usd: None,
+            confidence: 0.0,
             currency: "USD".to_string(),
-            status: CostConfidence::Estimated,
-            breakdown: format!(
-                "Replicate BRIA background removal estimated inference: ${:.4}/s * {:.1}s = ${:.4}",
-                rate, dur, estimated_total
-            ),
+            status: CostConfidence::Unknown,
+            breakdown: "Replicate BRIA background removal cost requires authoritative source media duration facts via preflight submission gate".to_string(),
         }
     }
 

@@ -232,58 +232,95 @@ impl CloudJobLifecycleService {
     // Input Hashing & Configuration Identity
     // -------------------------------------------------------------------------
 
-    fn compute_inputs(
+    pub fn compute_inputs_and_configuration_hash(
         request: &CloudJobRequest,
-        preserve_audio: bool,
+        task_spec: &ProviderTaskSpec,
     ) -> Result<(InputAssets, String), CloudProviderError> {
         let mut assets = InputAssets::default();
         let mut hasher = Sha256::new();
 
-        hasher.update(request.task_type.as_bytes());
-        hasher.update(request.prompt.as_bytes());
-        if let Some(ref np) = request.negative_prompt {
-            hasher.update(np.as_bytes());
-        }
-        hasher.update(&request.duration_seconds.to_le_bytes());
-        hasher.update(&request.fps.to_le_bytes());
-        hasher.update(&request.resolution.0.to_le_bytes());
-        hasher.update(&request.resolution.1.to_le_bytes());
-        hasher.update(&[if preserve_audio { 1u8 } else { 0u8 }]);
+        match task_spec {
+            ProviderTaskSpec::BackgroundRemoval(spec) => {
+                // Canonical BackgroundRemoval configuration identity:
+                // Canonical task, provider, model, background mode, output format, preserve_audio, source content hash, authoritative source facts
+                hasher.update(b"TASK:BACKGROUND_REMOVAL");
+                hasher.update(spec.provider_key.provider_id.as_bytes());
+                hasher.update(spec.provider_key.model_id.as_bytes());
+                hasher.update(match spec.background_mode {
+                    super::spec::BackgroundMode::Transparent => b"MODE:Transparent",
+                });
+                hasher.update(match spec.output_format {
+                    super::spec::BackgroundRemovalOutputFormat::WebmVp9 => b"FORMAT:WebM_VP9",
+                });
+                hasher.update(&[if spec.preserve_audio { 1u8 } else { 0u8 }]);
 
-        if let Some(ref p) = request.source_video {
-            assets.source_video_path = Some(p.clone());
-            if p.exists() {
-                let h = CloudOutputValidator::compute_file_sha256(p)?;
-                hasher.update(h.as_bytes());
-                assets.source_video_hash = Some(h);
-            } else {
-                return Err(CloudProviderError::RequestInvalid(format!(
-                    "Source video not found at {}",
-                    p.display()
-                )));
+                if spec.source_video.exists() {
+                    let h = CloudOutputValidator::compute_file_sha256(&spec.source_video)?;
+                    hasher.update(h.as_bytes());
+                    assets.source_video_path = Some(spec.source_video.clone());
+                    assets.source_video_hash = Some(h);
+                } else {
+                    return Err(CloudProviderError::RequestInvalid(format!(
+                        "Source video not found at {}",
+                        spec.source_video.display()
+                    )));
+                }
+
+                // Probed authoritative SourceMediaFacts
+                hasher.update(&spec.source_facts.duration_sec.to_le_bytes());
+                hasher.update(&spec.source_facts.fps.to_le_bytes());
+                hasher.update(&spec.source_facts.width.to_le_bytes());
+                hasher.update(&spec.source_facts.height.to_le_bytes());
             }
-        }
+            ProviderTaskSpec::CharacterReplacement(spec) => {
+                // Preserved Phase 16 CharacterReplacement hash behavior
+                hasher.update(request.task_type.as_bytes());
+                hasher.update(request.prompt.as_bytes());
+                if let Some(ref np) = request.negative_prompt {
+                    hasher.update(np.as_bytes());
+                }
+                hasher.update(&request.duration_seconds.to_le_bytes());
+                hasher.update(&request.fps.to_le_bytes());
+                hasher.update(&request.resolution.0.to_le_bytes());
+                hasher.update(&request.resolution.1.to_le_bytes());
+                hasher.update(&[if spec.save_audio { 1u8 } else { 0u8 }]);
 
-        let ref_images = request.get_reference_images();
-        for p in &ref_images {
-            if p.exists() {
-                let h = CloudOutputValidator::compute_file_sha256(p)?;
-                hasher.update(h.as_bytes());
-                assets.reference_image_paths.push(p.clone());
-                assets.reference_image_hashes.push(h);
-            } else {
-                return Err(CloudProviderError::RequestInvalid(format!(
-                    "Reference image not found at {}",
-                    p.display()
-                )));
+                if let Some(ref p) = request.source_video {
+                    assets.source_video_path = Some(p.clone());
+                    if p.exists() {
+                        let h = CloudOutputValidator::compute_file_sha256(p)?;
+                        hasher.update(h.as_bytes());
+                        assets.source_video_hash = Some(h);
+                    } else {
+                        return Err(CloudProviderError::RequestInvalid(format!(
+                            "Source video not found at {}",
+                            p.display()
+                        )));
+                    }
+                }
+
+                let ref_images = request.get_reference_images();
+                for p in &ref_images {
+                    if p.exists() {
+                        let h = CloudOutputValidator::compute_file_sha256(p)?;
+                        hasher.update(h.as_bytes());
+                        assets.reference_image_paths.push(p.clone());
+                        assets.reference_image_hashes.push(h);
+                    } else {
+                        return Err(CloudProviderError::RequestInvalid(format!(
+                            "Reference image not found at {}",
+                            p.display()
+                        )));
+                    }
+                }
+
+                if let Some(first_p) = assets.reference_image_paths.first() {
+                    assets.reference_image_path = Some(first_p.clone());
+                }
+                if let Some(first_h) = assets.reference_image_hashes.first() {
+                    assets.reference_image_hash = Some(first_h.clone());
+                }
             }
-        }
-
-        if let Some(first_p) = assets.reference_image_paths.first() {
-            assets.reference_image_path = Some(first_p.clone());
-        }
-        if let Some(first_h) = assets.reference_image_hashes.first() {
-            assets.reference_image_hash = Some(first_h.clone());
         }
 
         let config_hash = format!("{:x}", hasher.finalize());
@@ -361,7 +398,7 @@ impl CloudJobLifecycleService {
                 SubmissionState::NeverAttempted => existing,
             },
             None => {
-                let (descriptor, validation_policy, preserve_audio) = match &task_spec {
+                let (descriptor, validation_policy) = match &task_spec {
                     ProviderTaskSpec::CharacterReplacement(spec) => {
                         let desc = ArtifactDescriptor {
                             container: ArtifactContainer::Mp4,
@@ -383,7 +420,7 @@ impl CloudJobLifecycleService {
                             expected_container: Some("mp4".to_string()),
                             expected_video_codec: Some("h264".to_string()),
                         };
-                        (desc, val, spec.save_audio)
+                        (desc, val)
                     }
                     ProviderTaskSpec::BackgroundRemoval(spec) => {
                         let desc = ArtifactDescriptor {
@@ -402,11 +439,12 @@ impl CloudJobLifecycleService {
                             expected_container: Some("webm".to_string()),
                             expected_video_codec: Some("vp9".to_string()),
                         };
-                        (desc, val, spec.preserve_audio)
+                        (desc, val)
                     }
                 };
 
-                let (input_assets, config_hash) = Self::compute_inputs(&request, preserve_audio)?;
+                let (input_assets, config_hash) =
+                    Self::compute_inputs_and_configuration_hash(&request, &task_spec)?;
                 let internal_job_id = format!("cjob-{}", Uuid::new_v4());
 
                 let new_job = PersistentCloudJob {

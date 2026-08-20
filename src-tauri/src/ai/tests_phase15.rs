@@ -190,6 +190,7 @@ mod tests {
                 },
                 budget_limit: 3.00,
                 provider_key: crate::ai::cloud::ProviderKey::new("replicate", "minimax/video-01"),
+                source_facts: None,
             })
         }
     }

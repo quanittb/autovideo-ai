@@ -6,7 +6,7 @@ use super::registry::ProviderRegistry;
 use super::router::{
     GenerationRouter, RoutingDecision, RoutingPreference, RoutingTarget, TaskClass,
 };
-use super::spec::SourceMediaProbe;
+use super::spec::{SourceMediaFacts, SourceMediaProbe};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -16,6 +16,7 @@ pub struct ValidatedSubmissionPlan {
     pub routing_decision: RoutingDecision,
     pub budget_limit: f64,
     pub provider_key: ProviderKey,
+    pub source_facts: Option<SourceMediaFacts>,
 }
 
 pub trait CloudSubmissionGate: Send + Sync {
@@ -130,5 +131,6 @@ pub fn validate_and_prepare_cloud_submission(
         routing_decision: decision.clone(),
         budget_limit,
         provider_key: ProviderKey::new(decision.provider_id, decision.model_id),
+        source_facts,
     })
 }

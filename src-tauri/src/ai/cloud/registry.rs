@@ -248,7 +248,7 @@ impl ProviderRegistry {
                 supports_audio: true,
                 max_duration_sec: Some(60.0),
                 supported_resolutions: vec![],
-                estimated_cost_per_second: Some(0.0042),
+                estimated_cost_per_second: None,
             },
             max_duration_sec: Some(60.0),
             supported_resolutions: vec![],

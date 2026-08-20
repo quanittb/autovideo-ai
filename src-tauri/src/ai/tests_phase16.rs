@@ -841,6 +841,7 @@ mod tests {
             },
             budget_limit: 3.00,
             provider_key: ProviderKey::new("replicate", "prunaai/p-video-replace"),
+            source_facts: None,
         };
 
         // 1. Valid single reference
@@ -896,6 +897,7 @@ mod tests {
             },
             budget_limit: 3.00,
             provider_key: ProviderKey::new("replicate", "prunaai/p-video-replace"),
+            source_facts: None,
         };
 
         let spec = ProviderSubmissionSpec::build(&req, &project, &plan).unwrap();
@@ -1567,6 +1569,7 @@ mod tests {
             },
             budget_limit: 3.00,
             provider_key: ProviderKey::new("replicate", "prunaai/p-video-replace"),
+            source_facts: None,
         };
 
         let spec = ProviderSubmissionSpec::build(&req, &project, &plan).unwrap();
@@ -1603,6 +1606,7 @@ mod tests {
             },
             budget_limit: 3.00,
             provider_key: ProviderKey::new("replicate", "prunaai/p-video-replace"),
+            source_facts: None,
         };
 
         let res = ProviderSubmissionSpec::build(&req, &project, &plan);
@@ -1635,6 +1639,7 @@ mod tests {
             },
             budget_limit: 3.00,
             provider_key: ProviderKey::new("replicate", "prunaai/p-video-replace"),
+            source_facts: None,
         };
 
         let res = ProviderSubmissionSpec::build(&req, &project, &plan);
@@ -1664,6 +1669,7 @@ mod tests {
             },
             budget_limit: 3.00,
             provider_key: ProviderKey::new("replicate", "prunaai/p-video-replace"),
+            source_facts: None,
         };
 
         let spec = ProviderSubmissionSpec::build(&req, &project, &plan).unwrap();

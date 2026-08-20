@@ -133,6 +133,35 @@ impl BackgroundRemovalSpec {
             }
         };
 
+        let source_facts = match &plan.source_facts {
+            Some(facts) => facts.clone(),
+            None => SourceMediaProbe::probe_file(&source_video)?,
+        };
+
+        Self::build_with_facts(request, project, plan, source_facts)
+    }
+
+    pub fn build_with_facts(
+        request: &CloudJobRequest,
+        project: &Project,
+        plan: &ValidatedSubmissionPlan,
+        source_facts: SourceMediaFacts,
+    ) -> Result<Self, CloudProviderError> {
+        let source_video = match &request.source_video {
+            Some(p) if p.is_file() => p.clone(),
+            Some(p) => {
+                return Err(CloudProviderError::RequestInvalid(format!(
+                    "Source video not found or invalid: {}",
+                    p.display()
+                )));
+            }
+            None => {
+                return Err(CloudProviderError::RequestInvalid(
+                    "Source video is required for background removal".to_string(),
+                ));
+            }
+        };
+
         // Reference check: exactly 0 reference images allowed
         let has_references = request
             .reference_images
@@ -145,8 +174,6 @@ impl BackgroundRemovalSpec {
                 "UNEXPECTED_REFERENCE_INPUTS_FOR_BACKGROUND_REMOVAL: Background removal requires 0 reference images".to_string(),
             ));
         }
-
-        let source_facts = SourceMediaProbe::probe_file(&source_video)?;
 
         let preserve_audio = project
             .transformation_config

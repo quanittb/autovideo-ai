@@ -5,6 +5,7 @@ mod tests {
         ArtifactContainer, ArtifactDescriptor, ArtifactVideoCodec, CloudJobRequest, CloudJobState,
         PersistentCloudJob, SubmissionState, ValidationPolicy, CURRENT_CLOUD_JOB_SCHEMA_VERSION,
     };
+    use crate::ai::cloud::lifecycle::CloudJobLifecycleService;
     use crate::ai::cloud::live_execution_guard::MockLiveExecutionPolicy;
     use crate::ai::cloud::provider::{CloudVideoProvider, ProviderKey, ResolutionTier, TargetFps};
     use crate::ai::cloud::providers::replicate_bria::ReplicateBriaBgRemovalProvider;
@@ -14,10 +15,12 @@ mod tests {
     use crate::ai::cloud::spec::{
         BackgroundMode, BackgroundRemovalOutputFormat, BackgroundRemovalSpec,
         PreparedBackgroundRemoval, PreparedCharacterReplacement, PreparedProviderSubmission,
-        ProviderSubmissionSpec, SourceMediaFacts,
+        ProviderSubmissionSpec, ProviderTaskSpec, SourceMediaFacts,
     };
     use crate::ai::cloud::store::PersistentCloudJobStore;
+    use crate::ai::cloud::submission::ValidatedSubmissionPlan;
     use crate::ai::cloud::uploader::UploadedAsset;
+    use crate::projects::Project;
     use crate::system::StoragePaths;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -92,37 +95,32 @@ mod tests {
         assert!(!caps.supports_reference_image);
         assert!(!caps.supports_character_reference);
         assert_eq!(caps.max_duration_sec, Some(60.0));
-        assert_eq!(caps.estimated_cost_per_second, Some(0.0042));
+        assert_eq!(caps.estimated_cost_per_second, None);
     }
 
     // =========================================================================
-    // 03. BRIA COST ESTIMATION
+    // 03. BRIA COST ESTIMATION (FAIL-CLOSED FOR RAW REQUESTS)
     // =========================================================================
 
     #[test]
-    fn test_phase17_04_bria_cost_estimate_10s_video() {
+    fn test_phase17_04_bria_raw_cost_estimate_fails_closed_as_unknown() {
         let provider = ReplicateBriaBgRemovalProvider::new();
         let request = make_bg_removal_request("test_cost", 10.0);
         let estimate = provider.estimate_cost(&request);
         assert_eq!(estimate.provider, "replicate");
         assert_eq!(estimate.model, "bria/video-remove-background");
         assert_eq!(estimate.currency, "USD");
-        assert!(matches!(estimate.status, CostConfidence::Estimated));
-        // 10s * $0.0042 = $0.042
-        let est = estimate.estimated_usd.unwrap();
-        assert!((est - 0.042).abs() < 0.0001);
-        assert!(estimate.min_usd.unwrap() < est);
-        assert!(estimate.max_usd.unwrap() > est);
+        assert!(matches!(estimate.status, CostConfidence::Unknown));
+        assert_eq!(estimate.estimated_usd, None);
     }
 
     #[test]
-    fn test_phase17_05_bria_cost_estimate_defaults_to_6s_when_zero_duration() {
+    fn test_phase17_05_bria_raw_cost_estimate_without_source_facts_is_unknown() {
         let provider = ReplicateBriaBgRemovalProvider::new();
         let request = make_bg_removal_request("test_cost_zero", 0.0);
         let estimate = provider.estimate_cost(&request);
-        // 6s * $0.0042 = $0.0252
-        let est = estimate.estimated_usd.unwrap();
-        assert!((est - 0.0252).abs() < 0.0001);
+        assert!(matches!(estimate.status, CostConfidence::Unknown));
+        assert_eq!(estimate.estimated_usd, None);
     }
 
     // =========================================================================
@@ -1187,5 +1185,266 @@ mod tests {
             TaskClass::BackgroundRemoval
         );
         assert!(TaskClass::from_str_strict("UNKNOWN_TASK").is_err());
+    }
+
+    // =========================================================================
+    // 25. SINGLE SOURCE PROBE INVARIANT TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_phase17_51_submission_plan_carries_source_facts_and_spec_build_avoids_second_probe() {
+        let temp = tempdir().unwrap();
+        let video_path = temp.path().join("source.mp4");
+        std::fs::write(&video_path, b"dummy_content_for_test").unwrap();
+
+        let facts = SourceMediaFacts {
+            duration_sec: 12.34,
+            width: 1920,
+            height: 1080,
+            fps: 29.97,
+            has_audio: true,
+        };
+
+        let plan = ValidatedSubmissionPlan {
+            task_class: TaskClass::BackgroundRemoval,
+            routing_decision: crate::ai::cloud::router::RoutingDecision {
+                target: crate::ai::cloud::router::RoutingTarget::Cloud,
+                provider_id: "replicate".to_string(),
+                model_id: "bria/video-remove-background".to_string(),
+                execution_class: ExecutionClass::UtilityCloud,
+                task: TaskClass::BackgroundRemoval,
+                mode: RoutingPreference::CostSaving,
+                reason: "test".to_string(),
+                cost_breakdown: crate::ai::cloud::cost::CostBreakdown::default(),
+                estimated_cost: crate::ai::cloud::cost::CostEstimate {
+                    provider: "replicate".to_string(),
+                    model: "bria/video-remove-background".to_string(),
+                    estimated_usd: Some(12.34 * 0.0042),
+                    min_usd: None,
+                    max_usd: None,
+                    confidence: 0.85,
+                    currency: "USD".to_string(),
+                    status: CostConfidence::Estimated,
+                    breakdown: "test".to_string(),
+                },
+                fallback_available: false,
+                auto_submit_allowed: true,
+            },
+            budget_limit: 3.0,
+            provider_key: ProviderKey::new("replicate", "bria/video-remove-background"),
+            source_facts: Some(facts.clone()),
+        };
+
+        let mut req = make_bg_removal_request("single_probe_test", 5.0);
+        req.source_video = Some(video_path);
+
+        let mut project = Project::new("proj1");
+        project
+            .transformation_config
+            .preservation
+            .preserve_original_audio = true;
+
+        // BackgroundRemovalSpec::build should consume plan.source_facts directly without re-probing
+        let spec = BackgroundRemovalSpec::build(&req, &project, &plan).unwrap();
+        assert_eq!(spec.source_facts.duration_sec, 12.34);
+        assert_eq!(spec.source_facts.width, 1920);
+        assert_eq!(spec.source_facts.height, 1080);
+        assert_eq!(spec.source_facts.fps, 29.97);
+        assert!(spec.preserve_audio);
+    }
+
+    // =========================================================================
+    // 26. NORMALIZED CONFIGURATION HASH INVARIANT TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_phase17_52_config_hash_normalized_identity_same_for_different_raw_ipc_dur_fps_res() {
+        let temp = tempdir().unwrap();
+        let video_path = temp.path().join("source.mp4");
+        std::fs::write(&video_path, b"test_video_content_hash_123").unwrap();
+
+        let facts = SourceMediaFacts {
+            duration_sec: 10.0,
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            has_audio: true,
+        };
+
+        let bg_spec = BackgroundRemovalSpec {
+            provider_key: ProviderKey::new("replicate", "bria/video-remove-background"),
+            source_video: video_path.clone(),
+            source_facts: facts,
+            background_mode: BackgroundMode::Transparent,
+            output_format: BackgroundRemovalOutputFormat::WebmVp9,
+            preserve_audio: true,
+        };
+        let task_spec = ProviderTaskSpec::BackgroundRemoval(bg_spec);
+
+        // Request 1 has IPC duration 5.0, fps 24.0, resolution (1280, 720)
+        let mut req1 = make_bg_removal_request("req1", 5.0);
+        req1.fps = 24.0;
+        req1.resolution = (1280, 720);
+        req1.source_video = Some(video_path.clone());
+
+        // Request 2 has IPC duration 99.0, fps 60.0, resolution (3840, 2160)
+        let mut req2 = make_bg_removal_request("req2", 99.0);
+        req2.fps = 60.0;
+        req2.resolution = (3840, 2160);
+        req2.source_video = Some(video_path);
+
+        let (_assets1, hash1) =
+            CloudJobLifecycleService::compute_inputs_and_configuration_hash(&req1, &task_spec)
+                .unwrap();
+        let (_assets2, hash2) =
+            CloudJobLifecycleService::compute_inputs_and_configuration_hash(&req2, &task_spec)
+                .unwrap();
+
+        assert_eq!(
+            hash1, hash2,
+            "Normalized BackgroundRemoval config hash must NOT depend on fake/stale raw IPC duration/fps/resolution"
+        );
+    }
+
+    #[test]
+    fn test_phase17_53_config_hash_changes_when_preserve_audio_changes() {
+        let temp = tempdir().unwrap();
+        let video_path = temp.path().join("source.mp4");
+        std::fs::write(&video_path, b"test_video_content_hash_123").unwrap();
+
+        let facts = SourceMediaFacts {
+            duration_sec: 10.0,
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            has_audio: true,
+        };
+
+        let mut bg_spec1 = BackgroundRemovalSpec {
+            provider_key: ProviderKey::new("replicate", "bria/video-remove-background"),
+            source_video: video_path.clone(),
+            source_facts: facts.clone(),
+            background_mode: BackgroundMode::Transparent,
+            output_format: BackgroundRemovalOutputFormat::WebmVp9,
+            preserve_audio: true,
+        };
+        let task_spec1 = ProviderTaskSpec::BackgroundRemoval(bg_spec1.clone());
+
+        bg_spec1.preserve_audio = false;
+        let task_spec2 = ProviderTaskSpec::BackgroundRemoval(bg_spec1);
+
+        let req = make_bg_removal_request("req", 10.0);
+
+        let (_assets1, hash1) =
+            CloudJobLifecycleService::compute_inputs_and_configuration_hash(&req, &task_spec1)
+                .unwrap();
+        let (_assets2, hash2) =
+            CloudJobLifecycleService::compute_inputs_and_configuration_hash(&req, &task_spec2)
+                .unwrap();
+
+        assert_ne!(
+            hash1, hash2,
+            "Config hash must change when preserve_audio changes"
+        );
+    }
+
+    #[test]
+    fn test_phase17_54_config_hash_changes_when_provider_or_model_changes() {
+        let temp = tempdir().unwrap();
+        let video_path = temp.path().join("source.mp4");
+        std::fs::write(&video_path, b"test_video_content_hash_123").unwrap();
+
+        let facts = SourceMediaFacts {
+            duration_sec: 10.0,
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            has_audio: true,
+        };
+
+        let bg_spec1 = BackgroundRemovalSpec {
+            provider_key: ProviderKey::new("replicate", "bria/video-remove-background"),
+            source_video: video_path.clone(),
+            source_facts: facts.clone(),
+            background_mode: BackgroundMode::Transparent,
+            output_format: BackgroundRemovalOutputFormat::WebmVp9,
+            preserve_audio: true,
+        };
+        let task_spec1 = ProviderTaskSpec::BackgroundRemoval(bg_spec1);
+
+        let bg_spec2 = BackgroundRemovalSpec {
+            provider_key: ProviderKey::new("fal", "fal-ai/bria-bg-removal"),
+            source_video: video_path,
+            source_facts: facts,
+            background_mode: BackgroundMode::Transparent,
+            output_format: BackgroundRemovalOutputFormat::WebmVp9,
+            preserve_audio: true,
+        };
+        let task_spec2 = ProviderTaskSpec::BackgroundRemoval(bg_spec2);
+
+        let req = make_bg_removal_request("req", 10.0);
+
+        let (_assets1, hash1) =
+            CloudJobLifecycleService::compute_inputs_and_configuration_hash(&req, &task_spec1)
+                .unwrap();
+        let (_assets2, hash2) =
+            CloudJobLifecycleService::compute_inputs_and_configuration_hash(&req, &task_spec2)
+                .unwrap();
+
+        assert_ne!(
+            hash1, hash2,
+            "Config hash must change when provider_key changes"
+        );
+    }
+
+    #[test]
+    fn test_phase17_55_config_hash_changes_when_source_content_changes() {
+        let temp = tempdir().unwrap();
+        let video_path1 = temp.path().join("source1.mp4");
+        let video_path2 = temp.path().join("source2.mp4");
+        std::fs::write(&video_path1, b"video_content_AAA").unwrap();
+        std::fs::write(&video_path2, b"video_content_BBB").unwrap();
+
+        let facts = SourceMediaFacts {
+            duration_sec: 10.0,
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            has_audio: true,
+        };
+
+        let bg_spec1 = BackgroundRemovalSpec {
+            provider_key: ProviderKey::new("replicate", "bria/video-remove-background"),
+            source_video: video_path1,
+            source_facts: facts.clone(),
+            background_mode: BackgroundMode::Transparent,
+            output_format: BackgroundRemovalOutputFormat::WebmVp9,
+            preserve_audio: true,
+        };
+        let task_spec1 = ProviderTaskSpec::BackgroundRemoval(bg_spec1);
+
+        let bg_spec2 = BackgroundRemovalSpec {
+            provider_key: ProviderKey::new("replicate", "bria/video-remove-background"),
+            source_video: video_path2,
+            source_facts: facts,
+            background_mode: BackgroundMode::Transparent,
+            output_format: BackgroundRemovalOutputFormat::WebmVp9,
+            preserve_audio: true,
+        };
+        let task_spec2 = ProviderTaskSpec::BackgroundRemoval(bg_spec2);
+
+        let req = make_bg_removal_request("req", 10.0);
+
+        let (_assets1, hash1) =
+            CloudJobLifecycleService::compute_inputs_and_configuration_hash(&req, &task_spec1)
+                .unwrap();
+        let (_assets2, hash2) =
+            CloudJobLifecycleService::compute_inputs_and_configuration_hash(&req, &task_spec2)
+                .unwrap();
+
+        assert_ne!(
+            hash1, hash2,
+            "Config hash must change when source video content changes"
+        );
     }
 }
