@@ -675,7 +675,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST A (6) — STALE POLL RESPONSE CANNOT OVERWRITE CANCELLED STATE
+    // TEST 6 — STALE POLL RESPONSE CANNOT OVERWRITE CANCELLED STATE
     // =========================================================================
 
     #[tokio::test]
@@ -725,7 +725,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST B (7) — STALE LOWER REVISION SAVE REJECTED BY STORE
+    // TEST 7 — STALE LOWER REVISION SAVE REJECTED BY STORE
     // =========================================================================
 
     #[test]
@@ -766,7 +766,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST C (8) — SINGLE OWNER FOR REMOTE CANCELLATION
+    // TEST 8 — SINGLE OWNER FOR REMOTE CANCELLATION
     // =========================================================================
 
     #[tokio::test]
@@ -824,7 +824,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST D (9) — CANCELLATION DURING IN-FLIGHT DOWNLOAD NEVER COMPLETED
+    // TEST 9 — CANCELLATION DURING IN-FLIGHT DOWNLOAD NEVER COMPLETED
     // =========================================================================
 
     #[tokio::test]
@@ -878,7 +878,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST E (10) — IN-FLIGHT SUBMISSION CANCELLATION RACE
+    // TEST 10 — IN-FLIGHT SUBMISSION CANCELLATION RACE RESOLVED SAFELY
     // =========================================================================
 
     #[tokio::test]
@@ -928,7 +928,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST F (11) — CORRUPT MANIFEST FAILS CLOSED WITH ZERO SUBMITS
+    // TEST 11 — CORRUPT MANIFEST FAILS CLOSED WITH ZERO SUBMITS
     // =========================================================================
 
     #[tokio::test]
@@ -968,7 +968,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST G (12) — DOWNLOAD RETRY BUDGET SURVIVES RESTART
+    // TEST 12 — DOWNLOAD RETRY BUDGET SURVIVES RESTART
     // =========================================================================
 
     #[tokio::test]
@@ -1637,5 +1637,511 @@ mod tests {
         assert_eq!(recovered[0].submission_state, SubmissionState::Ambiguous);
 
         assert_eq!(mock_provider.submit_call_count.load(Ordering::SeqCst), 1);
+    }
+
+    // =========================================================================
+    // TEST 25 — IN-FLIGHT SUBMISSION CANCELLATION PRESERVES SUBMITTED BEFORE ACK
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_phase15_25_in_flight_cancellation_preserves_submitted_state_before_ack() {
+        let (paths, _temp, project_id, sample_mp4) = create_test_env();
+
+        let mut mock_provider = MockCloudProvider::new();
+        mock_provider.submit_delay_ms = Some(200); // 200ms submit delay
+        *mock_provider.submit_behavior.lock().unwrap() = Ok("mock_remote_inflight_ack".to_string());
+
+        let mock_provider = Arc::new(mock_provider);
+        let resolver = Arc::new(MockProviderResolver {
+            provider: Some(mock_provider.clone()),
+        });
+        let event_sink = Arc::new(TestEventSink::new());
+
+        let service = Arc::new(create_test_service(
+            paths,
+            resolver,
+            event_sink,
+            LifecycleTimingConfig::fast_test(),
+        ));
+
+        let req = make_test_req("cjob-inflight-ack", &project_id, &sample_mp4);
+
+        let s1 = service.clone();
+        let s2 = service.clone();
+        let pid = project_id.clone();
+
+        let (submit_res, _) = tokio::join!(
+            tokio::spawn(async move { s1.start_cloud_generation(req, Some(3.00)).await }),
+            tokio::spawn(async move {
+                // Wait for submit_job to be in-flight
+                tokio::time::sleep(Duration::from_millis(50)).await;
+
+                // Cancel while submit_job is awaiting response
+                let cancel_res = s2
+                    .cancel_cloud_generation(&pid, "cjob-inflight-ack")
+                    .await
+                    .unwrap();
+
+                // While submit_job is still in-flight without remoteJobId, state MUST NOT be CANCELLED!
+                assert_eq!(cancel_res.state, CloudJobState::Submitted);
+                assert!(cancel_res.cancellation_requested);
+                assert_eq!(
+                    cancel_res.remote_status,
+                    Some("cancellation_pending_submission_ack".to_string())
+                );
+            })
+        );
+
+        let final_job = submit_res.unwrap().unwrap();
+        // Once submit_job returns, remote ID is preserved and cancellation reconciled
+        assert_eq!(
+            final_job.remote_job_id,
+            Some("mock_remote_inflight_ack".to_string())
+        );
+        assert_eq!(final_job.state, CloudJobState::Cancelled);
+        assert_eq!(mock_provider.cancel_call_count.load(Ordering::SeqCst), 1);
+    }
+
+    // =========================================================================
+    // TEST 26 — CANCELLATION DURING VALIDATION NEVER PROMOTES ARTIFACT
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_phase15_26_cancellation_during_validation_never_promotes() {
+        let (paths, _temp, project_id, sample_mp4) = create_test_env();
+
+        let mock_provider = Arc::new(MockCloudProvider::new());
+        *mock_provider.download_behavior.lock().unwrap() = vec![Ok(sample_mp4.clone())];
+
+        let resolver = Arc::new(MockProviderResolver {
+            provider: Some(mock_provider.clone()),
+        });
+        let event_sink = Arc::new(TestEventSink::new());
+
+        let service = create_test_service(
+            paths,
+            resolver,
+            event_sink,
+            LifecycleTimingConfig::fast_test(),
+        );
+
+        let req = make_test_req("cjob-val-cancel", &project_id, &sample_mp4);
+        let job = service
+            .start_cloud_generation(req, Some(3.00))
+            .await
+            .unwrap();
+
+        // Cancel job while background task is processing
+        let _ = service
+            .cancel_cloud_generation(&project_id, &job.internal_job_id)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let final_job = service
+            .get_job_status(&project_id, &job.internal_job_id)
+            .unwrap();
+        assert_eq!(final_job.state, CloudJobState::Cancelled);
+
+        // Final promoted artifact must NOT exist on disk
+        let final_path = service
+            .store()
+            .artifact_final_path(&project_id, &job.internal_job_id)
+            .unwrap();
+        assert!(!final_path.exists());
+    }
+
+    // =========================================================================
+    // TEST 27 — RETRY PERSISTENCE FAILURE PREVENTS DOWNLOAD ATTEMPT
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_phase15_27_retry_persistence_failure_prevents_download() {
+        let (paths, _temp, project_id, sample_mp4) = create_test_env();
+
+        let mock_provider = Arc::new(MockCloudProvider::new());
+        *mock_provider.download_behavior.lock().unwrap() = vec![Ok(sample_mp4.clone())];
+
+        let resolver = Arc::new(MockProviderResolver {
+            provider: Some(mock_provider.clone()),
+        });
+        let event_sink = Arc::new(TestEventSink::new());
+
+        let service = create_test_service(
+            paths,
+            resolver,
+            event_sink,
+            LifecycleTimingConfig::fast_test(),
+        );
+
+        let req = make_test_req("cjob-retry-persist-fail", &project_id, &sample_mp4);
+        let _job = service
+            .start_cloud_generation(req, Some(3.00))
+            .await
+            .unwrap();
+
+        // Arm fail_next_save right as poller transitions to download
+        service.store().set_fail_next_save(true);
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Worker must stop and NOT consume unrecorded download attempt
+        assert_eq!(
+            mock_provider.download_call_count.load(Ordering::SeqCst),
+            0,
+            "Download must not execute if retry counter persistence fails"
+        );
+    }
+
+    // =========================================================================
+    // TEST 28 — LIST_ALL_ACTIVE_JOBS FAILS CLOSED ON CORRUPT MANIFEST
+    // =========================================================================
+
+    #[test]
+    fn test_phase15_28_list_all_active_jobs_fail_closed_on_corrupt_manifest() {
+        let (paths, _temp, project_id, _sample_mp4) = create_test_env();
+        let store = PersistentCloudJobStore::new(paths);
+
+        let jobs_dir = store.project_cloud_jobs_dir(&project_id).unwrap();
+        fs::create_dir_all(&jobs_dir).unwrap();
+
+        // Write corrupt manifest in project
+        let corrupt_primary = jobs_dir.join("cjob-broken.json");
+        fs::write(&corrupt_primary, b"{ unparseable corrupt json").unwrap();
+
+        let result = store.list_all_active_jobs();
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("RECOVERY_FAILED"));
+    }
+
+    // =========================================================================
+    // TEST 29 — CONCURRENT CANCEL COMMANDS EXECUTE SINGLE REMOTE CANCEL
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_phase15_29_concurrent_cancel_commands_single_remote_cancel() {
+        let (paths, _temp, project_id, sample_mp4) = create_test_env();
+
+        let mock_provider = Arc::new(MockCloudProvider::new());
+        *mock_provider.poll_responses.lock().unwrap() = vec![RemotePollResponse {
+            remote_id: "mock_remote_conc_cancel".to_string(),
+            status: RemoteStatus::Processing,
+            output_url: None,
+            error: None,
+        }];
+
+        let resolver = Arc::new(MockProviderResolver {
+            provider: Some(mock_provider.clone()),
+        });
+        let event_sink = Arc::new(TestEventSink::new());
+
+        let service = Arc::new(create_test_service(
+            paths,
+            resolver,
+            event_sink,
+            LifecycleTimingConfig::production(),
+        ));
+
+        let req = make_test_req("cjob-conc-cancel", &project_id, &sample_mp4);
+        let job = service
+            .start_cloud_generation(req, Some(3.00))
+            .await
+            .unwrap();
+
+        let s1 = service.clone();
+        let s2 = service.clone();
+        let pid1 = project_id.clone();
+        let pid2 = project_id.clone();
+        let jid1 = job.internal_job_id.clone();
+        let jid2 = job.internal_job_id.clone();
+
+        let (c1, c2) = tokio::join!(
+            tokio::spawn(async move { s1.cancel_cloud_generation(&pid1, &jid1).await }),
+            tokio::spawn(async move { s2.cancel_cloud_generation(&pid2, &jid2).await })
+        );
+
+        let res1 = c1.unwrap().unwrap();
+        let res2 = c2.unwrap().unwrap();
+
+        assert_eq!(res1.state, CloudJobState::Cancelled);
+        assert_eq!(res2.state, CloudJobState::Cancelled);
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Exactly ONE remote cancel call must have been made
+        assert_eq!(
+            mock_provider.cancel_call_count.load(Ordering::SeqCst),
+            1,
+            "Concurrent cancel commands must not trigger duplicate remote cancel calls"
+        );
+    }
+
+    // =========================================================================
+    // TEST 30 — CAS HARDENING AGAINST NEWER VALID TMP
+    // =========================================================================
+
+    #[test]
+    fn test_phase15_30_cas_hardening_against_newer_valid_tmp() {
+        let (paths, _temp, project_id, _sample_mp4) = create_test_env();
+        let store = PersistentCloudJobStore::new(paths);
+
+        let mut job = PersistentCloudJob::new(
+            "client_req_cas_tmp".to_string(),
+            "cjob-cas-tmp".to_string(),
+            project_id.clone(),
+            "replicate".to_string(),
+            "minimax/video-01".to_string(),
+            "minimax/video-01".to_string(),
+            "FullTransformation".to_string(),
+            ExecutionClass::SpecializedVideoTransformation,
+            InputAssets::default(),
+            "hash_cas_tmp".to_string(),
+            CostRecord::default(),
+        );
+
+        // Write primary at revision 10
+        job.state_revision = 10;
+        job.state = CloudJobState::Processing;
+        store.save_job_atomic(&job).unwrap();
+
+        // Write .tmp at revision 12 (crash recovery evidence)
+        let tmp_path = store
+            .job_tmp_file_path(&project_id, "cjob-cas-tmp")
+            .unwrap();
+        let mut tmp_job = job.clone();
+        tmp_job.state_revision = 12;
+        tmp_job.state = CloudJobState::Cancelled;
+        let tmp_str = serde_json::to_string_pretty(&tmp_job).unwrap();
+        fs::write(&tmp_path, tmp_str).unwrap();
+
+        // Attempt to save incoming revision 11 (which is newer than primary 10, but older than tmp 12)
+        let mut incoming_job = job.clone();
+        incoming_job.state_revision = 11;
+        incoming_job.state = CloudJobState::Downloading;
+
+        let save_res = store.save_job_atomic(&incoming_job);
+        assert!(save_res.is_err());
+        assert!(format!("{}", save_res.unwrap_err()).contains("STALE_JOB_REVISION"));
+
+        // Verify revision 12 remains authoritative on load
+        let loaded = store.load_job(&project_id, "cjob-cas-tmp").unwrap();
+        assert_eq!(loaded.state_revision, 12);
+        assert_eq!(loaded.state, CloudJobState::Cancelled);
+    }
+
+    // =========================================================================
+    // TEST 31 — ATOMIC TMP CRASH RECOVERY
+    // =========================================================================
+
+    #[test]
+    fn test_phase15_31_atomic_tmp_crash_recovery() {
+        let (paths, _temp, project_id, _sample_mp4) = create_test_env();
+        let store = PersistentCloudJobStore::new(paths);
+
+        let mut job = PersistentCloudJob::new(
+            "client_req_crash".to_string(),
+            "cjob-crash-rec".to_string(),
+            project_id.clone(),
+            "replicate".to_string(),
+            "minimax/video-01".to_string(),
+            "minimax/video-01".to_string(),
+            "FullTransformation".to_string(),
+            ExecutionClass::SpecializedVideoTransformation,
+            InputAssets::default(),
+            "hash_crash".to_string(),
+            CostRecord::default(),
+        );
+        job.state_revision = 5;
+        store.save_job_atomic(&job).unwrap();
+
+        // Simulate crash: write newer tmp file (rev 6)
+        let tmp_path = store
+            .job_tmp_file_path(&project_id, "cjob-crash-rec")
+            .unwrap();
+        let mut newer_job = job.clone();
+        newer_job.state_revision = 6;
+        newer_job.state = CloudJobState::Processing;
+        let tmp_str = serde_json::to_string_pretty(&newer_job).unwrap();
+        fs::write(&tmp_path, tmp_str).unwrap();
+
+        let loaded = store.load_job(&project_id, "cjob-crash-rec").unwrap();
+        assert_eq!(loaded.state_revision, 6);
+        assert_eq!(loaded.state, CloudJobState::Processing);
+    }
+
+    // =========================================================================
+    // TEST 32 — PATH TRAVERSAL REJECTION
+    // =========================================================================
+
+    #[test]
+    fn test_phase15_32_path_traversal_rejection() {
+        let (paths, _temp, _project_id, _sample_mp4) = create_test_env();
+        let store = PersistentCloudJobStore::new(paths);
+
+        assert!(store.project_cloud_jobs_dir("../escape").is_err());
+        assert!(store.project_cloud_jobs_dir("dir/escape").is_err());
+        assert!(store.project_cloud_jobs_dir("dir\\escape").is_err());
+        assert!(store.project_cloud_jobs_dir("").is_err());
+        assert!(store.job_file_path("proj_1", "../escape").is_err());
+        assert!(store.artifact_final_path("proj_1", "bad:id").is_err());
+    }
+
+    // =========================================================================
+    // TEST 33 — MISSING PROVIDER CREDENTIALS RECOVERY
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_phase15_33_missing_provider_credentials_recovery() {
+        let (paths, _temp, project_id, _sample_mp4) = create_test_env();
+
+        let mut job = PersistentCloudJob::new(
+            "client_req_creds".to_string(),
+            "cjob-creds".to_string(),
+            project_id.clone(),
+            "replicate".to_string(),
+            "minimax/video-01".to_string(),
+            "minimax/video-01".to_string(),
+            "FullTransformation".to_string(),
+            ExecutionClass::SpecializedVideoTransformation,
+            InputAssets::default(),
+            "hash_creds".to_string(),
+            CostRecord::default(),
+        );
+        job.state = CloudJobState::Processing;
+        job.remote_job_id = Some("rem_creds_1".to_string());
+
+        let store = PersistentCloudJobStore::new(paths.clone());
+        store.save_job_atomic(&job).unwrap();
+
+        // Resolver with NO provider configured
+        let resolver = Arc::new(MockProviderResolver { provider: None });
+        let event_sink = Arc::new(TestEventSink::new());
+
+        let service = create_test_service(
+            paths,
+            resolver,
+            event_sink,
+            LifecycleTimingConfig::fast_test(),
+        );
+
+        let recovered = service.recover_startup_jobs().await.unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].state, CloudJobState::Blocked);
+        assert_eq!(
+            recovered[0].error.as_ref().unwrap().code,
+            "MISSING_PROVIDER_CREDENTIALS"
+        );
+    }
+
+    // =========================================================================
+    // TEST 34 — VALIDATING_OUTPUT LOCAL RECOVERY WITHOUT CREDENTIALS
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_phase15_34_validating_output_local_recovery_without_credentials() {
+        let (paths, _temp, project_id, sample_mp4) = create_test_env();
+        let store = PersistentCloudJobStore::new(paths.clone());
+
+        let mut job = PersistentCloudJob::new(
+            "client_req_val_rec".to_string(),
+            "cjob-val-rec".to_string(),
+            project_id.clone(),
+            "replicate".to_string(),
+            "minimax/video-01".to_string(),
+            "minimax/video-01".to_string(),
+            "FullTransformation".to_string(),
+            ExecutionClass::SpecializedVideoTransformation,
+            InputAssets::default(),
+            "hash_val_rec".to_string(),
+            CostRecord::default(),
+        );
+        job.state = CloudJobState::ValidatingOutput;
+        store.save_job_atomic(&job).unwrap();
+
+        // Copy valid sample MP4 into partial artifact location
+        let partial_path = store
+            .artifact_partial_path(&project_id, "cjob-val-rec")
+            .unwrap();
+        fs::copy(&sample_mp4, &partial_path).unwrap();
+
+        // Resolver with NO provider credentials
+        let resolver = Arc::new(MockProviderResolver { provider: None });
+        let event_sink = Arc::new(TestEventSink::new());
+
+        let service = create_test_service(
+            paths,
+            resolver,
+            event_sink,
+            LifecycleTimingConfig::fast_test(),
+        );
+
+        let recovered = service.recover_startup_jobs().await.unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].state, CloudJobState::Completed);
+        assert!(recovered[0].output.final_path.is_some());
+    }
+
+    // =========================================================================
+    // TEST 35 — WRONG DURATION VALIDATION FAILURE
+    // =========================================================================
+
+    #[test]
+    fn test_phase15_35_wrong_duration_validation_failure() {
+        let (_paths, temp, _project_id, _sample_mp4) = create_test_env();
+        let short_mp4 = temp.path().join("short.mp4");
+        create_synthetic_mp4(&short_mp4, 1, 576, 1024, 25, true);
+
+        let validator = CloudOutputValidator::new();
+        // Request expected 10.0s, but artifact is only 1.0s
+        let res = validator.validate_artifact(&short_mp4, Some(10.0), false);
+        assert!(res.is_err());
+        assert!(format!("{}", res.unwrap_err()).contains("exceeds tolerance bounds"));
+    }
+
+    // =========================================================================
+    // TEST 36 — REQUIRE_AUDIO VALIDATION FAILURE
+    // =========================================================================
+
+    #[test]
+    fn test_phase15_36_require_audio_validation_failure() {
+        let (_paths, temp, _project_id, _sample_mp4) = create_test_env();
+        let no_audio_mp4 = temp.path().join("no_audio.mp4");
+        create_synthetic_mp4(&no_audio_mp4, 1, 576, 1024, 25, false);
+
+        let validator = CloudOutputValidator::new();
+        let res = validator.validate_artifact(&no_audio_mp4, Some(1.0), true);
+        assert!(res.is_err());
+        assert!(format!("{}", res.unwrap_err()).contains("has no audio stream"));
+    }
+
+    // =========================================================================
+    // TEST 37 — NO AUDIO REQUIRED VALIDATION SUCCESS
+    // =========================================================================
+
+    #[test]
+    fn test_phase15_37_no_audio_required_validation_success() {
+        let (_paths, temp, _project_id, _sample_mp4) = create_test_env();
+        let no_audio_mp4 = temp.path().join("no_audio_ok.mp4");
+        create_synthetic_mp4(&no_audio_mp4, 1, 576, 1024, 25, false);
+
+        let validator = CloudOutputValidator::new();
+        let res = validator.validate_artifact(&no_audio_mp4, Some(1.0), false);
+        assert!(res.is_ok());
+    }
+
+    // =========================================================================
+    // TEST 38 — CORRUPT OUTPUT FAILS VALIDATION
+    // =========================================================================
+
+    #[test]
+    fn test_phase15_38_corrupt_output_fails_validation() {
+        let (_paths, temp, _project_id, _sample_mp4) = create_test_env();
+        let corrupt_mp4 = temp.path().join("corrupt.mp4");
+        fs::write(&corrupt_mp4, b"not a real mp4 video file").unwrap();
+
+        let validator = CloudOutputValidator::new();
+        let res = validator.validate_artifact(&corrupt_mp4, Some(1.0), false);
+        assert!(res.is_err());
     }
 }

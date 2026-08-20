@@ -172,7 +172,7 @@ impl PersistentCloudJobStore {
     }
 
     // -------------------------------------------------------------------------
-    // Atomic Manifest Persistence with Store-Level Stale Revision Protection
+    // Atomic Manifest Persistence with Store-Level CAS Revision Protection
     // -------------------------------------------------------------------------
 
     pub fn save_job_atomic(&self, job: &PersistentCloudJob) -> Result<(), CloudProviderError> {
@@ -187,7 +187,7 @@ impl PersistentCloudJobStore {
         let primary_path = self.job_file_path(&job.project_id, &job.internal_job_id)?;
         let tmp_path = self.job_tmp_file_path(&job.project_id, &job.internal_job_id)?;
 
-        // Store-level stale revision protection (CAS guard):
+        // 1. CAS guard against existing primary manifest:
         // If an existing valid primary record exists on disk, incoming revision must be strictly newer.
         if primary_path.exists() {
             if let Ok(content) = fs::read_to_string(&primary_path) {
@@ -202,6 +202,21 @@ impl PersistentCloudJobStore {
             }
         }
 
+        // 2. CAS guard against existing valid .tmp manifest:
+        // If an existing valid temp record exists on disk, incoming revision must be strictly newer.
+        if tmp_path.exists() {
+            if let Ok(content) = fs::read_to_string(&tmp_path) {
+                if let Ok(tmp_job) = serde_json::from_str::<PersistentCloudJob>(&content) {
+                    if job.state_revision <= tmp_job.state_revision {
+                        return Err(CloudProviderError::RequestInvalid(format!(
+                            "STALE_JOB_REVISION: Temp file for job {} has equal or newer revision ({}) than incoming ({})",
+                            job.internal_job_id, tmp_job.state_revision, job.state_revision
+                        )));
+                    }
+                }
+            }
+        }
+
         let serialized = serde_json::to_string_pretty(job).map_err(|e| {
             CloudProviderError::ProviderUnavailable(format!(
                 "Failed to serialize PersistentCloudJob: {}",
@@ -209,7 +224,7 @@ impl PersistentCloudJobStore {
             ))
         })?;
 
-        // 1. Write to temporary file with sync
+        // 3. Write to temporary file with sync
         {
             let mut file = File::create(&tmp_path).map_err(|e| {
                 CloudProviderError::ProviderUnavailable(format!(
@@ -234,7 +249,7 @@ impl PersistentCloudJobStore {
             })?;
         }
 
-        // 2. Windows-safe atomic replace
+        // 4. Windows-safe atomic replace
         // Note: Do not delete .tmp on atomic_replace failure so that newer fsynced data is preserved for recovery evidence
         atomic_replace(&tmp_path, &primary_path).map_err(|e| {
             CloudProviderError::ProviderUnavailable(format!(
@@ -388,16 +403,22 @@ impl PersistentCloudJobStore {
         }
 
         let mut active_jobs = Vec::new();
-        if let Ok(entries) = fs::read_dir(projects_dir) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    let project_id = entry.file_name().to_string_lossy().to_string();
-                    if let Ok(jobs) = self.list_jobs_in_project(&project_id) {
-                        for job in jobs {
-                            if !job.state.is_terminal() {
-                                active_jobs.push(job);
-                            }
-                        }
+        let entries = fs::read_dir(projects_dir).map_err(|e| {
+            CloudProviderError::ProviderUnavailable(format!(
+                "Failed to read projects directory {}: {}",
+                projects_dir.display(),
+                e
+            ))
+        })?;
+
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                let project_id = entry.file_name().to_string_lossy().to_string();
+                // Fail-closed: propagate error if any project has an unrecoverable manifest
+                let jobs = self.list_jobs_in_project(&project_id)?;
+                for job in jobs {
+                    if !job.state.is_terminal() {
+                        active_jobs.push(job);
                     }
                 }
             }

@@ -6,8 +6,23 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
+#[derive(Debug, Clone)]
+pub struct ValidatedArtifactMetadata {
+    pub artifact_hash: String,
+    pub width: u32,
+    pub height: u32,
+    pub duration_sec: f64,
+    pub fps: f64,
+}
+
 pub struct CloudOutputValidator {
     media_service: MediaService,
+}
+
+impl Default for CloudOutputValidator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CloudOutputValidator {
@@ -43,13 +58,12 @@ impl CloudOutputValidator {
         Ok(format!("{:x}", hasher.finalize()))
     }
 
-    pub fn validate_and_promote_artifact(
+    pub fn validate_artifact(
         &self,
         partial_path: &Path,
-        final_path: &Path,
         expected_duration_sec: Option<f64>,
         require_audio: bool,
-    ) -> Result<OutputArtifactRecord, CloudProviderError> {
+    ) -> Result<ValidatedArtifactMetadata, CloudProviderError> {
         // 1. File existence and size check
         if !partial_path.exists() {
             return Err(CloudProviderError::ProviderUnavailable(format!(
@@ -124,7 +138,20 @@ impl CloudOutputValidator {
         // 3. Compute SHA256 hash
         let artifact_hash = Self::compute_file_sha256(partial_path)?;
 
-        // 4. Atomic promotion: partial -> final using atomic replace
+        Ok(ValidatedArtifactMetadata {
+            artifact_hash,
+            width: probe.width,
+            height: probe.height,
+            duration_sec,
+            fps: probe.fps,
+        })
+    }
+
+    pub fn promote_artifact(
+        partial_path: &Path,
+        final_path: &Path,
+        metadata: &ValidatedArtifactMetadata,
+    ) -> Result<OutputArtifactRecord, CloudProviderError> {
         if let Some(parent) = final_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -141,11 +168,22 @@ impl CloudOutputValidator {
         Ok(OutputArtifactRecord {
             temporary_path: Some(partial_path.to_path_buf()),
             final_path: Some(final_path.to_path_buf()),
-            artifact_hash: Some(artifact_hash),
-            width: Some(probe.width),
-            height: Some(probe.height),
-            duration_sec: Some(duration_sec),
-            fps: Some(probe.fps),
+            artifact_hash: Some(metadata.artifact_hash.clone()),
+            width: Some(metadata.width),
+            height: Some(metadata.height),
+            duration_sec: Some(metadata.duration_sec),
+            fps: Some(metadata.fps),
         })
+    }
+
+    pub fn validate_and_promote_artifact(
+        &self,
+        partial_path: &Path,
+        final_path: &Path,
+        expected_duration_sec: Option<f64>,
+        require_audio: bool,
+    ) -> Result<OutputArtifactRecord, CloudProviderError> {
+        let meta = self.validate_artifact(partial_path, expected_duration_sec, require_audio)?;
+        Self::promote_artifact(partial_path, final_path, &meta)
     }
 }
