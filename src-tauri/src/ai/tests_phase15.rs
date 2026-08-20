@@ -21,7 +21,7 @@ mod tests {
     };
     use crate::ai::cloud::validator::CloudOutputValidator;
     use crate::ai::cloud::ExecutionClass;
-    use crate::projects::ProjectManager;
+    use crate::projects::{PreservationConfig, ProjectManager, SourceMedia};
     use crate::system::StoragePaths;
     use std::fs::{self, File};
     use std::io::Write;
@@ -29,6 +29,7 @@ mod tests {
     use std::process::Command;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use tempfile::tempdir;
 
     // -------------------------------------------------------------------------
@@ -48,13 +49,34 @@ mod tests {
         };
         fs::create_dir_all(&paths.projects_dir).unwrap();
 
-        // Create test project
-        let pm = ProjectManager::new(paths.clone());
-        let project = pm.create_project("Phase 15 Test Project").unwrap();
-
-        // Create synthetic 1s valid MP4 fixture (576x1024 @ 25fps)
+        // Create synthetic 1s valid MP4 fixture (576x1024 @ 25fps with audio)
         let sample_mp4 = base.join("valid_sample.mp4");
         create_synthetic_mp4(&sample_mp4, 1, 576, 1024, 25, true);
+
+        // Create test project with source media metadata
+        let pm = ProjectManager::new(paths.clone());
+        let mut project = pm.create_project("Phase 15 Test Project").unwrap();
+        project.source_media = Some(SourceMedia {
+            media_id: "sm_123".to_string(),
+            original_file_name: "valid_sample.mp4".to_string(),
+            source_path: sample_mp4.clone(),
+            duration_ms: 1000,
+            width: 576,
+            height: 1024,
+            fps: 25.0,
+            file_size_bytes: 23000,
+            container: "mp4".to_string(),
+            video_codec: "h264".to_string(),
+            audio_codec: Some("aac".to_string()),
+            has_audio: true,
+        });
+        project.transformation_config.preservation = PreservationConfig {
+            preserve_motion: true,
+            preserve_camera: true,
+            preserve_composition: true,
+            preserve_original_audio: true,
+        };
+        pm.update_project(&project).unwrap();
 
         (paths, temp, project.id, sample_mp4)
     }
@@ -490,7 +512,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST 3 — DEDUPE: SEQUENTIAL SAME CLIENT REQUEST ID (Section 2A)
+    // TEST 3 — DEDUPE: SEQUENTIAL SAME CLIENT REQUEST ID
     // =========================================================================
 
     #[tokio::test]
@@ -528,7 +550,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST 4 — DEDUPE: CONCURRENT SAME CLIENT REQUEST ID (Section 2B)
+    // TEST 4 — DEDUPE: CONCURRENT SAME CLIENT REQUEST ID
     // =========================================================================
 
     #[tokio::test]
@@ -578,7 +600,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST 5 — DEDUPE: RESTART THEN RETRY SAME CLIENT REQUEST ID (Section 2C)
+    // TEST 5 — DEDUPE: RESTART THEN RETRY SAME CLIENT REQUEST ID
     // =========================================================================
 
     #[tokio::test]
@@ -639,16 +661,17 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST 6 — CANCELLATION NORMAL RECONCILIATION FLOW (Section 3)
+    // TEST 6 — CANCELLATION NON-BLOCKING IMMEDIATE OBSERVATION (Requirement 1)
     // =========================================================================
 
     #[tokio::test]
-    async fn test_phase15_06_cancellation_normal_reconciliation_flow() {
+    async fn test_phase15_06_cancellation_non_blocking_immediate() {
         let (paths, _temp, project_id, sample_mp4) = create_test_env();
 
         let mock_provider = Arc::new(MockCloudProvider::new());
+        // Configure infinite processing polling with 10-second polling interval
         *mock_provider.poll_responses.lock().unwrap() = vec![RemotePollResponse {
-            remote_id: "mock_remote_cancel_1".to_string(),
+            remote_id: "mock_remote_cancel_nb".to_string(),
             status: RemoteStatus::Processing,
             output_url: None,
             error: None,
@@ -659,41 +682,50 @@ mod tests {
         });
         let event_sink = Arc::new(TestEventSink::new());
 
-        let service = create_test_service(
-            paths,
-            resolver,
-            event_sink,
-            LifecycleTimingConfig::fast_test(),
-        );
+        let mut timing = LifecycleTimingConfig::production();
+        timing.poll_interval_ms = 10_000; // 10s poll interval
 
-        let req = make_test_req("cjob-test-cancel-1", &project_id, &sample_mp4);
+        let service = create_test_service(paths, resolver, event_sink, timing);
+
+        let req = make_test_req("cjob-cancel-nb", &project_id, &sample_mp4);
 
         let job = service
             .start_cloud_generation(req, Some(3.00))
             .await
             .unwrap();
-        let cancelled = service
+
+        // Polling task is sleeping for 10s. Cancel immediately!
+        let cancel_start = std::time::Instant::now();
+        let cancel_result = service
             .cancel_cloud_generation(&project_id, &job.internal_job_id)
             .await
             .unwrap();
+        let cancel_elapsed = cancel_start.elapsed();
 
-        assert_eq!(cancelled.state, CloudJobState::Cancelled);
-        assert!(cancelled.cancellation_requested);
+        // Must complete promptly without waiting for the 10s poll sleep!
+        assert!(
+            cancel_elapsed < Duration::from_millis(500),
+            "Cancellation took too long: {:?}",
+            cancel_elapsed
+        );
+        assert_eq!(cancel_result.state, CloudJobState::Cancelled);
+        assert!(cancel_result.cancellation_requested);
         assert_eq!(mock_provider.cancel_call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(mock_provider.submit_call_count.load(Ordering::SeqCst), 1);
     }
 
     // =========================================================================
-    // TEST 7 — CANCELLATION RESTART RECONCILIATION (Section 3)
+    // TEST 7 — RESUME_UNBLOCK_JOB DEADLOCK-FREE RECONCILIATION (Requirement 2)
     // =========================================================================
 
     #[tokio::test]
-    async fn test_phase15_07_cancellation_restart_reconciliation() {
+    async fn test_phase15_07_resume_unblock_job_no_deadlock() {
         let (paths, _temp, project_id, _sample_mp4) = create_test_env();
 
-        // Create job with cancellationRequested=true, Processing, and remote ID
+        // Seed a Blocked job with cancellation_requested=true and remote ID
         let mut job = PersistentCloudJob::new(
-            "client_req_cancel_rec".to_string(),
-            "cjob-cancel-rec".to_string(),
+            "client_req_resume_deadlock".to_string(),
+            "cjob-deadlock-test".to_string(),
             project_id.clone(),
             "replicate".to_string(),
             "minimax/video-01".to_string(),
@@ -701,12 +733,12 @@ mod tests {
             "FullTransformation".to_string(),
             ExecutionClass::SpecializedVideoTransformation,
             InputAssets::default(),
-            "hash_cancel".to_string(),
+            "hash_dl".to_string(),
             CostRecord::default(),
         );
-        job.state = CloudJobState::Processing;
+        job.state = CloudJobState::Blocked;
         job.submission_state = SubmissionState::Acknowledged;
-        job.remote_job_id = Some("mock_remote_rec".to_string());
+        job.remote_job_id = Some("rem_dl_123".to_string());
         job.cancellation_requested = true;
 
         let store = PersistentCloudJobStore::new(paths.clone());
@@ -725,24 +757,53 @@ mod tests {
             LifecycleTimingConfig::fast_test(),
         );
 
-        let recovered = service.recover_startup_jobs().await.unwrap();
-        assert_eq!(recovered.len(), 1);
-        assert_eq!(recovered[0].state, CloudJobState::Cancelled);
+        // Run with a 2-second timeout guard to prove no self-deadlock occurs
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            service.resume_unblock_job(&project_id, "cjob-deadlock-test"),
+        )
+        .await
+        .expect("Operation must not deadlock");
+
+        let resumed_job = result.unwrap();
+        assert_eq!(resumed_job.state, CloudJobState::Cancelled);
         assert_eq!(mock_provider.cancel_call_count.load(Ordering::SeqCst), 1);
-        assert_eq!(mock_provider.submit_call_count.load(Ordering::SeqCst), 0);
     }
 
     // =========================================================================
-    // TEST 8 — CANCELLATION REMOTE FAILURE BLOCKS (Section 3)
+    // TEST 8 — STARTUP RECOVERY REMOTE CANCEL FAILURE BLOCKS (Requirement 3)
     // =========================================================================
 
     #[tokio::test]
-    async fn test_phase15_08_cancellation_remote_failure_blocks() {
-        let (paths, _temp, project_id, sample_mp4) = create_test_env();
+    async fn test_phase15_08_startup_recovery_cancel_failure_blocks() {
+        let (paths, _temp, project_id, _sample_mp4) = create_test_env();
 
+        // Seed a Processing job with cancellation_requested=true and remote ID
+        let mut job = PersistentCloudJob::new(
+            "client_req_cancel_fail".to_string(),
+            "cjob-cancel-fail".to_string(),
+            project_id.clone(),
+            "replicate".to_string(),
+            "minimax/video-01".to_string(),
+            "minimax/video-01".to_string(),
+            "FullTransformation".to_string(),
+            ExecutionClass::SpecializedVideoTransformation,
+            InputAssets::default(),
+            "hash_fail".to_string(),
+            CostRecord::default(),
+        );
+        job.state = CloudJobState::Processing;
+        job.submission_state = SubmissionState::Acknowledged;
+        job.remote_job_id = Some("rem_fail_123".to_string());
+        job.cancellation_requested = true;
+
+        let store = PersistentCloudJobStore::new(paths.clone());
+        store.save_job_atomic(&job).unwrap();
+
+        // Provider whose cancel_job fails with 500 error
         let mock_provider = Arc::new(MockCloudProvider::new());
         *mock_provider.cancel_behavior.lock().unwrap() =
-            Err("Provider API 502 Bad Gateway during cancel".to_string());
+            Err("HTTP 500 Internal Server Error during cancel".to_string());
 
         let resolver = Arc::new(MockProviderResolver {
             provider: Some(mock_provider.clone()),
@@ -756,58 +817,32 @@ mod tests {
             LifecycleTimingConfig::fast_test(),
         );
 
-        let req = make_test_req("cjob-test-cancel-fail", &project_id, &sample_mp4);
+        let recovered = service.recover_startup_jobs().await.unwrap();
+        assert_eq!(recovered.len(), 1);
 
-        let job = service
-            .start_cloud_generation(req, Some(3.00))
-            .await
-            .unwrap();
-        let cancel_res = service
-            .cancel_cloud_generation(&project_id, &job.internal_job_id)
-            .await;
-        assert!(cancel_res.is_err());
-
-        let reloaded = service
-            .get_job_status(&project_id, &job.internal_job_id)
-            .unwrap();
-        assert_eq!(reloaded.state, CloudJobState::Blocked);
-        assert!(reloaded.cancellation_requested);
+        // State MUST NOT become CANCELLED when remote cancel fails
+        assert_eq!(recovered[0].state, CloudJobState::Blocked);
         assert_eq!(
-            reloaded.error.as_ref().unwrap().code,
+            recovered[0].error.as_ref().unwrap().code,
             "CANCELLATION_FAILED_REMOTE"
         );
+        assert_eq!(recovered[0].remote_job_id, Some("rem_fail_123".to_string()));
+        assert_eq!(mock_provider.submit_call_count.load(Ordering::SeqCst), 0);
     }
 
     // =========================================================================
-    // TEST 9 — PERSIST BEFORE EVENT ENFORCEMENT (Section 6)
+    // TEST 9 — PERSIST BEFORE EVENT WITH INJECTED STORE FAILURE (Requirement 4 & 5)
     // =========================================================================
-
-    #[derive(Clone)]
-    pub struct FailingStoreEventSink {
-        pub emit_count: Arc<AtomicU32>,
-    }
-
-    impl EventSink for FailingStoreEventSink {
-        fn emit_job_updated(
-            &self,
-            _payload: &crate::ai::cloud::CloudJobEventPayload,
-        ) -> Result<(), String> {
-            self.emit_count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
 
     #[tokio::test]
-    async fn test_phase15_09_persist_before_event_enforcement() {
-        let (paths, _temp, _project_id, sample_mp4) = create_test_env();
+    async fn test_phase15_09_persist_before_event_with_injected_store_failure() {
+        let (paths, _temp, project_id, sample_mp4) = create_test_env();
 
         let mock_provider = Arc::new(MockCloudProvider::new());
         let resolver = Arc::new(MockProviderResolver {
             provider: Some(mock_provider),
         });
-        let event_sink = Arc::new(FailingStoreEventSink {
-            emit_count: Arc::new(AtomicU32::new(0)),
-        });
+        let event_sink = Arc::new(TestEventSink::new());
 
         let service = create_test_service(
             paths,
@@ -816,22 +851,168 @@ mod tests {
             LifecycleTimingConfig::fast_test(),
         );
 
-        // Provide invalid project ID with path traversal
-        let req = make_test_req("cjob-fail-persist", "../invalid_project", &sample_mp4);
+        let req = make_test_req("cjob-fail-seam", &project_id, &sample_mp4);
 
-        let res = service.start_cloud_generation(req, Some(3.00)).await;
-        assert!(res.is_err());
+        // 1. Initial job creation succeeds -> emits 2 events (Created, Submitted/Processing)
+        let job = service
+            .start_cloud_generation(req, Some(3.00))
+            .await
+            .unwrap();
+        let initial_events_count = event_sink.events.read().unwrap().len();
+        assert!(initial_events_count > 0);
 
-        // Zero events must be emitted when persistence fails
-        assert_eq!(event_sink.emit_count.load(Ordering::SeqCst), 0);
+        // 2. Arm persistence failure seam on the store
+        service.store().set_fail_next_save(true);
+
+        // 3. Mutate lifecycle state (cancellation)
+        let cancel_res = service
+            .cancel_cloud_generation(&project_id, &job.internal_job_id)
+            .await;
+        assert!(cancel_res.is_err());
+        assert!(format!("{}", cancel_res.unwrap_err()).contains("SIMULATED_PERSISTENCE_FAILURE"));
+
+        // 4. Verify NO new event was emitted for the unpersisted mutation
+        let post_failure_events_count = event_sink.events.read().unwrap().len();
+        assert_eq!(initial_events_count, post_failure_events_count);
+
+        // 5. Verify store state on disk was NOT mutated to cancelled
+        let on_disk = service
+            .store()
+            .load_job(&project_id, &job.internal_job_id)
+            .unwrap();
+        assert_ne!(on_disk.state, CloudJobState::Cancelled);
+        assert!(!on_disk.cancellation_requested);
     }
 
     // =========================================================================
-    // TEST 10 — VALIDATION: WRONG DURATION FAILS (Section 7)
+    // TEST 10 — REAL PROJECT AUDIO POLICY DERIVATION (Requirement 6)
     // =========================================================================
 
     #[tokio::test]
-    async fn test_phase15_10_validation_wrong_duration_fails() {
+    async fn test_phase15_10_real_project_audio_policy_derivation() {
+        let (paths, temp, _project_id, sample_mp4) = create_test_env();
+        let pm = ProjectManager::new(paths.clone());
+
+        let mock_provider = Arc::new(MockCloudProvider::new());
+        let resolver = Arc::new(MockProviderResolver {
+            provider: Some(mock_provider),
+        });
+
+        // Scenario A: source has audio + preserve_original_audio = true -> requireAudio = true
+        {
+            let mut p = pm.create_project("Project A").unwrap();
+            p.source_media = Some(SourceMedia {
+                media_id: "sm_a".to_string(),
+                original_file_name: "a.mp4".to_string(),
+                source_path: sample_mp4.clone(),
+                duration_ms: 1000,
+                width: 576,
+                height: 1024,
+                fps: 25.0,
+                file_size_bytes: 20000,
+                container: "mp4".to_string(),
+                video_codec: "h264".to_string(),
+                audio_codec: Some("aac".to_string()),
+                has_audio: true,
+            });
+            p.transformation_config.preservation.preserve_original_audio = true;
+            pm.update_project(&p).unwrap();
+
+            let service = create_test_service(
+                paths.clone(),
+                resolver.clone(),
+                Arc::new(TestEventSink::new()),
+                LifecycleTimingConfig::fast_test(),
+            );
+
+            let req = make_test_req("cjob-policy-a", &p.id, &sample_mp4);
+            let job = service
+                .start_cloud_generation(req, Some(3.00))
+                .await
+                .unwrap();
+            assert!(job.validation_policy.require_audio);
+        }
+
+        // Scenario B: source has audio + preserve_original_audio = false -> requireAudio = false
+        {
+            let mut p = pm.create_project("Project B").unwrap();
+            p.source_media = Some(SourceMedia {
+                media_id: "sm_b".to_string(),
+                original_file_name: "b.mp4".to_string(),
+                source_path: sample_mp4.clone(),
+                duration_ms: 1000,
+                width: 576,
+                height: 1024,
+                fps: 25.0,
+                file_size_bytes: 20000,
+                container: "mp4".to_string(),
+                video_codec: "h264".to_string(),
+                audio_codec: Some("aac".to_string()),
+                has_audio: true,
+            });
+            p.transformation_config.preservation.preserve_original_audio = false;
+            pm.update_project(&p).unwrap();
+
+            let service = create_test_service(
+                paths.clone(),
+                resolver.clone(),
+                Arc::new(TestEventSink::new()),
+                LifecycleTimingConfig::fast_test(),
+            );
+
+            let req = make_test_req("cjob-policy-b", &p.id, &sample_mp4);
+            let job = service
+                .start_cloud_generation(req, Some(3.00))
+                .await
+                .unwrap();
+            assert!(!job.validation_policy.require_audio);
+        }
+
+        // Scenario C: source has NO audio + preserve_original_audio = true -> requireAudio = false
+        {
+            let no_audio_mp4 = temp.path().join("no_audio_src.mp4");
+            create_synthetic_mp4(&no_audio_mp4, 1, 576, 1024, 25, false);
+
+            let mut p = pm.create_project("Project C").unwrap();
+            p.source_media = Some(SourceMedia {
+                media_id: "sm_c".to_string(),
+                original_file_name: "c.mp4".to_string(),
+                source_path: no_audio_mp4.clone(),
+                duration_ms: 1000,
+                width: 576,
+                height: 1024,
+                fps: 25.0,
+                file_size_bytes: 20000,
+                container: "mp4".to_string(),
+                video_codec: "h264".to_string(),
+                audio_codec: None,
+                has_audio: false,
+            });
+            p.transformation_config.preservation.preserve_original_audio = true;
+            pm.update_project(&p).unwrap();
+
+            let service = create_test_service(
+                paths,
+                resolver,
+                Arc::new(TestEventSink::new()),
+                LifecycleTimingConfig::fast_test(),
+            );
+
+            let req = make_test_req("cjob-policy-c", &p.id, &no_audio_mp4);
+            let job = service
+                .start_cloud_generation(req, Some(3.00))
+                .await
+                .unwrap();
+            assert!(!job.validation_policy.require_audio);
+        }
+    }
+
+    // =========================================================================
+    // TEST 11 — VALIDATION: WRONG DURATION FAILS
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_phase15_11_validation_wrong_duration_fails() {
         let (paths, temp, project_id, sample_mp4) = create_test_env();
 
         // Create a 5-second valid video fixture
@@ -876,96 +1057,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST 11 — VALIDATION: AUDIO PRESERVATION (Section 7)
-    // =========================================================================
-
-    #[tokio::test]
-    async fn test_phase15_11_validation_audio_preservation() {
-        let (paths, temp, project_id, sample_mp4) = create_test_env();
-
-        // Create a 1-second video WITHOUT audio
-        let no_audio_mp4 = temp.path().join("no_audio.mp4");
-        create_synthetic_mp4(&no_audio_mp4, 1, 576, 1024, 25, false);
-
-        // Case A: Transformation with source video requires audio -> provider returns no audio -> FAILS
-        {
-            let mock_provider = Arc::new(MockCloudProvider::new());
-            *mock_provider.download_behavior.lock().unwrap() = vec![Ok(no_audio_mp4.clone())];
-
-            let resolver = Arc::new(MockProviderResolver {
-                provider: Some(mock_provider),
-            });
-            let event_sink = Arc::new(TestEventSink::new());
-
-            let service = create_test_service(
-                paths.clone(),
-                resolver,
-                event_sink,
-                LifecycleTimingConfig::fast_test(),
-            );
-
-            let req = make_test_req("cjob-audio-req", &project_id, &sample_mp4);
-
-            let job = service
-                .start_cloud_generation(req, Some(3.00))
-                .await
-                .unwrap();
-
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-            let final_job = service
-                .get_job_status(&project_id, &job.internal_job_id)
-                .unwrap();
-            assert_eq!(final_job.state, CloudJobState::Failed);
-            assert_eq!(
-                final_job.error.as_ref().unwrap().code,
-                "VALIDATION_FAILED"
-            );
-            assert!(final_job
-                .error
-                .as_ref()
-                .unwrap()
-                .sanitized_message
-                .contains("Audio preservation"));
-        }
-
-        // Case B: Generation without source video does not require audio -> provider returns no audio -> SUCCEEDS
-        {
-            let mock_provider = Arc::new(MockCloudProvider::new());
-            *mock_provider.download_behavior.lock().unwrap() = vec![Ok(no_audio_mp4)];
-
-            let resolver = Arc::new(MockProviderResolver {
-                provider: Some(mock_provider),
-            });
-            let event_sink = Arc::new(TestEventSink::new());
-
-            let service = create_test_service(
-                paths,
-                resolver,
-                event_sink,
-                LifecycleTimingConfig::fast_test(),
-            );
-
-            let mut req = make_test_req("cjob-no-audio-req", &project_id, &sample_mp4);
-            req.source_video = None;
-
-            let job = service
-                .start_cloud_generation(req, Some(3.00))
-                .await
-                .unwrap();
-
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-            let final_job = service
-                .get_job_status(&project_id, &job.internal_job_id)
-                .unwrap();
-            assert_eq!(final_job.state, CloudJobState::Completed);
-            assert!(final_job.output.final_path.is_some());
-        }
-    }
-
-    // =========================================================================
-    // TEST 12 — ATOMIC ARTIFACT PROMOTION (Section 8)
+    // TEST 12 — ATOMIC ARTIFACT PROMOTION
     // =========================================================================
 
     #[test]
@@ -994,7 +1086,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST 13 — MISSING CREDENTIALS WITH REAL RESOLVER (Section 9)
+    // TEST 13 — MISSING CREDENTIALS WITH REAL RESOLVER
     // =========================================================================
 
     #[tokio::test]
@@ -1067,7 +1159,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST 14 — VALIDATING_OUTPUT RECOVERY WITHOUT PROVIDER (Section 10)
+    // TEST 14 — VALIDATING_OUTPUT RECOVERY WITHOUT PROVIDER
     // =========================================================================
 
     #[tokio::test]
@@ -1120,7 +1212,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST 15 — MONOTONIC REVISION CRASH RECOVERY (Section 4A)
+    // TEST 15 — MONOTONIC REVISION CRASH RECOVERY
     // =========================================================================
 
     #[test]
@@ -1230,7 +1322,7 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST 17 — PRODUCTION COST-SAVING REGRESSION TEST (Section 1)
+    // TEST 17 — PRODUCTION COST-SAVING REGRESSION TEST
     // =========================================================================
 
     #[tokio::test]

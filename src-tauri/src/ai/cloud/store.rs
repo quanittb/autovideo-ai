@@ -4,6 +4,8 @@ use crate::system::StoragePaths;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 // -----------------------------------------------------------------------------
 // Windows-Safe Atomic File Replacement
@@ -79,11 +81,19 @@ pub fn validate_identifier(id: &str, field_name: &str) -> Result<(), CloudProvid
 #[derive(Clone)]
 pub struct PersistentCloudJobStore {
     pub storage_paths: StoragePaths,
+    pub fail_next_save: Arc<AtomicBool>,
 }
 
 impl PersistentCloudJobStore {
     pub fn new(storage_paths: StoragePaths) -> Self {
-        Self { storage_paths }
+        Self {
+            storage_paths,
+            fail_next_save: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn set_fail_next_save(&self, fail: bool) {
+        self.fail_next_save.store(fail, Ordering::SeqCst);
     }
 
     pub fn project_cloud_jobs_dir(&self, project_id: &str) -> Result<PathBuf, CloudProviderError> {
@@ -141,19 +151,19 @@ impl PersistentCloudJobStore {
         Ok(artifacts_dir.join(format!("{}.partial", internal_job_id)))
     }
 
-    pub fn ensure_dirs(&self, project_id: &str) -> Result<(), CloudProviderError> {
+    pub fn ensure_project_cloud_dirs(&self, project_id: &str) -> Result<(), CloudProviderError> {
         let jobs_dir = self.project_cloud_jobs_dir(project_id)?;
         let artifacts_dir = self.project_artifacts_dir(project_id)?;
         fs::create_dir_all(&jobs_dir).map_err(|e| {
             CloudProviderError::ProviderUnavailable(format!(
-                "Failed to create cloud-jobs directory {}: {}",
+                "Failed to create cloud jobs dir {}: {}",
                 jobs_dir.display(),
                 e
             ))
         })?;
         fs::create_dir_all(&artifacts_dir).map_err(|e| {
             CloudProviderError::ProviderUnavailable(format!(
-                "Failed to create artifacts directory {}: {}",
+                "Failed to create cloud artifacts dir {}: {}",
                 artifacts_dir.display(),
                 e
             ))
@@ -162,16 +172,23 @@ impl PersistentCloudJobStore {
     }
 
     // -------------------------------------------------------------------------
-    // Atomic Write
+    // Atomic Manifest Persistence
     // -------------------------------------------------------------------------
 
     pub fn save_job_atomic(&self, job: &PersistentCloudJob) -> Result<(), CloudProviderError> {
-        self.ensure_dirs(&job.project_id)?;
+        if self.fail_next_save.swap(false, Ordering::SeqCst) {
+            return Err(CloudProviderError::ProviderUnavailable(
+                "SIMULATED_PERSISTENCE_FAILURE: Injected I/O error during atomic save".to_string(),
+            ));
+        }
+
+        self.ensure_project_cloud_dirs(&job.project_id)?;
+
         let primary_path = self.job_file_path(&job.project_id, &job.internal_job_id)?;
         let tmp_path = self.job_tmp_file_path(&job.project_id, &job.internal_job_id)?;
 
         let serialized = serde_json::to_string_pretty(job).map_err(|e| {
-            CloudProviderError::RequestInvalid(format!(
+            CloudProviderError::ProviderUnavailable(format!(
                 "Failed to serialize PersistentCloudJob: {}",
                 e
             ))
@@ -203,8 +220,8 @@ impl PersistentCloudJobStore {
         }
 
         // 2. Windows-safe atomic replace
+        // Note: Do not delete .tmp on atomic_replace failure so that newer fsynced data is preserved for recovery evidence
         atomic_replace(&tmp_path, &primary_path).map_err(|e| {
-            let _ = fs::remove_file(&tmp_path);
             CloudProviderError::ProviderUnavailable(format!(
                 "Failed to atomically persist {}: {}",
                 primary_path.display(),
@@ -252,7 +269,12 @@ impl PersistentCloudJobStore {
             (Ok(primary_job), Ok(tmp_job)) => {
                 if tmp_job.state_revision > primary_job.state_revision {
                     // Newer state was in temp before crash -> promote temp!
-                    let _ = atomic_replace(&tmp_path, &primary_path);
+                    atomic_replace(&tmp_path, &primary_path).map_err(|e| {
+                        CloudProviderError::ProviderUnavailable(format!(
+                            "Failed to promote recovered tmp file to primary: {}",
+                            e
+                        ))
+                    })?;
                     Ok(tmp_job)
                 } else {
                     // Primary is same or newer -> clean up stale temp
@@ -271,28 +293,38 @@ impl PersistentCloudJobStore {
 
             // Case 3: Primary missing, temp valid -> promote temp
             (Err(e), Ok(tmp_job)) if e.contains("Primary file missing") => {
-                let _ = atomic_replace(&tmp_path, &primary_path);
+                atomic_replace(&tmp_path, &primary_path).map_err(|e| {
+                    CloudProviderError::ProviderUnavailable(format!(
+                        "Failed to promote recovered tmp file to primary: {}",
+                        e
+                    ))
+                })?;
                 Ok(tmp_job)
             }
 
             // Case 4: Primary corrupt, temp valid -> backup corrupt primary and promote temp
             (Err(_), Ok(tmp_job)) => {
                 let corrupt_path = primary_path.with_extension("json.corrupt");
-                let _ = fs::rename(&primary_path, &corrupt_path);
-                let _ = atomic_replace(&tmp_path, &primary_path);
+                let _ = atomic_replace(&primary_path, &corrupt_path);
+                atomic_replace(&tmp_path, &primary_path).map_err(|e| {
+                    CloudProviderError::ProviderUnavailable(format!(
+                        "Failed to promote recovered tmp file over corrupt primary: {}",
+                        e
+                    ))
+                })?;
                 Ok(tmp_job)
             }
 
-            // Case 5: Both corrupt or missing -> error out explicitly
-            (Err(p_err), Err(t_err)) => Err(CloudProviderError::RequestInvalid(format!(
-                "Failed to load job {}: Primary error: {}; Temp error: {}",
-                internal_job_id, p_err, t_err
+            // Case 5: Both missing or corrupt -> recovery failure
+            (Err(e1), Err(e2)) => Err(CloudProviderError::ProviderUnavailable(format!(
+                "RECOVERY_FAILED: Primary corrupt/missing ({}) and temp corrupt/missing ({}) for job {}",
+                e1, e2, internal_job_id
             ))),
         }
     }
 
     // -------------------------------------------------------------------------
-    // List Jobs
+    // Querying & Listing
     // -------------------------------------------------------------------------
 
     pub fn list_jobs_in_project(
@@ -305,16 +337,27 @@ impl PersistentCloudJobStore {
         }
 
         let mut jobs = Vec::new();
-        if let Ok(entries) = fs::read_dir(&jobs_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
-                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                    if !stem.is_empty() {
-                        if let Ok(job) = self.load_job(project_id, stem) {
-                            jobs.push(job);
-                        }
-                    }
+        let entries = fs::read_dir(&jobs_dir).map_err(|e| {
+            CloudProviderError::ProviderUnavailable(format!(
+                "Failed to read cloud jobs directory {}: {}",
+                jobs_dir.display(),
+                e
+            ))
+        })?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                && !path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            {
+                let file_stem = path.file_stem().unwrap().to_string_lossy().to_string();
+                if let Ok(job) = self.load_job(project_id, &file_stem) {
+                    jobs.push(job);
                 }
             }
         }
