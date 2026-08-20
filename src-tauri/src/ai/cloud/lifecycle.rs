@@ -197,6 +197,12 @@ impl CloudJobLifecycleService {
         }
     }
 
+    fn remove_cancellation_sender(&self, internal_job_id: &str) {
+        if let Ok(mut senders) = self.cancellation_senders.write() {
+            senders.remove(internal_job_id);
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Input Hashing & Configuration Identity
     // -------------------------------------------------------------------------
@@ -245,7 +251,7 @@ impl CloudJobLifecycleService {
     }
 
     // -------------------------------------------------------------------------
-    // Submission Orchestration
+    // Submission Orchestration (with In-Flight Cancellation Race Handling)
     // -------------------------------------------------------------------------
 
     pub async fn start_cloud_generation(
@@ -268,7 +274,7 @@ impl CloudJobLifecycleService {
         let req_lock = self.get_request_lock(&project_id, &client_req_id);
         let _req_guard = req_lock.lock().await;
 
-        // 1. Check if client request already produced an existing persistent job
+        // 1. Check if client request already produced an existing persistent job (Fail-Closed on corrupt store)
         let mut job = match self
             .store
             .find_job_by_client_request_id(&project_id, &client_req_id)?
@@ -378,55 +384,80 @@ impl CloudJobLifecycleService {
             let lock = self.get_job_lock(&job.internal_job_id);
             let _guard = lock.lock().await;
 
-            job.state = CloudJobState::Submitted;
-            job.submission_state = SubmissionState::InFlight;
-            job.retry.submit_attempts = job.retry.submit_attempts.saturating_add(1);
-            job.timestamps.submitted_at = Some(Utc::now().to_rfc3339());
-            job.cost.estimate = Some(plan.routing_decision.estimated_cost);
-            job.cost.budget_limit = plan.budget_limit;
-            job.increment_revision();
+            let mut current = self.store.load_job(&job.project_id, &job.internal_job_id)?;
+            current.state = CloudJobState::Submitted;
+            current.submission_state = SubmissionState::InFlight;
+            current.retry.submit_attempts = current.retry.submit_attempts.saturating_add(1);
+            current.timestamps.submitted_at = Some(Utc::now().to_rfc3339());
+            current.cost.estimate = Some(plan.routing_decision.estimated_cost);
+            current.cost.budget_limit = plan.budget_limit;
+            current.increment_revision();
 
-            self.store.save_job_atomic(&job)?;
-            let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+            self.store.save_job_atomic(&current)?;
+            let _ = self
+                .event_sink
+                .emit_job_updated(&current.to_event_payload());
+            job = current;
         }
 
         // 8. Submit to provider (network call outside of lock)
-        match provider.submit_job(&request).await {
+        let submit_res = provider.submit_job(&request).await;
+
+        // 9. After network await: acquire lock and reload authoritative state from disk (Eliminate stale writes)
+        let lock = self.get_job_lock(&job.internal_job_id);
+        let _guard = lock.lock().await;
+
+        let mut authoritative = self.store.load_job(&job.project_id, &job.internal_job_id)?;
+
+        match submit_res {
             Ok(handle) => {
-                let lock = self.get_job_lock(&job.internal_job_id);
-                let _guard = lock.lock().await;
+                authoritative.remote_job_id = Some(handle.remote_id.clone());
+                authoritative.submission_state = SubmissionState::Acknowledged;
 
-                job.remote_job_id = Some(handle.remote_id);
-                job.submission_state = SubmissionState::Acknowledged;
-                job.state = CloudJobState::Processing;
-                job.remote_status = Some("processing".to_string());
-                job.increment_revision();
+                if authoritative.cancellation_requested {
+                    // In-flight cancellation occurred while submit_job was awaiting response:
+                    // Preserve remoteJobId, and reconcile remote cancellation immediately
+                    authoritative.increment_revision();
+                    self.store.save_job_atomic(&authoritative)?;
+                    let _ = self
+                        .event_sink
+                        .emit_job_updated(&authoritative.to_event_payload());
 
-                self.store.save_job_atomic(&job)?;
-                let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+                    drop(_guard);
+                    self.reconcile_cancellation(&mut authoritative).await?;
+                    return Ok(authoritative);
+                }
+
+                authoritative.state = CloudJobState::Processing;
+                authoritative.remote_status = Some("processing".to_string());
+                authoritative.increment_revision();
+
+                self.store.save_job_atomic(&authoritative)?;
+                let _ = self
+                    .event_sink
+                    .emit_job_updated(&authoritative.to_event_payload());
 
                 // Spawn non-blocking background polling task
-                self.spawn_polling_task(job.clone());
+                self.spawn_polling_task(authoritative.clone());
 
-                Ok(job)
+                Ok(authoritative)
             }
             Err(e) => {
-                let lock = self.get_job_lock(&job.internal_job_id);
-                let _guard = lock.lock().await;
-
-                job.submission_state = SubmissionState::Ambiguous;
-                job.state = CloudJobState::Blocked;
-                job.error = Some(JobErrorRecord {
+                authoritative.submission_state = SubmissionState::Ambiguous;
+                authoritative.state = CloudJobState::Blocked;
+                authoritative.error = Some(JobErrorRecord {
                     code: "AMBIGUOUS_SUBMISSION".to_string(),
                     sanitized_message: format!(
                         "Submission failed without acknowledged remote ID: {}. Auto-resubmission is blocked to prevent double charges.",
                         e
                     ),
                 });
-                job.increment_revision();
+                authoritative.increment_revision();
 
-                self.store.save_job_atomic(&job)?;
-                let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+                self.store.save_job_atomic(&authoritative)?;
+                let _ = self
+                    .event_sink
+                    .emit_job_updated(&authoritative.to_event_payload());
 
                 Err(e)
             }
@@ -458,7 +489,7 @@ impl CloudJobLifecycleService {
     }
 
     // -------------------------------------------------------------------------
-    // Cancellation Orchestration & Reconciliation
+    // Cancellation Orchestration & Reconciliation (Single Remote Cancel Owner)
     // -------------------------------------------------------------------------
 
     pub async fn cancel_cloud_generation(
@@ -466,28 +497,35 @@ impl CloudJobLifecycleService {
         project_id: &str,
         job_id_or_internal: &str,
     ) -> Result<PersistentCloudJob, CloudProviderError> {
-        let mut job = self.get_job_status(project_id, job_id_or_internal)?;
+        let initial = self.get_job_status(project_id, job_id_or_internal)?;
 
         // 1. Short lock to persist cancellation intent and signal background task
-        {
-            let lock = self.get_job_lock(&job.internal_job_id);
+        let mut job = {
+            let lock = self.get_job_lock(&initial.internal_job_id);
             let _guard = lock.lock().await;
 
-            if job.state.is_terminal() {
-                return Ok(job);
+            let mut current = self
+                .store
+                .load_job(&initial.project_id, &initial.internal_job_id)?;
+            if current.state.is_terminal() {
+                return Ok(current);
             }
 
-            job.cancellation_requested = true;
-            job.increment_revision();
-            self.store.save_job_atomic(&job)?;
-            let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
-        }
+            current.cancellation_requested = true;
+            current.increment_revision();
+            self.store.save_job_atomic(&current)?;
+            let _ = self
+                .event_sink
+                .emit_job_updated(&current.to_event_payload());
+            current
+        };
 
-        // 2. Immediately signal polling task to break out of sleep/polling
+        // 2. Immediately signal background task to abort local operations
         self.signal_cancellation(&job.internal_job_id);
 
-        // 3. Reconcile with remote provider without holding long lock
+        // 3. Reconcile with remote provider (Single owner of provider.cancel_job)
         self.reconcile_cancellation(&mut job).await?;
+        self.remove_cancellation_sender(&job.internal_job_id);
         Ok(job)
     }
 
@@ -502,27 +540,37 @@ impl CloudJobLifecycleService {
                         let lock = self.get_job_lock(&job.internal_job_id);
                         let _guard = lock.lock().await;
 
-                        job.state = CloudJobState::Cancelled;
-                        job.increment_revision();
-                        self.store.save_job_atomic(job)?;
-                        let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+                        let mut current =
+                            self.store.load_job(&job.project_id, &job.internal_job_id)?;
+                        current.state = CloudJobState::Cancelled;
+                        current.increment_revision();
+                        self.store.save_job_atomic(&current)?;
+                        let _ = self
+                            .event_sink
+                            .emit_job_updated(&current.to_event_payload());
+                        *job = current;
                         Ok(())
                     }
                     Err(e) => {
                         let lock = self.get_job_lock(&job.internal_job_id);
                         let _guard = lock.lock().await;
 
-                        job.state = CloudJobState::Blocked;
-                        job.error = Some(JobErrorRecord {
+                        let mut current =
+                            self.store.load_job(&job.project_id, &job.internal_job_id)?;
+                        current.state = CloudJobState::Blocked;
+                        current.error = Some(JobErrorRecord {
                             code: "CANCELLATION_FAILED_REMOTE".to_string(),
                             sanitized_message: format!(
                                 "Remote cancellation failed: {}. Cancellation intent is persisted.",
                                 e
                             ),
                         });
-                        job.increment_revision();
-                        self.store.save_job_atomic(job)?;
-                        let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+                        current.increment_revision();
+                        self.store.save_job_atomic(&current)?;
+                        let _ = self
+                            .event_sink
+                            .emit_job_updated(&current.to_event_payload());
+                        *job = current;
                         Err(e)
                     }
                 },
@@ -530,17 +578,21 @@ impl CloudJobLifecycleService {
                     let lock = self.get_job_lock(&job.internal_job_id);
                     let _guard = lock.lock().await;
 
-                    job.state = CloudJobState::Blocked;
-                    job.error = Some(JobErrorRecord {
+                    let mut current = self.store.load_job(&job.project_id, &job.internal_job_id)?;
+                    current.state = CloudJobState::Blocked;
+                    current.error = Some(JobErrorRecord {
                         code: "MISSING_PROVIDER_CREDENTIALS".to_string(),
                         sanitized_message: format!(
                             "Cannot cancel remote job: provider credentials unavailable: {}. Cancellation intent is preserved.",
                             e
                         ),
                     });
-                    job.increment_revision();
-                    self.store.save_job_atomic(job)?;
-                    let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+                    current.increment_revision();
+                    self.store.save_job_atomic(&current)?;
+                    let _ = self
+                        .event_sink
+                        .emit_job_updated(&current.to_event_payload());
+                    *job = current;
                     Ok(())
                 }
             }
@@ -548,10 +600,14 @@ impl CloudJobLifecycleService {
             let lock = self.get_job_lock(&job.internal_job_id);
             let _guard = lock.lock().await;
 
-            job.state = CloudJobState::Cancelled;
-            job.increment_revision();
-            self.store.save_job_atomic(job)?;
-            let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+            let mut current = self.store.load_job(&job.project_id, &job.internal_job_id)?;
+            current.state = CloudJobState::Cancelled;
+            current.increment_revision();
+            self.store.save_job_atomic(&current)?;
+            let _ = self
+                .event_sink
+                .emit_job_updated(&current.to_event_payload());
+            *job = current;
             Ok(())
         }
     }
@@ -586,13 +642,17 @@ impl CloudJobLifecycleService {
             let lock = self.get_job_lock(&job.internal_job_id);
             let _guard = lock.lock().await;
 
-            job.state = CloudJobState::Processing;
-            job.error = None;
-            job.increment_revision();
-            self.store.save_job_atomic(&job)?;
-            let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+            let mut current = self.store.load_job(&job.project_id, &job.internal_job_id)?;
+            current.state = CloudJobState::Processing;
+            current.error = None;
+            current.increment_revision();
+            self.store.save_job_atomic(&current)?;
+            let _ = self
+                .event_sink
+                .emit_job_updated(&current.to_event_payload());
+            job = current.clone();
 
-            self.spawn_polling_task(job.clone());
+            self.spawn_polling_task(current);
             Ok(job)
         } else {
             Err(CloudProviderError::RequestInvalid(format!(
@@ -630,12 +690,15 @@ impl CloudJobLifecycleService {
                     let lock = self.get_job_lock(&job.internal_job_id);
                     let _guard = lock.lock().await;
 
-                    job.state = CloudJobState::Created;
-                    job.increment_revision();
-                    if self.store.save_job_atomic(&job).is_ok() {
-                        let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+                    let mut current = self.store.load_job(&job.project_id, &job.internal_job_id)?;
+                    current.state = CloudJobState::Created;
+                    current.increment_revision();
+                    if self.store.save_job_atomic(&current).is_ok() {
+                        let _ = self
+                            .event_sink
+                            .emit_job_updated(&current.to_event_payload());
                     }
-                    recovered.push(job);
+                    recovered.push(current);
                 }
                 CloudJobState::Submitted | CloudJobState::Processing => {
                     if job.remote_job_id.is_some() {
@@ -648,39 +711,70 @@ impl CloudJobLifecycleService {
                                 let lock = self.get_job_lock(&job.internal_job_id);
                                 let _guard = lock.lock().await;
 
-                                job.state = CloudJobState::Blocked;
-                                job.error = Some(JobErrorRecord {
+                                let mut current =
+                                    self.store.load_job(&job.project_id, &job.internal_job_id)?;
+                                current.state = CloudJobState::Blocked;
+                                current.error = Some(JobErrorRecord {
                                     code: "MISSING_PROVIDER_CREDENTIALS".to_string(),
                                     sanitized_message: format!("{}", e),
                                 });
-                                job.increment_revision();
-                                if self.store.save_job_atomic(&job).is_ok() {
-                                    let _ =
-                                        self.event_sink.emit_job_updated(&job.to_event_payload());
+                                current.increment_revision();
+                                if self.store.save_job_atomic(&current).is_ok() {
+                                    let _ = self
+                                        .event_sink
+                                        .emit_job_updated(&current.to_event_payload());
                                 }
-                                recovered.push(job);
+                                recovered.push(current);
                             }
                         }
                     } else {
                         let lock = self.get_job_lock(&job.internal_job_id);
                         let _guard = lock.lock().await;
 
-                        job.state = CloudJobState::Blocked;
-                        job.submission_state = SubmissionState::Ambiguous;
-                        job.error = Some(JobErrorRecord {
+                        let mut current =
+                            self.store.load_job(&job.project_id, &job.internal_job_id)?;
+                        current.state = CloudJobState::Blocked;
+                        current.submission_state = SubmissionState::Ambiguous;
+                        current.error = Some(JobErrorRecord {
                             code: "AMBIGUOUS_SUBMISSION".to_string(),
                             sanitized_message: "Process crashed during submission without acknowledged remote ID. Auto-resubmission is disabled.".to_string(),
                         });
-                        job.increment_revision();
-                        if self.store.save_job_atomic(&job).is_ok() {
-                            let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+                        current.increment_revision();
+                        if self.store.save_job_atomic(&current).is_ok() {
+                            let _ = self
+                                .event_sink
+                                .emit_job_updated(&current.to_event_payload());
                         }
-                        recovered.push(job);
+                        recovered.push(current);
                     }
                 }
                 CloudJobState::Downloading => {
-                    self.spawn_polling_task(job.clone());
-                    recovered.push(job);
+                    if job.retry.download_attempts >= self.timing_config.max_download_attempts {
+                        let lock = self.get_job_lock(&job.internal_job_id);
+                        let _guard = lock.lock().await;
+
+                        let mut current =
+                            self.store.load_job(&job.project_id, &job.internal_job_id)?;
+                        current.state = CloudJobState::Failed;
+                        current.error = Some(JobErrorRecord {
+                            code: "DOWNLOAD_FAILED".to_string(),
+                            sanitized_message: format!(
+                                "Download attempts ({}) reached maximum allowed limit ({})",
+                                current.retry.download_attempts,
+                                self.timing_config.max_download_attempts
+                            ),
+                        });
+                        current.increment_revision();
+                        if self.store.save_job_atomic(&current).is_ok() {
+                            let _ = self
+                                .event_sink
+                                .emit_job_updated(&current.to_event_payload());
+                        }
+                        recovered.push(current);
+                    } else {
+                        self.spawn_polling_task(job.clone());
+                        recovered.push(job);
+                    }
                 }
                 CloudJobState::ValidatingOutput => {
                     // ValidatingOutput recovery does NOT require provider credentials
@@ -696,21 +790,23 @@ impl CloudJobLifecycleService {
                             let lock = self.get_job_lock(&job.internal_job_id);
                             let _guard = lock.lock().await;
 
+                            let mut current =
+                                self.store.load_job(&job.project_id, &job.internal_job_id)?;
                             let validator = CloudOutputValidator::new();
                             match validator.validate_and_promote_artifact(
                                 &partial,
                                 &final_p,
-                                job.validation_policy.expected_duration_sec,
-                                job.validation_policy.require_audio,
+                                current.validation_policy.expected_duration_sec,
+                                current.validation_policy.require_audio,
                             ) {
                                 Ok(record) => {
-                                    job.state = CloudJobState::Completed;
-                                    job.output = record;
-                                    job.timestamps.completed_at = Some(Utc::now().to_rfc3339());
+                                    current.state = CloudJobState::Completed;
+                                    current.output = record;
+                                    current.timestamps.completed_at = Some(Utc::now().to_rfc3339());
                                 }
                                 Err(e) => {
-                                    job.state = CloudJobState::Failed;
-                                    job.error = Some(JobErrorRecord {
+                                    current.state = CloudJobState::Failed;
+                                    current.error = Some(JobErrorRecord {
                                         code: "VALIDATION_FAILED".to_string(),
                                         sanitized_message: format!(
                                             "Media validation failed on recovery: {}",
@@ -719,11 +815,13 @@ impl CloudJobLifecycleService {
                                     });
                                 }
                             }
-                            job.increment_revision();
-                            if self.store.save_job_atomic(&job).is_ok() {
-                                let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+                            current.increment_revision();
+                            if self.store.save_job_atomic(&current).is_ok() {
+                                let _ = self
+                                    .event_sink
+                                    .emit_job_updated(&current.to_event_payload());
                             }
-                            recovered.push(job);
+                            recovered.push(current);
                             continue;
                         }
                     }
@@ -741,170 +839,198 @@ impl CloudJobLifecycleService {
     }
 
     // -------------------------------------------------------------------------
-    // Background Non-Blocking Polling & Download Loop
+    // Background Non-Blocking Polling & Download Worker
     // -------------------------------------------------------------------------
 
-    fn spawn_polling_task(&self, mut job: PersistentCloudJob) {
+    fn spawn_polling_task(&self, initial_job: PersistentCloudJob) {
         let store = self.store.clone();
         let provider_resolver = self.provider_resolver.clone();
         let event_sink = self.event_sink.clone();
         let timing = self.timing_config;
         let job_locks = self.job_locks.clone();
+        let cancellation_senders = self.cancellation_senders.clone();
 
-        let (cancel_tx, mut cancel_rx) = watch::channel(job.cancellation_requested);
+        let (cancel_tx, mut cancel_rx) = watch::channel(initial_job.cancellation_requested);
         {
             let mut senders = self.cancellation_senders.write().unwrap();
-            senders.insert(job.internal_job_id.clone(), cancel_tx);
+            senders.insert(initial_job.internal_job_id.clone(), cancel_tx);
         }
 
+        let project_id = initial_job.project_id.clone();
+        let internal_job_id = initial_job.internal_job_id.clone();
+        let provider_id = initial_job.provider_id.clone();
+
         tokio::spawn(async move {
-            let provider = match provider_resolver.resolve_provider(&job.provider_id) {
+            let get_lock = || {
+                let mut locks = job_locks.write().unwrap();
+                locks
+                    .entry(internal_job_id.clone())
+                    .or_insert_with(|| Arc::new(TokioMutex::new(())))
+                    .clone()
+            };
+
+            let cleanup_sender = || {
+                if let Ok(mut senders) = cancellation_senders.write() {
+                    senders.remove(&internal_job_id);
+                }
+            };
+
+            let provider = match provider_resolver.resolve_provider(&provider_id) {
                 Ok(p) => p,
                 Err(e) => {
-                    let lock = {
-                        let mut locks = job_locks.write().unwrap();
-                        locks
-                            .entry(job.internal_job_id.clone())
-                            .or_insert_with(|| Arc::new(TokioMutex::new(())))
-                            .clone()
-                    };
+                    let lock = get_lock();
                     let _guard = lock.lock().await;
 
-                    job.state = CloudJobState::Blocked;
-                    job.error = Some(JobErrorRecord {
-                        code: "MISSING_PROVIDER_CREDENTIALS".to_string(),
-                        sanitized_message: format!("{}", e),
-                    });
-                    job.increment_revision();
-                    if store.save_job_atomic(&job).is_ok() {
-                        let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                    if let Ok(mut current) = store.load_job(&project_id, &internal_job_id) {
+                        if !current.state.is_terminal() {
+                            current.state = CloudJobState::Blocked;
+                            current.error = Some(JobErrorRecord {
+                                code: "MISSING_PROVIDER_CREDENTIALS".to_string(),
+                                sanitized_message: format!("{}", e),
+                            });
+                            current.increment_revision();
+                            if store.save_job_atomic(&current).is_ok() {
+                                let _ = event_sink.emit_job_updated(&current.to_event_payload());
+                            }
+                        }
                     }
+                    cleanup_sender();
                     return;
                 }
             };
 
-            let remote_id = match &job.remote_job_id {
+            let remote_id = match &initial_job.remote_job_id {
                 Some(r) => r.clone(),
-                None => return,
+                None => {
+                    cleanup_sender();
+                    return;
+                }
             };
 
             let start_time = std::time::Instant::now();
             let mut consecutive_errors = 0;
 
-            // 1. Polling Phase without holding persistent lock
-            while job.state == CloudJobState::Processing || job.state == CloudJobState::Submitted {
-                // Check cancellation channel
-                if *cancel_rx.borrow() || job.cancellation_requested {
-                    let lock = {
-                        let mut locks = job_locks.write().unwrap();
-                        locks
-                            .entry(job.internal_job_id.clone())
-                            .or_insert_with(|| Arc::new(TokioMutex::new(())))
-                            .clone()
-                    };
-                    let _guard = lock.lock().await;
-
-                    match provider.cancel_job(&remote_id).await {
-                        Ok(()) => {
-                            job.state = CloudJobState::Cancelled;
-                        }
-                        Err(e) => {
-                            job.state = CloudJobState::Blocked;
-                            job.error = Some(JobErrorRecord {
-                                code: "CANCELLATION_FAILED_REMOTE".to_string(),
-                                sanitized_message: format!(
-                                    "Remote cancellation failed: {}. Cancellation intent is persisted.",
-                                    e
-                                ),
-                            });
-                        }
-                    }
-                    job.increment_revision();
-                    if store.save_job_atomic(&job).is_ok() {
-                        let _ = event_sink.emit_job_updated(&job.to_event_payload());
-                    }
+            // 1. Polling Phase: Never mutate stale snapshots across network await
+            loop {
+                // Check cancellation channel and disk state
+                if *cancel_rx.borrow() {
+                    cleanup_sender();
                     return;
                 }
 
+                // Check authoritative disk state
+                {
+                    let lock = get_lock();
+                    let _guard = lock.lock().await;
+                    if let Ok(current) = store.load_job(&project_id, &internal_job_id) {
+                        if current.cancellation_requested || current.state.is_terminal() {
+                            cleanup_sender();
+                            return;
+                        }
+                        if current.state != CloudJobState::Processing
+                            && current.state != CloudJobState::Submitted
+                        {
+                            break;
+                        }
+                    } else {
+                        cleanup_sender();
+                        return;
+                    }
+                }
+
                 if start_time.elapsed() >= Duration::from_secs(timing.max_poll_duration_sec) {
-                    let lock = {
-                        let mut locks = job_locks.write().unwrap();
-                        locks
-                            .entry(job.internal_job_id.clone())
-                            .or_insert_with(|| Arc::new(TokioMutex::new(())))
-                            .clone()
-                    };
+                    let lock = get_lock();
                     let _guard = lock.lock().await;
 
-                    job.state = CloudJobState::Failed;
-                    job.error = Some(JobErrorRecord {
-                        code: "PROVIDER_TIMEOUT".to_string(),
-                        sanitized_message: format!(
-                            "Polling exceeded maximum duration limit of {}s",
-                            timing.max_poll_duration_sec
-                        ),
-                    });
-                    job.increment_revision();
-                    if store.save_job_atomic(&job).is_ok() {
-                        let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                    if let Ok(mut current) = store.load_job(&project_id, &internal_job_id) {
+                        if !current.cancellation_requested && !current.state.is_terminal() {
+                            current.state = CloudJobState::Failed;
+                            current.error = Some(JobErrorRecord {
+                                code: "PROVIDER_TIMEOUT".to_string(),
+                                sanitized_message: format!(
+                                    "Polling exceeded maximum duration limit of {}s",
+                                    timing.max_poll_duration_sec
+                                ),
+                            });
+                            current.increment_revision();
+                            if store.save_job_atomic(&current).is_ok() {
+                                let _ = event_sink.emit_job_updated(&current.to_event_payload());
+                            }
+                        }
                     }
+                    cleanup_sender();
                     return;
                 }
 
                 // Poll network endpoint outside lock
-                match provider.poll_status(&remote_id).await {
+                let poll_outcome = provider.poll_status(&remote_id).await;
+
+                // Reload authoritative job from disk to apply poll result
+                let lock = get_lock();
+                let _guard = lock.lock().await;
+
+                let mut current = match store.load_job(&project_id, &internal_job_id) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        cleanup_sender();
+                        return;
+                    }
+                };
+
+                if current.cancellation_requested || current.state.is_terminal() {
+                    cleanup_sender();
+                    return;
+                }
+
+                match poll_outcome {
                     Ok(resp) => {
                         consecutive_errors = 0;
-
-                        let lock = {
-                            let mut locks = job_locks.write().unwrap();
-                            locks
-                                .entry(job.internal_job_id.clone())
-                                .or_insert_with(|| Arc::new(TokioMutex::new(())))
-                                .clone()
-                        };
-                        let _guard = lock.lock().await;
-
-                        job.retry.poll_attempts = job.retry.poll_attempts.saturating_add(1);
-                        job.remote_status = Some(format!("{:?}", resp.status).to_lowercase());
+                        current.retry.poll_attempts = current.retry.poll_attempts.saturating_add(1);
+                        current.remote_status = Some(format!("{:?}", resp.status).to_lowercase());
 
                         match resp.status {
                             RemoteStatus::Starting | RemoteStatus::Processing => {
-                                job.state = CloudJobState::Processing;
-                                job.increment_revision();
-                                if store.save_job_atomic(&job).is_ok() {
-                                    let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                                current.state = CloudJobState::Processing;
+                                current.increment_revision();
+                                if store.save_job_atomic(&current).is_ok() {
+                                    let _ =
+                                        event_sink.emit_job_updated(&current.to_event_payload());
                                 }
                             }
                             RemoteStatus::Succeeded => {
-                                job.state = CloudJobState::Downloading;
-                                job.output_url = resp.output_url.clone();
-                                job.increment_revision();
-                                if store.save_job_atomic(&job).is_ok() {
-                                    let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                                current.state = CloudJobState::Downloading;
+                                current.output_url = resp.output_url.clone();
+                                current.increment_revision();
+                                if store.save_job_atomic(&current).is_ok() {
+                                    let _ =
+                                        event_sink.emit_job_updated(&current.to_event_payload());
                                 }
-                                break;
+                                break; // Transition to Download phase
                             }
                             RemoteStatus::Failed => {
-                                job.state = CloudJobState::Failed;
-                                job.error = Some(JobErrorRecord {
+                                current.state = CloudJobState::Failed;
+                                current.error = Some(JobErrorRecord {
                                     code: "PROVIDER_EXECUTION_FAILED".to_string(),
                                     sanitized_message: resp.error.unwrap_or_else(|| {
                                         "Remote execution failed without error detail".to_string()
                                     }),
                                 });
-                                job.increment_revision();
-                                if store.save_job_atomic(&job).is_ok() {
-                                    let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                                current.increment_revision();
+                                if store.save_job_atomic(&current).is_ok() {
+                                    let _ =
+                                        event_sink.emit_job_updated(&current.to_event_payload());
                                 }
+                                cleanup_sender();
                                 return;
                             }
                             RemoteStatus::Canceled => {
-                                job.state = CloudJobState::Cancelled;
-                                job.increment_revision();
-                                if store.save_job_atomic(&job).is_ok() {
-                                    let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                                current.state = CloudJobState::Cancelled;
+                                current.increment_revision();
+                                if store.save_job_atomic(&current).is_ok() {
+                                    let _ =
+                                        event_sink.emit_job_updated(&current.to_event_payload());
                                 }
+                                cleanup_sender();
                                 return;
                             }
                         }
@@ -912,238 +1038,247 @@ impl CloudJobLifecycleService {
                     Err(e) => {
                         consecutive_errors += 1;
                         if consecutive_errors >= timing.max_consecutive_poll_errors {
-                            let lock = {
-                                let mut locks = job_locks.write().unwrap();
-                                locks
-                                    .entry(job.internal_job_id.clone())
-                                    .or_insert_with(|| Arc::new(TokioMutex::new(())))
-                                    .clone()
-                            };
-                            let _guard = lock.lock().await;
-
-                            job.state = CloudJobState::Failed;
-                            job.error = Some(JobErrorRecord {
+                            current.state = CloudJobState::Failed;
+                            current.error = Some(JobErrorRecord {
                                 code: "POLL_CONSECUTIVE_ERRORS".to_string(),
                                 sanitized_message: format!(
                                     "Failed after {} consecutive polling network errors: {}",
                                     consecutive_errors, e
                                 ),
                             });
-                            job.increment_revision();
-                            if store.save_job_atomic(&job).is_ok() {
-                                let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                            current.increment_revision();
+                            if store.save_job_atomic(&current).is_ok() {
+                                let _ = event_sink.emit_job_updated(&current.to_event_payload());
                             }
+                            cleanup_sender();
                             return;
                         }
                     }
                 }
+                drop(_guard);
 
                 // Sleep with immediate cancellation wakeup
                 tokio::select! {
                     _ = cancel_rx.changed() => {
-                        if *cancel_rx.borrow() {
-                            job.cancellation_requested = true;
-                        }
+                        cleanup_sender();
+                        return;
                     }
                     _ = tokio::time::sleep(Duration::from_millis(timing.poll_interval_ms)) => {}
                 }
             }
 
-            // 2. Download Phase outside persistent lock
-            if job.state == CloudJobState::Downloading {
-                let output_url = match &job.output_url {
-                    Some(u) => u.clone(),
-                    None => {
-                        let lock = {
-                            let mut locks = job_locks.write().unwrap();
-                            locks
-                                .entry(job.internal_job_id.clone())
-                                .or_insert_with(|| Arc::new(TokioMutex::new(())))
-                                .clone()
-                        };
-                        let _guard = lock.lock().await;
+            // 2. Download Phase
+            let (output_url, partial_path, starting_attempt) = {
+                let lock = get_lock();
+                let _guard = lock.lock().await;
 
-                        job.state = CloudJobState::Failed;
-                        job.error = Some(JobErrorRecord {
-                            code: "MISSING_OUTPUT_URL".to_string(),
-                            sanitized_message:
-                                "Provider reported success but output URL was missing".to_string(),
-                        });
-                        job.increment_revision();
-                        if store.save_job_atomic(&job).is_ok() {
-                            let _ = event_sink.emit_job_updated(&job.to_event_payload());
-                        }
+                let current = match store.load_job(&project_id, &internal_job_id) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        cleanup_sender();
                         return;
                     }
                 };
 
-                let partial_path =
-                    match store.artifact_partial_path(&job.project_id, &job.internal_job_id) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            let lock = {
-                                let mut locks = job_locks.write().unwrap();
-                                locks
-                                    .entry(job.internal_job_id.clone())
-                                    .or_insert_with(|| Arc::new(TokioMutex::new(())))
-                                    .clone()
-                            };
-                            let _guard = lock.lock().await;
-
-                            job.state = CloudJobState::Failed;
-                            job.error = Some(JobErrorRecord {
-                                code: "PATH_ERROR".to_string(),
-                                sanitized_message: format!("{}", e),
-                            });
-                            job.increment_revision();
-                            if store.save_job_atomic(&job).is_ok() {
-                                let _ = event_sink.emit_job_updated(&job.to_event_payload());
-                            }
-                            return;
-                        }
-                    };
-
-                let mut download_success = false;
-                for attempt in 1..=timing.max_download_attempts {
-                    job.retry.download_attempts = attempt;
-                    match provider.download_result(&output_url, &partial_path).await {
-                        Ok(_) => {
-                            download_success = true;
-                            break;
-                        }
-                        Err(_e) => {
-                            let _ = std::fs::remove_file(&partial_path);
-                            tokio::time::sleep(Duration::from_millis(50 * (attempt as u64))).await;
-                        }
-                    }
-                }
-
-                let lock = {
-                    let mut locks = job_locks.write().unwrap();
-                    locks
-                        .entry(job.internal_job_id.clone())
-                        .or_insert_with(|| Arc::new(TokioMutex::new(())))
-                        .clone()
-                };
-                let _guard = lock.lock().await;
-
-                if !download_success {
-                    job.state = CloudJobState::Failed;
-                    job.error = Some(JobErrorRecord {
-                        code: "DOWNLOAD_FAILED".to_string(),
-                        sanitized_message: format!(
-                            "Failed to download output artifact after {} attempts",
-                            job.retry.download_attempts
-                        ),
-                    });
-                    job.increment_revision();
-                    if store.save_job_atomic(&job).is_ok() {
-                        let _ = event_sink.emit_job_updated(&job.to_event_payload());
-                    }
+                if current.cancellation_requested || current.state.is_terminal() {
+                    cleanup_sender();
                     return;
                 }
 
-                job.state = CloudJobState::ValidatingOutput;
-                job.increment_revision();
-                if store.save_job_atomic(&job).is_ok() {
-                    let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                let url = match current.output_url {
+                    Some(ref u) => u.clone(),
+                    None => {
+                        cleanup_sender();
+                        return;
+                    }
+                };
+
+                let partial = match store.artifact_partial_path(&project_id, &internal_job_id) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        cleanup_sender();
+                        return;
+                    }
+                };
+
+                (url, partial, current.retry.download_attempts)
+            };
+
+            let mut download_success = false;
+            for attempt in (starting_attempt + 1)..=timing.max_download_attempts {
+                // Check cancellation before each attempt
+                if *cancel_rx.borrow() {
+                    let _ = std::fs::remove_file(&partial_path);
+                    cleanup_sender();
+                    return;
+                }
+
+                {
+                    let lock = get_lock();
+                    let _guard = lock.lock().await;
+                    if let Ok(mut current) = store.load_job(&project_id, &internal_job_id) {
+                        if current.cancellation_requested || current.state.is_terminal() {
+                            let _ = std::fs::remove_file(&partial_path);
+                            cleanup_sender();
+                            return;
+                        }
+                        current.retry.download_attempts = attempt;
+                        current.increment_revision();
+                        let _ = store.save_job_atomic(&current);
+                    }
+                }
+
+                match provider.download_result(&output_url, &partial_path).await {
+                    Ok(_) => {
+                        // Check cancellation immediately after download await
+                        if *cancel_rx.borrow() {
+                            let _ = std::fs::remove_file(&partial_path);
+                            cleanup_sender();
+                            return;
+                        }
+                        download_success = true;
+                        break;
+                    }
+                    Err(_e) => {
+                        let _ = std::fs::remove_file(&partial_path);
+                        tokio::time::sleep(Duration::from_millis(50 * (attempt as u64))).await;
+                    }
+                }
+            }
+
+            // Persist download phase outcome
+            {
+                let lock = get_lock();
+                let _guard = lock.lock().await;
+
+                let mut current = match store.load_job(&project_id, &internal_job_id) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        let _ = std::fs::remove_file(&partial_path);
+                        cleanup_sender();
+                        return;
+                    }
+                };
+
+                if current.cancellation_requested || current.state.is_terminal() {
+                    let _ = std::fs::remove_file(&partial_path);
+                    cleanup_sender();
+                    return;
+                }
+
+                if !download_success {
+                    let _ = std::fs::remove_file(&partial_path);
+                    current.state = CloudJobState::Failed;
+                    current.error = Some(JobErrorRecord {
+                        code: "DOWNLOAD_FAILED".to_string(),
+                        sanitized_message: format!(
+                            "Failed to download output artifact after {} attempts",
+                            current.retry.download_attempts
+                        ),
+                    });
+                    current.increment_revision();
+                    if store.save_job_atomic(&current).is_ok() {
+                        let _ = event_sink.emit_job_updated(&current.to_event_payload());
+                    }
+                    cleanup_sender();
+                    return;
+                }
+
+                current.state = CloudJobState::ValidatingOutput;
+                current.increment_revision();
+                if store.save_job_atomic(&current).is_ok() {
+                    let _ = event_sink.emit_job_updated(&current.to_event_payload());
                 }
             }
 
             // 3. Validation & Promotion Phase
-            if job.state == CloudJobState::ValidatingOutput {
-                let partial_path =
-                    match store.artifact_partial_path(&job.project_id, &job.internal_job_id) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            let lock = {
-                                let mut locks = job_locks.write().unwrap();
-                                locks
-                                    .entry(job.internal_job_id.clone())
-                                    .or_insert_with(|| Arc::new(TokioMutex::new(())))
-                                    .clone()
-                            };
-                            let _guard = lock.lock().await;
+            let final_path = match store.artifact_final_path(&project_id, &internal_job_id) {
+                Ok(p) => p,
+                Err(_) => {
+                    let _ = std::fs::remove_file(&partial_path);
+                    cleanup_sender();
+                    return;
+                }
+            };
 
-                            job.state = CloudJobState::Failed;
-                            job.error = Some(JobErrorRecord {
-                                code: "PATH_ERROR".to_string(),
-                                sanitized_message: format!("{}", e),
-                            });
-                            job.increment_revision();
-                            if store.save_job_atomic(&job).is_ok() {
-                                let _ = event_sink.emit_job_updated(&job.to_event_payload());
-                            }
-                            return;
-                        }
-                    };
+            // Inspect cancellation before validation
+            if *cancel_rx.borrow() {
+                let _ = std::fs::remove_file(&partial_path);
+                cleanup_sender();
+                return;
+            }
 
-                let final_path =
-                    match store.artifact_final_path(&job.project_id, &job.internal_job_id) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            let lock = {
-                                let mut locks = job_locks.write().unwrap();
-                                locks
-                                    .entry(job.internal_job_id.clone())
-                                    .or_insert_with(|| Arc::new(TokioMutex::new(())))
-                                    .clone()
-                            };
-                            let _guard = lock.lock().await;
-
-                            job.state = CloudJobState::Failed;
-                            job.error = Some(JobErrorRecord {
-                                code: "PATH_ERROR".to_string(),
-                                sanitized_message: format!("{}", e),
-                            });
-                            job.increment_revision();
-                            if store.save_job_atomic(&job).is_ok() {
-                                let _ = event_sink.emit_job_updated(&job.to_event_payload());
-                            }
-                            return;
-                        }
-                    };
-
-                let validator = CloudOutputValidator::new();
-                let validation_result = validator.validate_and_promote_artifact(
-                    &partial_path,
-                    &final_path,
-                    job.validation_policy.expected_duration_sec,
-                    job.validation_policy.require_audio,
-                );
-
-                let lock = {
-                    let mut locks = job_locks.write().unwrap();
-                    locks
-                        .entry(job.internal_job_id.clone())
-                        .or_insert_with(|| Arc::new(TokioMutex::new(())))
-                        .clone()
-                };
+            let policy = {
+                let lock = get_lock();
                 let _guard = lock.lock().await;
-
-                match validation_result {
-                    Ok(artifact_record) => {
-                        job.state = CloudJobState::Completed;
-                        job.output = artifact_record;
-                        job.timestamps.completed_at = Some(Utc::now().to_rfc3339());
-                        job.increment_revision();
-                        if store.save_job_atomic(&job).is_ok() {
-                            let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                match store.load_job(&project_id, &internal_job_id) {
+                    Ok(c) => {
+                        if c.cancellation_requested || c.state.is_terminal() {
+                            let _ = std::fs::remove_file(&partial_path);
+                            cleanup_sender();
+                            return;
                         }
+                        c.validation_policy
                     }
-                    Err(e) => {
-                        job.state = CloudJobState::Failed;
-                        job.error = Some(JobErrorRecord {
-                            code: "VALIDATION_FAILED".to_string(),
-                            sanitized_message: format!("Media validation failed: {}", e),
-                        });
-                        job.increment_revision();
-                        if store.save_job_atomic(&job).is_ok() {
-                            let _ = event_sink.emit_job_updated(&job.to_event_payload());
-                        }
+                    Err(_) => {
+                        let _ = std::fs::remove_file(&partial_path);
+                        cleanup_sender();
+                        return;
+                    }
+                }
+            };
+
+            let validator = CloudOutputValidator::new();
+            let validation_result = validator.validate_and_promote_artifact(
+                &partial_path,
+                &final_path,
+                policy.expected_duration_sec,
+                policy.require_audio,
+            );
+
+            // Reload authoritative disk state immediately before completing
+            let lock = get_lock();
+            let _guard = lock.lock().await;
+
+            let mut current = match store.load_job(&project_id, &internal_job_id) {
+                Ok(c) => c,
+                Err(_) => {
+                    cleanup_sender();
+                    return;
+                }
+            };
+
+            if current.cancellation_requested || current.state.is_terminal() {
+                // If cancellation occurred, do NOT mark Completed or overwrite cancelled state!
+                let _ = std::fs::remove_file(&final_path);
+                cleanup_sender();
+                return;
+            }
+
+            match validation_result {
+                Ok(artifact_record) => {
+                    current.state = CloudJobState::Completed;
+                    current.output = artifact_record;
+                    current.timestamps.completed_at = Some(Utc::now().to_rfc3339());
+                    current.increment_revision();
+                    if store.save_job_atomic(&current).is_ok() {
+                        let _ = event_sink.emit_job_updated(&current.to_event_payload());
+                    }
+                }
+                Err(e) => {
+                    current.state = CloudJobState::Failed;
+                    current.error = Some(JobErrorRecord {
+                        code: "VALIDATION_FAILED".to_string(),
+                        sanitized_message: format!("Media validation failed: {}", e),
+                    });
+                    current.increment_revision();
+                    if store.save_job_atomic(&current).is_ok() {
+                        let _ = event_sink.emit_job_updated(&current.to_event_payload());
                     }
                 }
             }
+
+            cleanup_sender();
         });
     }
 }

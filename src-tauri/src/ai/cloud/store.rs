@@ -172,7 +172,7 @@ impl PersistentCloudJobStore {
     }
 
     // -------------------------------------------------------------------------
-    // Atomic Manifest Persistence
+    // Atomic Manifest Persistence with Store-Level Stale Revision Protection
     // -------------------------------------------------------------------------
 
     pub fn save_job_atomic(&self, job: &PersistentCloudJob) -> Result<(), CloudProviderError> {
@@ -186,6 +186,21 @@ impl PersistentCloudJobStore {
 
         let primary_path = self.job_file_path(&job.project_id, &job.internal_job_id)?;
         let tmp_path = self.job_tmp_file_path(&job.project_id, &job.internal_job_id)?;
+
+        // Store-level stale revision protection (CAS guard):
+        // If an existing valid primary record exists on disk, incoming revision must be strictly newer.
+        if primary_path.exists() {
+            if let Ok(content) = fs::read_to_string(&primary_path) {
+                if let Ok(existing_job) = serde_json::from_str::<PersistentCloudJob>(&content) {
+                    if job.state_revision <= existing_job.state_revision {
+                        return Err(CloudProviderError::RequestInvalid(format!(
+                            "STALE_JOB_REVISION: Cannot overwrite existing job {} with stale revision (disk revision {}, incoming revision {})",
+                            job.internal_job_id, existing_job.state_revision, job.state_revision
+                        )));
+                    }
+                }
+            }
+        }
 
         let serialized = serde_json::to_string_pretty(job).map_err(|e| {
             CloudProviderError::ProviderUnavailable(format!(
@@ -315,7 +330,7 @@ impl PersistentCloudJobStore {
                 Ok(tmp_job)
             }
 
-            // Case 5: Both missing or corrupt -> recovery failure
+            // Case 5: Both missing or corrupt -> recovery failure (Fail-Closed)
             (Err(e1), Err(e2)) => Err(CloudProviderError::ProviderUnavailable(format!(
                 "RECOVERY_FAILED: Primary corrupt/missing ({}) and temp corrupt/missing ({}) for job {}",
                 e1, e2, internal_job_id
@@ -324,7 +339,7 @@ impl PersistentCloudJobStore {
     }
 
     // -------------------------------------------------------------------------
-    // Querying & Listing
+    // Querying & Listing (Fail-Closed on Corrupt Manifests)
     // -------------------------------------------------------------------------
 
     pub fn list_jobs_in_project(
@@ -356,9 +371,9 @@ impl PersistentCloudJobStore {
                     .ends_with(".tmp")
             {
                 let file_stem = path.file_stem().unwrap().to_string_lossy().to_string();
-                if let Ok(job) = self.load_job(project_id, &file_stem) {
-                    jobs.push(job);
-                }
+                // Fail closed if any manifest in the project is unrecoverable / corrupt
+                let job = self.load_job(project_id, &file_stem)?;
+                jobs.push(job);
             }
         }
 

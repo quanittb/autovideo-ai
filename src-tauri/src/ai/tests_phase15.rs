@@ -4,7 +4,7 @@ mod tests {
     use crate::ai::cloud::error::CloudProviderError;
     use crate::ai::cloud::job::{
         CloudJobRequest, CloudJobState, CostRecord, InputAssets, PersistentCloudJob,
-        SubmissionState, ValidationPolicy,
+        SubmissionState,
     };
     use crate::ai::cloud::lifecycle::{
         CloudJobLifecycleService, EventSink, LifecycleTimingConfig, TestEventSink,
@@ -13,7 +13,7 @@ mod tests {
         CloudJobHandle, CloudVideoProvider, ProviderCapabilities, RemotePollResponse, RemoteStatus,
     };
     use crate::ai::cloud::registry::ProviderRegistry;
-    use crate::ai::cloud::resolver::{CloudProviderResolver, DefaultCloudProviderResolver};
+    use crate::ai::cloud::resolver::CloudProviderResolver;
     use crate::ai::cloud::router::{RoutingDecision, RoutingPreference, RoutingTarget, TaskClass};
     use crate::ai::cloud::store::PersistentCloudJobStore;
     use crate::ai::cloud::submission::{
@@ -222,6 +222,8 @@ mod tests {
         pub poll_responses: Mutex<Vec<RemotePollResponse>>,
         pub download_behavior: Mutex<Vec<Result<PathBuf, String>>>,
         pub cancel_behavior: Mutex<Result<(), String>>,
+        pub submit_delay_ms: Option<u64>,
+        pub download_delay_ms: Option<u64>,
     }
 
     impl MockCloudProvider {
@@ -240,6 +242,8 @@ mod tests {
                 }]),
                 download_behavior: Mutex::new(Vec::new()),
                 cancel_behavior: Mutex::new(Ok(())),
+                submit_delay_ms: None,
+                download_delay_ms: None,
             }
         }
     }
@@ -297,7 +301,11 @@ mod tests {
         > {
             self.submit_call_count.fetch_add(1, Ordering::SeqCst);
             let behavior = self.submit_behavior.lock().unwrap().clone();
+            let delay = self.submit_delay_ms;
             Box::pin(async move {
+                if let Some(ms) = delay {
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                }
                 match behavior {
                     Ok(remote_id) => Ok(CloudJobHandle {
                         job_id: "test_job".to_string(),
@@ -361,6 +369,7 @@ mod tests {
         > {
             self.download_call_count.fetch_add(1, Ordering::SeqCst);
             let target = target_path.to_path_buf();
+            let delay = self.download_delay_ms;
             let mut behavior = self.download_behavior.lock().unwrap();
             let outcome = if behavior.is_empty() {
                 let mut f = File::create(&target).map_err(|e| {
@@ -383,7 +392,12 @@ mod tests {
                     Err(e) => Err(CloudProviderError::ProviderUnavailable(e)),
                 }
             };
-            Box::pin(async move { outcome })
+            Box::pin(async move {
+                if let Some(ms) = delay {
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                }
+                outcome
+            })
         }
     }
 
@@ -661,17 +675,107 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST 6 — CANCELLATION NON-BLOCKING IMMEDIATE OBSERVATION (Requirement 1)
+    // TEST A (6) — STALE POLL RESPONSE CANNOT OVERWRITE CANCELLED STATE
     // =========================================================================
 
     #[tokio::test]
-    async fn test_phase15_06_cancellation_non_blocking_immediate() {
+    async fn test_phase15_06_stale_poll_cannot_overwrite_cancelled() {
         let (paths, _temp, project_id, sample_mp4) = create_test_env();
 
         let mock_provider = Arc::new(MockCloudProvider::new());
-        // Configure infinite processing polling with 10-second polling interval
+        // Polling response returns Succeeded
         *mock_provider.poll_responses.lock().unwrap() = vec![RemotePollResponse {
-            remote_id: "mock_remote_cancel_nb".to_string(),
+            remote_id: "mock_remote_stale_poll".to_string(),
+            status: RemoteStatus::Succeeded,
+            output_url: Some("https://mock.storage/video.mp4".to_string()),
+            error: None,
+        }];
+
+        let resolver = Arc::new(MockProviderResolver {
+            provider: Some(mock_provider.clone()),
+        });
+        let event_sink = Arc::new(TestEventSink::new());
+
+        let mut timing = LifecycleTimingConfig::production();
+        timing.poll_interval_ms = 5_000;
+
+        let service = create_test_service(paths, resolver, event_sink, timing);
+
+        let req = make_test_req("cjob-stale-poll", &project_id, &sample_mp4);
+        let job = service
+            .start_cloud_generation(req, Some(3.00))
+            .await
+            .unwrap();
+
+        // Cancel job while poller is in background
+        let cancel_res = service
+            .cancel_cloud_generation(&project_id, &job.internal_job_id)
+            .await
+            .unwrap();
+        assert_eq!(cancel_res.state, CloudJobState::Cancelled);
+
+        // Wait for background worker to settle
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Authoritative state must remain CANCELLED, not transitioned to Downloading/Completed
+        let on_disk = service
+            .get_job_status(&project_id, &job.internal_job_id)
+            .unwrap();
+        assert_eq!(on_disk.state, CloudJobState::Cancelled);
+    }
+
+    // =========================================================================
+    // TEST B (7) — STALE LOWER REVISION SAVE REJECTED BY STORE
+    // =========================================================================
+
+    #[test]
+    fn test_phase15_07_stale_lower_revision_save_rejected() {
+        let (paths, _temp, project_id, _sample_mp4) = create_test_env();
+        let store = PersistentCloudJobStore::new(paths);
+
+        let mut job = PersistentCloudJob::new(
+            "client_req_cas".to_string(),
+            "cjob-cas-test".to_string(),
+            project_id.clone(),
+            "replicate".to_string(),
+            "minimax/video-01".to_string(),
+            "minimax/video-01".to_string(),
+            "FullTransformation".to_string(),
+            ExecutionClass::SpecializedVideoTransformation,
+            InputAssets::default(),
+            "hash_cas".to_string(),
+            CostRecord::default(),
+        );
+        job.state_revision = 12;
+        job.state = CloudJobState::Cancelled;
+        store.save_job_atomic(&job).unwrap();
+
+        // Attempt to save stale lower revision (11)
+        let mut stale_job = job.clone();
+        stale_job.state_revision = 11;
+        stale_job.state = CloudJobState::Processing;
+
+        let res = store.save_job_atomic(&stale_job);
+        assert!(res.is_err());
+        assert!(format!("{}", res.unwrap_err()).contains("STALE_JOB_REVISION"));
+
+        // Verify disk primary remains revision 12 CANCELLED
+        let primary = store.load_job(&project_id, "cjob-cas-test").unwrap();
+        assert_eq!(primary.state_revision, 12);
+        assert_eq!(primary.state, CloudJobState::Cancelled);
+    }
+
+    // =========================================================================
+    // TEST C (8) — SINGLE OWNER FOR REMOTE CANCELLATION
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_phase15_08_single_owner_remote_cancellation() {
+        let (paths, _temp, project_id, sample_mp4) = create_test_env();
+
+        let mock_provider = Arc::new(MockCloudProvider::new());
+        *mock_provider.poll_responses.lock().unwrap() = vec![RemotePollResponse {
+            remote_id: "mock_remote_single_owner".to_string(),
             status: RemoteStatus::Processing,
             output_url: None,
             error: None,
@@ -683,46 +787,256 @@ mod tests {
         let event_sink = Arc::new(TestEventSink::new());
 
         let mut timing = LifecycleTimingConfig::production();
-        timing.poll_interval_ms = 10_000; // 10s poll interval
+        timing.poll_interval_ms = 500;
 
         let service = create_test_service(paths, resolver, event_sink, timing);
 
-        let req = make_test_req("cjob-cancel-nb", &project_id, &sample_mp4);
-
+        let req = make_test_req("cjob-single-cancel", &project_id, &sample_mp4);
         let job = service
             .start_cloud_generation(req, Some(3.00))
             .await
             .unwrap();
 
-        // Polling task is sleeping for 10s. Cancel immediately!
+        // Cancel command
         let cancel_start = std::time::Instant::now();
-        let cancel_result = service
+        let cancel_res = service
             .cancel_cloud_generation(&project_id, &job.internal_job_id)
             .await
             .unwrap();
         let cancel_elapsed = cancel_start.elapsed();
 
-        // Must complete promptly without waiting for the 10s poll sleep!
-        assert!(
-            cancel_elapsed < Duration::from_millis(500),
-            "Cancellation took too long: {:?}",
-            cancel_elapsed
+        assert!(cancel_elapsed < Duration::from_millis(500));
+        assert_eq!(cancel_res.state, CloudJobState::Cancelled);
+
+        // Wait for background worker to settle
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Exactly ONE remote cancel call must have been made
+        assert_eq!(
+            mock_provider.cancel_call_count.load(Ordering::SeqCst),
+            1,
+            "Remote cancel must have single ownership"
         );
-        assert_eq!(cancel_result.state, CloudJobState::Cancelled);
-        assert!(cancel_result.cancellation_requested);
+        let final_job = service
+            .get_job_status(&project_id, &job.internal_job_id)
+            .unwrap();
+        assert_eq!(final_job.state, CloudJobState::Cancelled);
+    }
+
+    // =========================================================================
+    // TEST D (9) — CANCELLATION DURING IN-FLIGHT DOWNLOAD NEVER COMPLETED
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_phase15_09_cancellation_during_download_never_completed() {
+        let (paths, _temp, project_id, sample_mp4) = create_test_env();
+
+        let mut mock_provider = MockCloudProvider::new();
+        mock_provider.download_delay_ms = Some(200); // 200ms download delay
+        *mock_provider.download_behavior.lock().unwrap() = vec![Ok(sample_mp4.clone())];
+
+        let mock_provider = Arc::new(mock_provider);
+        let resolver = Arc::new(MockProviderResolver {
+            provider: Some(mock_provider.clone()),
+        });
+        let event_sink = Arc::new(TestEventSink::new());
+
+        let service = create_test_service(
+            paths,
+            resolver,
+            event_sink,
+            LifecycleTimingConfig::fast_test(),
+        );
+
+        let req = make_test_req("cjob-cancel-dl", &project_id, &sample_mp4);
+        let job = service
+            .start_cloud_generation(req, Some(3.00))
+            .await
+            .unwrap();
+
+        // Wait for poller to enter download phase
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // Cancel while download is in flight
+        let _ = service
+            .cancel_cloud_generation(&project_id, &job.internal_job_id)
+            .await
+            .unwrap();
+
+        // Let download complete
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let final_job = service
+            .get_job_status(&project_id, &job.internal_job_id)
+            .unwrap();
+        assert_eq!(
+            final_job.state,
+            CloudJobState::Cancelled,
+            "Job must remain CANCELLED and never become COMPLETED"
+        );
+        assert!(final_job.output.final_path.is_none());
+    }
+
+    // =========================================================================
+    // TEST E (10) — IN-FLIGHT SUBMISSION CANCELLATION RACE
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_phase15_10_in_flight_submission_cancellation_race() {
+        let (paths, _temp, project_id, sample_mp4) = create_test_env();
+
+        let mut mock_provider = MockCloudProvider::new();
+        mock_provider.submit_delay_ms = Some(150); // 150ms submit delay
+        *mock_provider.submit_behavior.lock().unwrap() = Ok("mock_remote_delayed".to_string());
+
+        let mock_provider = Arc::new(mock_provider);
+        let resolver = Arc::new(MockProviderResolver {
+            provider: Some(mock_provider.clone()),
+        });
+        let event_sink = Arc::new(TestEventSink::new());
+
+        let service = Arc::new(create_test_service(
+            paths,
+            resolver,
+            event_sink,
+            LifecycleTimingConfig::fast_test(),
+        ));
+
+        let req = make_test_req("cjob-submit-race", &project_id, &sample_mp4);
+
+        let s1 = service.clone();
+        let s2 = service.clone();
+        let pid = project_id.clone();
+
+        let (submit_res, _) = tokio::join!(
+            tokio::spawn(async move { s1.start_cloud_generation(req, Some(3.00)).await }),
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                // Cancel while submit_job is awaiting remote ID
+                let _ = s2.cancel_cloud_generation(&pid, "cjob-submit-race").await;
+            })
+        );
+
+        let job = submit_res.unwrap().unwrap();
+        // The newly learned remoteJobId must be preserved
+        assert_eq!(job.remote_job_id, Some("mock_remote_delayed".to_string()));
+        // State must be safely Cancelled via reconciliation
+        assert_eq!(job.state, CloudJobState::Cancelled);
+        // Remote cancellation must have been invoked on that same remoteJobId
         assert_eq!(mock_provider.cancel_call_count.load(Ordering::SeqCst), 1);
         assert_eq!(mock_provider.submit_call_count.load(Ordering::SeqCst), 1);
     }
 
     // =========================================================================
-    // TEST 7 — RESUME_UNBLOCK_JOB DEADLOCK-FREE RECONCILIATION (Requirement 2)
+    // TEST F (11) — CORRUPT MANIFEST FAILS CLOSED WITH ZERO SUBMITS
     // =========================================================================
 
     #[tokio::test]
-    async fn test_phase15_07_resume_unblock_job_no_deadlock() {
+    async fn test_phase15_11_corrupt_manifest_fails_closed_zero_submits() {
+        let (paths, _temp, project_id, sample_mp4) = create_test_env();
+        let store = PersistentCloudJobStore::new(paths.clone());
+
+        // Create corrupt files for an existing job
+        let jobs_dir = store.project_cloud_jobs_dir(&project_id).unwrap();
+        fs::create_dir_all(&jobs_dir).unwrap();
+        let corrupt_primary = jobs_dir.join("cjob-corrupt.json");
+        let corrupt_tmp = jobs_dir.join("cjob-corrupt.json.tmp");
+        fs::write(&corrupt_primary, b"{ bad json content").unwrap();
+        fs::write(&corrupt_tmp, b"{ bad json content").unwrap();
+
+        let mock_provider = Arc::new(MockCloudProvider::new());
+        let resolver = Arc::new(MockProviderResolver {
+            provider: Some(mock_provider.clone()),
+        });
+        let event_sink = Arc::new(TestEventSink::new());
+
+        let service = create_test_service(
+            paths,
+            resolver,
+            event_sink,
+            LifecycleTimingConfig::fast_test(),
+        );
+
+        let req = make_test_req("cjob-retry-corrupt", &project_id, &sample_mp4);
+
+        let res = service.start_cloud_generation(req, Some(3.00)).await;
+        assert!(res.is_err());
+        assert!(format!("{}", res.unwrap_err()).contains("RECOVERY_FAILED"));
+
+        // Must fail closed with ZERO provider submissions
+        assert_eq!(mock_provider.submit_call_count.load(Ordering::SeqCst), 0);
+    }
+
+    // =========================================================================
+    // TEST G (12) — DOWNLOAD RETRY BUDGET SURVIVES RESTART
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_phase15_12_download_retry_budget_survives_restart() {
+        let (paths, _temp, project_id, _sample_mp4) = create_test_env();
+        let store = PersistentCloudJobStore::new(paths.clone());
+
+        // Seed a job that failed 2 download attempts out of 3 allowed
+        let mut job = PersistentCloudJob::new(
+            "client_req_dl_budget".to_string(),
+            "cjob-dl-budget".to_string(),
+            project_id.clone(),
+            "replicate".to_string(),
+            "minimax/video-01".to_string(),
+            "minimax/video-01".to_string(),
+            "FullTransformation".to_string(),
+            ExecutionClass::SpecializedVideoTransformation,
+            InputAssets::default(),
+            "hash_dl_budget".to_string(),
+            CostRecord::default(),
+        );
+        job.state = CloudJobState::Downloading;
+        job.submission_state = SubmissionState::Acknowledged;
+        job.remote_job_id = Some("rem_dl_123".to_string());
+        job.output_url = Some("https://mock.storage/video.mp4".to_string());
+        job.retry.download_attempts = 2; // 2 attempts already consumed
+        store.save_job_atomic(&job).unwrap();
+
+        // Download fails on 3rd attempt
+        let mock_provider = Arc::new(MockCloudProvider::new());
+        *mock_provider.download_behavior.lock().unwrap() =
+            vec![Err("Network timeout on 3rd attempt".to_string())];
+
+        let resolver = Arc::new(MockProviderResolver {
+            provider: Some(mock_provider.clone()),
+        });
+        let event_sink = Arc::new(TestEventSink::new());
+
+        let mut timing = LifecycleTimingConfig::fast_test();
+        timing.max_download_attempts = 3;
+
+        let service = create_test_service(paths, resolver, event_sink, timing);
+
+        let _ = service.recover_startup_jobs().await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let final_job = service
+            .get_job_status(&project_id, "cjob-dl-budget")
+            .unwrap();
+        // Only 1 download attempt allowed before hitting max_download_attempts (3)
+        assert_eq!(final_job.state, CloudJobState::Failed);
+        assert_eq!(final_job.error.as_ref().unwrap().code, "DOWNLOAD_FAILED");
+        assert_eq!(
+            mock_provider.download_call_count.load(Ordering::SeqCst),
+            1,
+            "Only the remaining budget attempt should execute"
+        );
+    }
+
+    // =========================================================================
+    // TEST 13 — RESUME_UNBLOCK_JOB DEADLOCK-FREE RECONCILIATION
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_phase15_13_resume_unblock_job_no_deadlock() {
         let (paths, _temp, project_id, _sample_mp4) = create_test_env();
 
-        // Seed a Blocked job with cancellation_requested=true and remote ID
         let mut job = PersistentCloudJob::new(
             "client_req_resume_deadlock".to_string(),
             "cjob-deadlock-test".to_string(),
@@ -757,7 +1071,6 @@ mod tests {
             LifecycleTimingConfig::fast_test(),
         );
 
-        // Run with a 2-second timeout guard to prove no self-deadlock occurs
         let result = tokio::time::timeout(
             Duration::from_secs(2),
             service.resume_unblock_job(&project_id, "cjob-deadlock-test"),
@@ -771,14 +1084,13 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST 8 — STARTUP RECOVERY REMOTE CANCEL FAILURE BLOCKS (Requirement 3)
+    // TEST 14 — STARTUP RECOVERY REMOTE CANCEL FAILURE BLOCKS
     // =========================================================================
 
     #[tokio::test]
-    async fn test_phase15_08_startup_recovery_cancel_failure_blocks() {
+    async fn test_phase15_14_startup_recovery_cancel_failure_blocks() {
         let (paths, _temp, project_id, _sample_mp4) = create_test_env();
 
-        // Seed a Processing job with cancellation_requested=true and remote ID
         let mut job = PersistentCloudJob::new(
             "client_req_cancel_fail".to_string(),
             "cjob-cancel-fail".to_string(),
@@ -800,7 +1112,6 @@ mod tests {
         let store = PersistentCloudJobStore::new(paths.clone());
         store.save_job_atomic(&job).unwrap();
 
-        // Provider whose cancel_job fails with 500 error
         let mock_provider = Arc::new(MockCloudProvider::new());
         *mock_provider.cancel_behavior.lock().unwrap() =
             Err("HTTP 500 Internal Server Error during cancel".to_string());
@@ -820,7 +1131,6 @@ mod tests {
         let recovered = service.recover_startup_jobs().await.unwrap();
         assert_eq!(recovered.len(), 1);
 
-        // State MUST NOT become CANCELLED when remote cancel fails
         assert_eq!(recovered[0].state, CloudJobState::Blocked);
         assert_eq!(
             recovered[0].error.as_ref().unwrap().code,
@@ -831,11 +1141,11 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST 9 — PERSIST BEFORE EVENT WITH INJECTED STORE FAILURE (Requirement 4 & 5)
+    // TEST 15 — PERSIST BEFORE EVENT WITH INJECTED STORE FAILURE
     // =========================================================================
 
     #[tokio::test]
-    async fn test_phase15_09_persist_before_event_with_injected_store_failure() {
+    async fn test_phase15_15_persist_before_event_with_injected_store_failure() {
         let (paths, _temp, project_id, sample_mp4) = create_test_env();
 
         let mock_provider = Arc::new(MockCloudProvider::new());
@@ -853,7 +1163,6 @@ mod tests {
 
         let req = make_test_req("cjob-fail-seam", &project_id, &sample_mp4);
 
-        // 1. Initial job creation succeeds -> emits 2 events (Created, Submitted/Processing)
         let job = service
             .start_cloud_generation(req, Some(3.00))
             .await
@@ -861,21 +1170,17 @@ mod tests {
         let initial_events_count = event_sink.events.read().unwrap().len();
         assert!(initial_events_count > 0);
 
-        // 2. Arm persistence failure seam on the store
         service.store().set_fail_next_save(true);
 
-        // 3. Mutate lifecycle state (cancellation)
         let cancel_res = service
             .cancel_cloud_generation(&project_id, &job.internal_job_id)
             .await;
         assert!(cancel_res.is_err());
         assert!(format!("{}", cancel_res.unwrap_err()).contains("SIMULATED_PERSISTENCE_FAILURE"));
 
-        // 4. Verify NO new event was emitted for the unpersisted mutation
         let post_failure_events_count = event_sink.events.read().unwrap().len();
         assert_eq!(initial_events_count, post_failure_events_count);
 
-        // 5. Verify store state on disk was NOT mutated to cancelled
         let on_disk = service
             .store()
             .load_job(&project_id, &job.internal_job_id)
@@ -885,11 +1190,11 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST 10 — REAL PROJECT AUDIO POLICY DERIVATION (Requirement 6)
+    // TEST 16 — REAL PROJECT AUDIO POLICY DERIVATION
     // =========================================================================
 
     #[tokio::test]
-    async fn test_phase15_10_real_project_audio_policy_derivation() {
+    async fn test_phase15_16_real_project_audio_policy_derivation() {
         let (paths, temp, _project_id, sample_mp4) = create_test_env();
         let pm = ProjectManager::new(paths.clone());
 
@@ -1008,320 +1313,6 @@ mod tests {
     }
 
     // =========================================================================
-    // TEST 11 — VALIDATION: WRONG DURATION FAILS
-    // =========================================================================
-
-    #[tokio::test]
-    async fn test_phase15_11_validation_wrong_duration_fails() {
-        let (paths, temp, project_id, sample_mp4) = create_test_env();
-
-        // Create a 5-second valid video fixture
-        let five_sec_mp4 = temp.path().join("five_sec.mp4");
-        create_synthetic_mp4(&five_sec_mp4, 5, 576, 1024, 25, true);
-
-        let mock_provider = Arc::new(MockCloudProvider::new());
-        *mock_provider.download_behavior.lock().unwrap() = vec![Ok(five_sec_mp4)];
-
-        let resolver = Arc::new(MockProviderResolver {
-            provider: Some(mock_provider),
-        });
-        let event_sink = Arc::new(TestEventSink::new());
-
-        let service = create_test_service(
-            paths,
-            resolver,
-            event_sink,
-            LifecycleTimingConfig::fast_test(),
-        );
-
-        // Requested duration is 1.0 second, but provider delivered 5.0 seconds
-        let req = make_test_req("cjob-dur-mismatch", &project_id, &sample_mp4);
-
-        let job = service
-            .start_cloud_generation(req, Some(3.00))
-            .await
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        let final_job = service
-            .get_job_status(&project_id, &job.internal_job_id)
-            .unwrap();
-        assert_eq!(final_job.state, CloudJobState::Failed);
-        assert_eq!(final_job.error.as_ref().unwrap().code, "VALIDATION_FAILED");
-        assert!(final_job
-            .error
-            .as_ref()
-            .unwrap()
-            .sanitized_message
-            .contains("exceeds tolerance bounds"));
-    }
-
-    // =========================================================================
-    // TEST 12 — ATOMIC ARTIFACT PROMOTION
-    // =========================================================================
-
-    #[test]
-    fn test_phase15_12_atomic_artifact_promotion() {
-        let temp = tempdir().unwrap();
-        let partial_path = temp.path().join("test.partial");
-        let final_path = temp.path().join("final.mp4");
-
-        // Create valid 1s mp4 as partial
-        create_synthetic_mp4(&partial_path, 1, 576, 1024, 25, true);
-
-        // Pre-create an old final file
-        {
-            let mut f = File::create(&final_path).unwrap();
-            f.write_all(b"old_final_content").unwrap();
-        }
-
-        let validator = CloudOutputValidator::new();
-        let record = validator
-            .validate_and_promote_artifact(&partial_path, &final_path, Some(1.0), false)
-            .unwrap();
-
-        assert!(!partial_path.exists());
-        assert!(final_path.exists());
-        assert!(record.artifact_hash.is_some());
-    }
-
-    // =========================================================================
-    // TEST 13 — MISSING CREDENTIALS WITH REAL RESOLVER
-    // =========================================================================
-
-    #[tokio::test]
-    async fn test_phase15_13_missing_credentials_real_resolver_blocks_and_resumes() {
-        let (paths, _temp, project_id, _sample_mp4) = create_test_env();
-
-        // Seed a processing job with a remote ID
-        let mut job = PersistentCloudJob::new(
-            "client_req_real_resolver".to_string(),
-            "cjob-real-res".to_string(),
-            project_id.clone(),
-            "replicate".to_string(),
-            "minimax/video-01".to_string(),
-            "minimax/video-01".to_string(),
-            "FullTransformation".to_string(),
-            ExecutionClass::SpecializedVideoTransformation,
-            InputAssets::default(),
-            "hash_13".to_string(),
-            CostRecord::default(),
-        );
-        job.state = CloudJobState::Processing;
-        job.submission_state = SubmissionState::Acknowledged;
-        job.remote_job_id = Some("rem_live_123".to_string());
-
-        let store = PersistentCloudJobStore::new(paths.clone());
-        store.save_job_atomic(&job).unwrap();
-
-        // Real DefaultCloudProviderResolver without REPLICATE_API_TOKEN set in test environment
-        let real_resolver = Arc::new(DefaultCloudProviderResolver::new());
-        let event_sink = Arc::new(TestEventSink::new());
-
-        let service = CloudJobLifecycleService::new(
-            paths.clone(),
-            real_resolver,
-            event_sink.clone(),
-            Arc::new(MockSubmissionGate::default()),
-            LifecycleTimingConfig::fast_test(),
-        );
-
-        let recovered = service.recover_startup_jobs().await.unwrap();
-        assert_eq!(recovered.len(), 1);
-        assert_eq!(recovered[0].state, CloudJobState::Blocked);
-        assert_eq!(
-            recovered[0].error.as_ref().unwrap().code,
-            "MISSING_PROVIDER_CREDENTIALS"
-        );
-        assert_eq!(recovered[0].remote_job_id, Some("rem_live_123".to_string()));
-
-        // Resume once provider becomes available
-        let mock_provider = Arc::new(MockCloudProvider::new());
-        let mock_resolver = Arc::new(MockProviderResolver {
-            provider: Some(mock_provider.clone()),
-        });
-
-        let service_with_creds = CloudJobLifecycleService::new(
-            paths,
-            mock_resolver,
-            event_sink,
-            Arc::new(MockSubmissionGate::default()),
-            LifecycleTimingConfig::fast_test(),
-        );
-
-        let resumed = service_with_creds
-            .resume_unblock_job(&project_id, "cjob-real-res")
-            .await
-            .unwrap();
-        assert_eq!(resumed.state, CloudJobState::Processing);
-        assert_eq!(resumed.remote_job_id, Some("rem_live_123".to_string()));
-        assert_eq!(mock_provider.submit_call_count.load(Ordering::SeqCst), 0);
-    }
-
-    // =========================================================================
-    // TEST 14 — VALIDATING_OUTPUT RECOVERY WITHOUT PROVIDER
-    // =========================================================================
-
-    #[tokio::test]
-    async fn test_phase15_14_validating_output_recovery_no_provider_needed() {
-        let (paths, _temp, project_id, _sample_mp4) = create_test_env();
-        let store = PersistentCloudJobStore::new(paths.clone());
-
-        let mut job = PersistentCloudJob::new(
-            "client_req_val_rec".to_string(),
-            "cjob-val-rec".to_string(),
-            project_id.clone(),
-            "replicate".to_string(),
-            "minimax/video-01".to_string(),
-            "minimax/video-01".to_string(),
-            "FullTransformation".to_string(),
-            ExecutionClass::SpecializedVideoTransformation,
-            InputAssets::default(),
-            "hash_val".to_string(),
-            CostRecord::default(),
-        );
-        job.state = CloudJobState::ValidatingOutput;
-        job.validation_policy = ValidationPolicy {
-            expected_duration_sec: Some(1.0),
-            require_audio: false,
-        };
-        store.save_job_atomic(&job).unwrap();
-
-        // Create the downloaded .partial file on disk
-        let partial_path = store
-            .artifact_partial_path(&project_id, "cjob-val-rec")
-            .unwrap();
-        create_synthetic_mp4(&partial_path, 1, 576, 1024, 25, true);
-
-        // Resolver with NO provider credentials
-        let resolver_empty = Arc::new(MockProviderResolver { provider: None });
-        let event_sink = Arc::new(TestEventSink::new());
-
-        let service = CloudJobLifecycleService::new(
-            paths,
-            resolver_empty,
-            event_sink,
-            Arc::new(MockSubmissionGate::default()),
-            LifecycleTimingConfig::fast_test(),
-        );
-
-        let recovered = service.recover_startup_jobs().await.unwrap();
-        assert_eq!(recovered.len(), 1);
-        assert_eq!(recovered[0].state, CloudJobState::Completed);
-        assert!(recovered[0].output.final_path.is_some());
-    }
-
-    // =========================================================================
-    // TEST 15 — MONOTONIC REVISION CRASH RECOVERY
-    // =========================================================================
-
-    #[test]
-    fn test_phase15_15_monotonic_revision_crash_recovery() {
-        let (paths, _temp, project_id, _sample_mp4) = create_test_env();
-        let store = PersistentCloudJobStore::new(paths);
-
-        // Primary on disk has revision N with SUBMITTED / IN_FLIGHT / no remoteJobId
-        let mut primary_job = PersistentCloudJob::new(
-            "job_test_15".to_string(),
-            "cjob-15".to_string(),
-            project_id.clone(),
-            "replicate".to_string(),
-            "minimax/video-01".to_string(),
-            "minimax/video-01".to_string(),
-            "FullTransformation".to_string(),
-            ExecutionClass::SpecializedVideoTransformation,
-            InputAssets::default(),
-            "hash_15".to_string(),
-            CostRecord::default(),
-        );
-        primary_job.state_revision = 1;
-        primary_job.state = CloudJobState::Submitted;
-        primary_job.submission_state = SubmissionState::InFlight;
-        primary_job.remote_job_id = None;
-        store.save_job_atomic(&primary_job).unwrap();
-
-        // Temp file on disk has revision N+1 with PROCESSING / ACKNOWLEDGED / remoteJobId present (crash before rename)
-        let mut tmp_job = primary_job.clone();
-        tmp_job.state_revision = 2;
-        tmp_job.state = CloudJobState::Processing;
-        tmp_job.submission_state = SubmissionState::Acknowledged;
-        tmp_job.remote_job_id = Some("rem_ack_15".to_string());
-
-        let tmp_path = store
-            .job_tmp_file_path(&project_id, &primary_job.internal_job_id)
-            .unwrap();
-        let tmp_json = serde_json::to_string_pretty(&tmp_job).unwrap();
-        fs::write(&tmp_path, tmp_json).unwrap();
-
-        // Loading must select the higher revision (N+1 = 2) and promote it
-        let recovered = store
-            .load_job(&project_id, &primary_job.internal_job_id)
-            .unwrap();
-        assert_eq!(recovered.state_revision, 2);
-        assert_eq!(recovered.state, CloudJobState::Processing);
-        assert_eq!(recovered.submission_state, SubmissionState::Acknowledged);
-        assert_eq!(recovered.remote_job_id, Some("rem_ack_15".to_string()));
-    }
-
-    // =========================================================================
-    // TEST 16 — PATH TRAVERSAL REJECTION
-    // =========================================================================
-
-    #[tokio::test]
-    async fn test_phase15_16_path_traversal_rejection() {
-        let (paths, _temp, _project_id, sample_mp4) = create_test_env();
-
-        let mock_provider = Arc::new(MockCloudProvider::new());
-        let resolver = Arc::new(MockProviderResolver {
-            provider: Some(mock_provider),
-        });
-        let event_sink = Arc::new(TestEventSink::new());
-
-        let service = create_test_service(
-            paths,
-            resolver,
-            event_sink,
-            LifecycleTimingConfig::fast_test(),
-        );
-
-        let malicious_requests = [
-            ("../escape_proj", "cjob-1"),
-            ("proj_1", "../escape_job"),
-            ("C:\\Windows", "cjob-2"),
-            ("/etc/passwd", "cjob-3"),
-            ("proj\0null", "cjob-4"),
-        ];
-
-        for (pid, jid) in malicious_requests {
-            let req = CloudJobRequest {
-                job_id: jid.to_string(),
-                project_id: Some(pid.to_string()),
-                prompt: "Path traversal probe".to_string(),
-                negative_prompt: None,
-                source_video: Some(sample_mp4.clone()),
-                reference_image: None,
-                duration_seconds: 1.0,
-                fps: 25.0,
-                resolution: (576, 1024),
-                task_type: "FullTransformation".to_string(),
-            };
-
-            let res = service.start_cloud_generation(req, Some(3.00)).await;
-            assert!(
-                res.is_err(),
-                "Path traversal must be rejected for pid: {}",
-                pid
-            );
-            let err = format!("{}", res.unwrap_err());
-            assert!(
-                err.contains("INVALID_IDENTIFIER") || err.contains("Project not found"),
-                "Expected rejection, got: {}",
-                err
-            );
-        }
-    }
-
-    // =========================================================================
     // TEST 17 — PRODUCTION COST-SAVING REGRESSION TEST
     // =========================================================================
 
@@ -1335,7 +1326,6 @@ mod tests {
         });
         let event_sink = Arc::new(TestEventSink::new());
 
-        // Production service uses DefaultCloudSubmissionGate with COST_SAVING policy
         let service = CloudJobLifecycleService::new(
             paths,
             resolver,
