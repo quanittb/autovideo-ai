@@ -1,15 +1,16 @@
 use super::error::CloudProviderError;
 use super::job::{
     CloudJobEventPayload, CloudJobRequest, CloudJobState, CostRecord, InputAssets, JobErrorRecord,
-    PersistentCloudJob, SubmissionState,
+    JobTimestamps, OutputArtifactRecord, PersistentCloudJob, RetryCounters, SubmissionState,
+    ValidationPolicy, CURRENT_CLOUD_JOB_SCHEMA_VERSION,
 };
 use super::provider::RemoteStatus;
 use super::registry::ProviderRegistry;
 use super::resolver::{CloudProviderResolver, DefaultCloudProviderResolver};
-use super::router::TaskClass;
 use super::store::PersistentCloudJobStore;
-use super::submission::validate_and_prepare_cloud_submission;
+use super::submission::{CloudSubmissionGate, DefaultCloudSubmissionGate};
 use super::validator::CloudOutputValidator;
+use super::ExecutionClass;
 use crate::projects::ProjectManager;
 use crate::system::StoragePaths;
 use chrono::Utc;
@@ -32,6 +33,25 @@ pub struct NoopEventSink;
 impl EventSink for NoopEventSink {
     fn emit_job_updated(&self, _payload: &CloudJobEventPayload) -> Result<(), String> {
         Ok(())
+    }
+}
+
+pub struct TauriEventSink {
+    app_handle: tauri::AppHandle,
+}
+
+impl TauriEventSink {
+    pub fn new(app_handle: tauri::AppHandle) -> Self {
+        Self { app_handle }
+    }
+}
+
+impl EventSink for TauriEventSink {
+    fn emit_job_updated(&self, payload: &CloudJobEventPayload) -> Result<(), String> {
+        use tauri::Emitter;
+        self.app_handle
+            .emit("cloud-job://updated", payload)
+            .map_err(|e| format!("Tauri event emission failed: {}", e))
     }
 }
 
@@ -76,6 +96,12 @@ pub struct LifecycleTimingConfig {
 
 impl Default for LifecycleTimingConfig {
     fn default() -> Self {
+        Self::production()
+    }
+}
+
+impl LifecycleTimingConfig {
+    pub fn production() -> Self {
         Self {
             poll_interval_ms: 1000,
             max_poll_duration_sec: 300,
@@ -83,9 +109,7 @@ impl Default for LifecycleTimingConfig {
             max_download_attempts: 3,
         }
     }
-}
 
-impl LifecycleTimingConfig {
     pub fn fast_test() -> Self {
         Self {
             poll_interval_ms: 10,
@@ -105,6 +129,7 @@ pub struct CloudJobLifecycleService {
     project_manager: ProjectManager,
     provider_resolver: Arc<dyn CloudProviderResolver>,
     event_sink: Arc<dyn EventSink>,
+    submission_gate: Arc<dyn CloudSubmissionGate>,
     timing_config: LifecycleTimingConfig,
     job_locks: Arc<RwLock<HashMap<String, Arc<TokioMutex<()>>>>>,
 }
@@ -114,6 +139,7 @@ impl CloudJobLifecycleService {
         storage_paths: StoragePaths,
         provider_resolver: Arc<dyn CloudProviderResolver>,
         event_sink: Arc<dyn EventSink>,
+        submission_gate: Arc<dyn CloudSubmissionGate>,
         timing_config: LifecycleTimingConfig,
     ) -> Self {
         let store = PersistentCloudJobStore::new(storage_paths.clone());
@@ -123,6 +149,7 @@ impl CloudJobLifecycleService {
             project_manager,
             provider_resolver,
             event_sink,
+            submission_gate,
             timing_config,
             job_locks: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -133,7 +160,8 @@ impl CloudJobLifecycleService {
             storage_paths,
             Arc::new(DefaultCloudProviderResolver::new()),
             Arc::new(NoopEventSink),
-            LifecycleTimingConfig::default(),
+            Arc::new(DefaultCloudSubmissionGate::new()),
+            LifecycleTimingConfig::production(),
         )
     }
 
@@ -149,30 +177,64 @@ impl CloudJobLifecycleService {
             .clone()
     }
 
-    fn compute_configuration_hash(
-        req: &CloudJobRequest,
-        provider_id: &str,
-        model_id: &str,
-        model_version: &str,
-    ) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(provider_id.as_bytes());
-        hasher.update(model_id.as_bytes());
-        hasher.update(model_version.as_bytes());
-        hasher.update(req.task_type.as_bytes());
-        hasher.update(req.prompt.as_bytes());
-        if let Some(np) = &req.negative_prompt {
-            hasher.update(np.as_bytes());
-        }
-        hasher.update(&req.resolution.0.to_le_bytes());
-        hasher.update(&req.resolution.1.to_le_bytes());
-        hasher.update(&req.fps.to_le_bytes());
-        hasher.update(&req.duration_seconds.to_le_bytes());
-        format!("{:x}", hasher.finalize())
+    fn get_request_lock(&self, project_id: &str, client_request_id: &str) -> Arc<TokioMutex<()>> {
+        let key = format!("{}:{}", project_id, client_request_id);
+        let mut locks = self.job_locks.write().unwrap();
+        locks
+            .entry(key)
+            .or_insert_with(|| Arc::new(TokioMutex::new(())))
+            .clone()
     }
 
     // -------------------------------------------------------------------------
-    // Submit / Start Generation
+    // Input Hashing & Configuration Identity
+    // -------------------------------------------------------------------------
+
+    fn compute_inputs(
+        request: &CloudJobRequest,
+    ) -> Result<(InputAssets, String), CloudProviderError> {
+        let mut assets = InputAssets::default();
+        let mut hasher = Sha256::new();
+
+        hasher.update(request.task_type.as_bytes());
+        hasher.update(request.prompt.as_bytes());
+        if let Some(ref np) = request.negative_prompt {
+            hasher.update(np.as_bytes());
+        }
+        hasher.update(&request.duration_seconds.to_le_bytes());
+        hasher.update(&request.fps.to_le_bytes());
+        hasher.update(&request.resolution.0.to_le_bytes());
+        hasher.update(&request.resolution.1.to_le_bytes());
+
+        if let Some(ref p) = request.source_video {
+            assets.source_video_path = Some(p.clone());
+            if p.exists() {
+                let h = CloudOutputValidator::compute_file_sha256(p)?;
+                hasher.update(h.as_bytes());
+                assets.source_video_hash = Some(h);
+            } else {
+                return Err(CloudProviderError::RequestInvalid(format!(
+                    "Source video not found at {}",
+                    p.display()
+                )));
+            }
+        }
+
+        if let Some(ref p) = request.reference_image {
+            assets.reference_image_path = Some(p.clone());
+            if p.exists() {
+                let h = CloudOutputValidator::compute_file_sha256(p)?;
+                hasher.update(h.as_bytes());
+                assets.reference_image_hash = Some(h);
+            }
+        }
+
+        let config_hash = format!("{:x}", hasher.finalize());
+        Ok((assets, config_hash))
+    }
+
+    // -------------------------------------------------------------------------
+    // Submission Orchestration
     // -------------------------------------------------------------------------
 
     pub async fn start_cloud_generation(
@@ -180,100 +242,95 @@ impl CloudJobLifecycleService {
         request: CloudJobRequest,
         max_cost: Option<f64>,
     ) -> Result<PersistentCloudJob, CloudProviderError> {
-        // 1. Strict Project ID validation (no _standalone in production)
+        let client_req_id = request.job_id.clone();
         let project_id = match &request.project_id {
-            Some(pid) if !pid.trim().is_empty() => pid.trim().to_string(),
-            _ => {
+            Some(pid) => pid.clone(),
+            None => {
                 return Err(CloudProviderError::RequestInvalid(
-                    "PROJECT_ID_REQUIRED: A valid projectId is required for cloud generation"
+                    "PROJECT_ID_REQUIRED: project_id is required for persistent cloud job"
                         .to_string(),
-                ))
+                ));
             }
         };
 
-        // 2. Validate project exists in ProjectManager
-        self.project_manager
-            .get_project(&project_id)
-            .map_err(|e| CloudProviderError::RequestInvalid(format!("Project not found: {}", e)))?;
+        // Acquire lock keyed by projectId + clientRequestId to prevent duplicate submissions
+        let req_lock = self.get_request_lock(&project_id, &client_req_id);
+        let _req_guard = req_lock.lock().await;
 
-        // 3. Resolve internal safe job ID
-        let internal_job_id = if request.job_id.starts_with("cjob-")
-            && !request.job_id.contains('/')
-            && !request.job_id.contains('\\')
+        // 1. Check if client request already produced an existing persistent job
+        let mut job = match self
+            .store
+            .find_job_by_client_request_id(&project_id, &client_req_id)?
         {
-            request.job_id.clone()
-        } else {
-            format!("cjob-{}", Uuid::new_v4())
-        };
-
-        let lock = self.get_job_lock(&internal_job_id);
-        let _guard = lock.lock().await;
-
-        // 4. Check if job already exists on disk
-        let mut job = match self.store.load_job(&project_id, &internal_job_id) {
-            Ok(existing) => {
-                // If already submitted or in flight, prevent duplicate paid submission!
-                if existing.submission_state != SubmissionState::NeverAttempted {
+            Some(existing) => match existing.submission_state {
+                SubmissionState::InFlight => {
                     return Err(CloudProviderError::RequestInvalid(format!(
-                        "DUPLICATE_SUBMISSION_PREVENTED: Job {} has already been submitted (state: {:?})",
-                        internal_job_id, existing.submission_state
+                        "DUPLICATE_SUBMISSION_PREVENTED: Job {} is currently in-flight",
+                        existing.internal_job_id
                     )));
                 }
-                existing
-            }
-            Err(_) => {
-                // Read source media & reference image hashes (Read-Only)
-                let source_hash = match &request.source_video {
-                    Some(path) if path.exists() => {
-                        Some(CloudOutputValidator::compute_file_sha256(path)?)
-                    }
-                    _ => None,
-                };
-                let ref_hash = match &request.reference_image {
-                    Some(path) if path.exists() => {
-                        Some(CloudOutputValidator::compute_file_sha256(path)?)
-                    }
-                    _ => None,
-                };
+                SubmissionState::Acknowledged => {
+                    return Err(CloudProviderError::RequestInvalid(format!(
+                        "DUPLICATE_SUBMISSION_PREVENTED: Job {} has already been submitted (remote_id: {:?})",
+                        existing.internal_job_id, existing.remote_job_id
+                    )));
+                }
+                SubmissionState::Ambiguous => {
+                    return Err(CloudProviderError::RequestInvalid(format!(
+                        "DUPLICATE_SUBMISSION_PREVENTED: Job {} is in ambiguous submission state. Automated re-submission is blocked.",
+                        existing.internal_job_id
+                    )));
+                }
+                SubmissionState::NeverAttempted => existing,
+            },
+            None => {
+                // 2. Validate project exists in ProjectManager
+                let _project = self.project_manager.get_project(&project_id).map_err(|e| {
+                    CloudProviderError::RequestInvalid(format!("Project not found: {}", e))
+                })?;
 
-                let input_assets = InputAssets {
-                    source_video_path: request.source_video.clone(),
-                    source_video_hash: source_hash,
-                    reference_image_path: request.reference_image.clone(),
-                    reference_image_hash: ref_hash,
-                };
+                // 3. Compute stable input assets and configuration hash
+                let (input_assets, config_hash) = Self::compute_inputs(&request)?;
+                let internal_job_id = format!("cjob-{}", Uuid::new_v4());
 
-                let config_hash = Self::compute_configuration_hash(
-                    &request,
-                    "replicate",
-                    "minimax/video-01",
-                    "minimax/video-01",
-                );
-
-                let task_class = TaskClass::from_str_or_default(&request.task_type);
-
-                let cost_record = CostRecord {
-                    estimate: None,
-                    confidence: super::cost::CostConfidence::Estimated,
-                    budget_limit: max_cost.unwrap_or(super::cost::DEFAULT_STANDARD_JOB_BUDGET_USD),
-                    reserved_budget: None,
-                    actual_cost: None,
+                let validation_policy = ValidationPolicy {
+                    expected_duration_sec: if request.duration_seconds > 0.0 {
+                        Some(request.duration_seconds)
+                    } else {
+                        None
+                    },
+                    require_audio: request.source_video.is_some(),
                 };
 
-                let new_job = PersistentCloudJob::new(
-                    request.job_id.clone(),
-                    internal_job_id.clone(),
-                    project_id.clone(),
-                    "replicate".to_string(),
-                    "minimax/video-01".to_string(),
-                    "minimax/video-01".to_string(),
-                    request.task_type.clone(),
-                    task_class.execution_class(),
+                let new_job = PersistentCloudJob {
+                    schema_version: CURRENT_CLOUD_JOB_SCHEMA_VERSION,
+                    state_revision: 1,
+                    job_id: client_req_id.clone(),
+                    internal_job_id: internal_job_id.clone(),
+                    project_id: project_id.clone(),
+                    provider_id: "replicate".to_string(),
+                    model_id: "minimax/video-01".to_string(),
+                    model_version: "minimax/video-01".to_string(),
+                    task_type: request.task_type.clone(),
+                    execution_class: ExecutionClass::SpecializedVideoTransformation,
                     input_assets,
-                    config_hash,
-                    cost_record,
-                );
+                    configuration_hash: config_hash,
+                    submission_state: SubmissionState::NeverAttempted,
+                    remote_job_id: None,
+                    state: CloudJobState::Created,
+                    cost: CostRecord::default(),
+                    output: OutputArtifactRecord::default(),
+                    retry: RetryCounters::default(),
+                    error: None,
+                    timestamps: JobTimestamps::default(),
+                    cancellation_requested: false,
+                    progress_pct: None,
+                    remote_status: None,
+                    output_url: None,
+                    validation_policy,
+                };
 
+                // Persist first -> only then emit
                 self.store.save_job_atomic(&new_job)?;
                 let _ = self
                     .event_sink
@@ -282,19 +339,19 @@ impl CloudJobLifecycleService {
             }
         };
 
-        // 5. Resolve provider adapter from resolver
+        // 4. Resolve provider adapter from resolver
         let provider = self.provider_resolver.resolve_provider(&job.provider_id)?;
         let registry = ProviderRegistry::new();
 
-        // 6. Authoritative Phase 14 routing & budget validation
-        let plan = validate_and_prepare_cloud_submission(
+        // 5. Submission gate validation (Production delegates to CostSaving router)
+        let plan = self.submission_gate.validate_and_prepare(
             &request,
             max_cost,
             provider.as_ref(),
             &registry,
         )?;
 
-        // 7. Transition to IN_FLIGHT and persist BEFORE calling provider.submit_job()
+        // 6. Transition to IN_FLIGHT and persist BEFORE calling provider.submit_job()
         job.state = CloudJobState::Submitted;
         job.submission_state = SubmissionState::InFlight;
         job.retry.submit_attempts = job.retry.submit_attempts.saturating_add(1);
@@ -303,13 +360,13 @@ impl CloudJobLifecycleService {
         job.cost.budget_limit = plan.budget_limit;
         job.increment_revision();
 
+        // Save successfully -> only then emit
         self.store.save_job_atomic(&job)?;
         let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
 
-        // 8. Submit to provider
+        // 7. Submit to provider
         match provider.submit_job(&request).await {
             Ok(handle) => {
-                // Acknowledged submission
                 job.remote_job_id = Some(handle.remote_id);
                 job.submission_state = SubmissionState::Acknowledged;
                 job.state = CloudJobState::Processing;
@@ -325,7 +382,6 @@ impl CloudJobLifecycleService {
                 Ok(job)
             }
             Err(e) => {
-                // Ambiguous submission or provider error
                 job.submission_state = SubmissionState::Ambiguous;
                 job.state = CloudJobState::Blocked;
                 job.error = Some(JobErrorRecord {
@@ -352,98 +408,179 @@ impl CloudJobLifecycleService {
     pub fn get_job_status(
         &self,
         project_id: &str,
-        internal_job_id: &str,
+        job_id_or_internal: &str,
     ) -> Result<PersistentCloudJob, CloudProviderError> {
-        self.store.load_job(project_id, internal_job_id)
+        if let Ok(job) = self.store.load_job(project_id, job_id_or_internal) {
+            return Ok(job);
+        }
+        if let Some(job) = self
+            .store
+            .find_job_by_client_request_id(project_id, job_id_or_internal)?
+        {
+            return Ok(job);
+        }
+        Err(CloudProviderError::RequestInvalid(format!(
+            "Job {} not found in project {}",
+            job_id_or_internal, project_id
+        )))
     }
 
     // -------------------------------------------------------------------------
-    // Cancellation
+    // Cancellation Orchestration & Reconciliation
     // -------------------------------------------------------------------------
 
     pub async fn cancel_cloud_generation(
         &self,
         project_id: &str,
-        internal_job_id: &str,
+        job_id_or_internal: &str,
     ) -> Result<PersistentCloudJob, CloudProviderError> {
-        let lock = self.get_job_lock(internal_job_id);
+        let mut job = self.get_job_status(project_id, job_id_or_internal)?;
+        let lock = self.get_job_lock(&job.internal_job_id);
         let _guard = lock.lock().await;
 
-        let mut job = self.store.load_job(project_id, internal_job_id)?;
         if job.state.is_terminal() {
             return Ok(job);
         }
 
+        // 1. Persist cancellation intent first
         job.cancellation_requested = true;
         job.increment_revision();
         self.store.save_job_atomic(&job)?;
         let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
 
-        // Reconcile with remote provider if remote_job_id is known
-        if let Some(r_id) = &job.remote_job_id {
-            if let Ok(provider) = self.provider_resolver.resolve_provider(&job.provider_id) {
-                let _ = provider.cancel_job(r_id).await;
+        // 2. Reconcile with remote provider if remote_job_id exists
+        if let Some(ref remote_id) = job.remote_job_id {
+            match self.provider_resolver.resolve_provider(&job.provider_id) {
+                Ok(provider) => match provider.cancel_job(remote_id).await {
+                    Ok(()) => {
+                        job.state = CloudJobState::Cancelled;
+                        job.increment_revision();
+                        self.store.save_job_atomic(&job)?;
+                        let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+                        Ok(job)
+                    }
+                    Err(e) => {
+                        job.state = CloudJobState::Blocked;
+                        job.error = Some(JobErrorRecord {
+                            code: "CANCELLATION_FAILED_REMOTE".to_string(),
+                            sanitized_message: format!(
+                                "Remote cancellation failed: {}. Cancellation intent is persisted.",
+                                e
+                            ),
+                        });
+                        job.increment_revision();
+                        self.store.save_job_atomic(&job)?;
+                        let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+                        Err(e)
+                    }
+                },
+                Err(e) => {
+                    job.state = CloudJobState::Blocked;
+                    job.error = Some(JobErrorRecord {
+                        code: "MISSING_PROVIDER_CREDENTIALS".to_string(),
+                        sanitized_message: format!(
+                            "Cannot cancel remote job: provider credentials unavailable: {}. Cancellation intent is preserved.",
+                            e
+                        ),
+                    });
+                    job.increment_revision();
+                    self.store.save_job_atomic(&job)?;
+                    let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+                    Ok(job)
+                }
             }
+        } else {
+            // Local cancellation prior to acknowledged remote ID
+            job.state = CloudJobState::Cancelled;
+            job.increment_revision();
+            self.store.save_job_atomic(&job)?;
+            let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+            Ok(job)
         }
-
-        job.state = CloudJobState::Cancelled;
-        job.remote_status = Some("canceled".to_string());
-        job.increment_revision();
-        self.store.save_job_atomic(&job)?;
-        let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
-
-        Ok(job)
     }
 
     // -------------------------------------------------------------------------
-    // Unblock / Resume Safe Polling on Resolved Credentials
+    // Resume Blocked Job (e.g. after credentials restored)
     // -------------------------------------------------------------------------
 
     pub async fn resume_unblock_job(
         &self,
         project_id: &str,
-        internal_job_id: &str,
+        job_id_or_internal: &str,
     ) -> Result<PersistentCloudJob, CloudProviderError> {
-        let lock = self.get_job_lock(internal_job_id);
+        let mut job = self.get_job_status(project_id, job_id_or_internal)?;
+        let lock = self.get_job_lock(&job.internal_job_id);
         let _guard = lock.lock().await;
 
-        let mut job = self.store.load_job(project_id, internal_job_id)?;
-        if job.remote_job_id.is_none() {
-            return Err(CloudProviderError::RequestInvalid(
-                "Cannot resume job without remoteJobId".to_string(),
-            ));
+        if job.state != CloudJobState::Blocked {
+            return Err(CloudProviderError::RequestInvalid(format!(
+                "Job {} is not blocked (current state: {:?})",
+                job.internal_job_id, job.state
+            )));
         }
 
-        // Verify provider is now resolvable
-        let _ = self.provider_resolver.resolve_provider(&job.provider_id)?;
+        // Check if provider is now available
+        let _provider = self.provider_resolver.resolve_provider(&job.provider_id)?;
 
-        job.state = CloudJobState::Processing;
-        job.error = None;
-        job.increment_revision();
-        self.store.save_job_atomic(&job)?;
-        let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+        if job.cancellation_requested {
+            return self
+                .cancel_cloud_generation(project_id, &job.internal_job_id)
+                .await;
+        }
 
-        self.spawn_polling_task(job.clone());
+        if job.remote_job_id.is_some() {
+            job.state = CloudJobState::Processing;
+            job.error = None;
+            job.increment_revision();
+            self.store.save_job_atomic(&job)?;
+            let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
 
-        Ok(job)
+            self.spawn_polling_task(job.clone());
+            Ok(job)
+        } else {
+            Err(CloudProviderError::RequestInvalid(format!(
+                "Job {} has no remote ID to resume",
+                job.internal_job_id
+            )))
+        }
     }
 
     // -------------------------------------------------------------------------
     // Startup Recovery
     // -------------------------------------------------------------------------
 
-    pub fn recover_startup_jobs(&self) -> Result<Vec<PersistentCloudJob>, CloudProviderError> {
+    pub async fn recover_startup_jobs(
+        &self,
+    ) -> Result<Vec<PersistentCloudJob>, CloudProviderError> {
         let active_jobs = self.store.list_all_active_jobs()?;
         let mut recovered = Vec::new();
 
         for mut job in active_jobs {
+            let lock = self.get_job_lock(&job.internal_job_id);
+            let _guard = lock.lock().await;
+
+            // Handle cancellation requested during recovery
             if job.cancellation_requested {
-                job.state = CloudJobState::Cancelled;
-                job.increment_revision();
-                let _ = self.store.save_job_atomic(&job);
-                let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
-                recovered.push(job);
-                continue;
+                if let Some(ref remote_id) = job.remote_job_id {
+                    if let Ok(provider) = self.provider_resolver.resolve_provider(&job.provider_id)
+                    {
+                        if provider.cancel_job(remote_id).await.is_ok() {
+                            job.state = CloudJobState::Cancelled;
+                            job.increment_revision();
+                            let _ = self.store.save_job_atomic(&job);
+                            let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+                            recovered.push(job);
+                            continue;
+                        }
+                    }
+                } else {
+                    job.state = CloudJobState::Cancelled;
+                    job.increment_revision();
+                    let _ = self.store.save_job_atomic(&job);
+                    let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+                    recovered.push(job);
+                    continue;
+                }
             }
 
             match job.state {
@@ -453,35 +590,24 @@ impl CloudJobLifecycleService {
                     recovered.push(job);
                 }
                 CloudJobState::Uploading => {
-                    job.state = CloudJobState::Blocked;
-                    job.error = Some(JobErrorRecord {
-                        code: "UPLOAD_INTERRUPTED".to_string(),
-                        sanitized_message: "Process restarted during upload phase".to_string(),
-                    });
+                    job.state = CloudJobState::Created;
                     job.increment_revision();
                     let _ = self.store.save_job_atomic(&job);
                     let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
                     recovered.push(job);
                 }
                 CloudJobState::Submitted | CloudJobState::Processing => {
-                    if let Some(_r_id) = &job.remote_job_id {
+                    if job.remote_job_id.is_some() {
                         match self.provider_resolver.resolve_provider(&job.provider_id) {
                             Ok(_) => {
-                                job.state = CloudJobState::Processing;
-                                job.increment_revision();
-                                let _ = self.store.save_job_atomic(&job);
                                 self.spawn_polling_task(job.clone());
                                 recovered.push(job);
                             }
-                            Err(_) => {
-                                // Missing provider credentials on restart -> safely block without deleting or resubmitting!
+                            Err(e) => {
                                 job.state = CloudJobState::Blocked;
                                 job.error = Some(JobErrorRecord {
                                     code: "MISSING_PROVIDER_CREDENTIALS".to_string(),
-                                    sanitized_message: format!(
-                                        "Provider '{}' credentials unavailable upon restart. Polling paused safely.",
-                                        job.provider_id
-                                    ),
+                                    sanitized_message: format!("{}", e),
                                 });
                                 job.increment_revision();
                                 let _ = self.store.save_job_atomic(&job);
@@ -490,7 +616,6 @@ impl CloudJobLifecycleService {
                             }
                         }
                     } else {
-                        // Submitted without remote ID -> Ambiguous
                         job.state = CloudJobState::Blocked;
                         job.submission_state = SubmissionState::Ambiguous;
                         job.error = Some(JobErrorRecord {
@@ -508,6 +633,46 @@ impl CloudJobLifecycleService {
                     recovered.push(job);
                 }
                 CloudJobState::ValidatingOutput => {
+                    // ValidatingOutput recovery does NOT require provider credentials!
+                    let partial_path = self
+                        .store
+                        .artifact_partial_path(&job.project_id, &job.internal_job_id);
+                    let final_path = self
+                        .store
+                        .artifact_final_path(&job.project_id, &job.internal_job_id);
+
+                    if let (Ok(partial), Ok(final_p)) = (partial_path, final_path) {
+                        if partial.exists() {
+                            let validator = CloudOutputValidator::new();
+                            match validator.validate_and_promote_artifact(
+                                &partial,
+                                &final_p,
+                                job.validation_policy.expected_duration_sec,
+                                job.validation_policy.require_audio,
+                            ) {
+                                Ok(record) => {
+                                    job.state = CloudJobState::Completed;
+                                    job.output = record;
+                                    job.timestamps.completed_at = Some(Utc::now().to_rfc3339());
+                                }
+                                Err(e) => {
+                                    job.state = CloudJobState::Failed;
+                                    job.error = Some(JobErrorRecord {
+                                        code: "VALIDATION_FAILED".to_string(),
+                                        sanitized_message: format!(
+                                            "Media validation failed on recovery: {}",
+                                            e
+                                        ),
+                                    });
+                                }
+                            }
+                            job.increment_revision();
+                            let _ = self.store.save_job_atomic(&job);
+                            let _ = self.event_sink.emit_job_updated(&job.to_event_payload());
+                            recovered.push(job);
+                            continue;
+                        }
+                    }
                     self.spawn_polling_task(job.clone());
                     recovered.push(job);
                 }
@@ -543,8 +708,9 @@ impl CloudJobLifecycleService {
                         sanitized_message: format!("{}", e),
                     });
                     job.increment_revision();
-                    let _ = store.save_job_atomic(&job);
-                    let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                    if store.save_job_atomic(&job).is_ok() {
+                        let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                    }
                     return;
                 }
             };
@@ -560,10 +726,12 @@ impl CloudJobLifecycleService {
             // 1. Polling Phase
             while job.state == CloudJobState::Processing || job.state == CloudJobState::Submitted {
                 if job.cancellation_requested {
+                    let _ = provider.cancel_job(&remote_id).await;
                     job.state = CloudJobState::Cancelled;
                     job.increment_revision();
-                    let _ = store.save_job_atomic(&job);
-                    let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                    if store.save_job_atomic(&job).is_ok() {
+                        let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                    }
                     return;
                 }
 
@@ -577,53 +745,55 @@ impl CloudJobLifecycleService {
                         ),
                     });
                     job.increment_revision();
-                    let _ = store.save_job_atomic(&job);
-                    let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                    if store.save_job_atomic(&job).is_ok() {
+                        let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                    }
                     return;
                 }
 
-                job.retry.poll_attempts = job.retry.poll_attempts.saturating_add(1);
-
                 match provider.poll_status(&remote_id).await {
-                    Ok(poll_resp) => {
+                    Ok(resp) => {
                         consecutive_errors = 0;
-                        job.remote_status = Some(format!("{:?}", poll_resp.status));
-                        if let Some(url) = poll_resp.output_url {
-                            job.output_url = Some(url);
-                        }
+                        job.retry.poll_attempts = job.retry.poll_attempts.saturating_add(1);
+                        job.remote_status = Some(format!("{:?}", resp.status).to_lowercase());
 
-                        match poll_resp.status {
+                        match resp.status {
                             RemoteStatus::Starting | RemoteStatus::Processing => {
                                 job.state = CloudJobState::Processing;
                                 job.increment_revision();
-                                let _ = store.save_job_atomic(&job);
-                                let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                                if store.save_job_atomic(&job).is_ok() {
+                                    let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                                }
                             }
                             RemoteStatus::Succeeded => {
                                 job.state = CloudJobState::Downloading;
+                                job.output_url = resp.output_url.clone();
                                 job.increment_revision();
-                                let _ = store.save_job_atomic(&job);
-                                let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                                if store.save_job_atomic(&job).is_ok() {
+                                    let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                                }
                                 break;
                             }
                             RemoteStatus::Failed => {
                                 job.state = CloudJobState::Failed;
                                 job.error = Some(JobErrorRecord {
                                     code: "PROVIDER_EXECUTION_FAILED".to_string(),
-                                    sanitized_message: poll_resp
-                                        .error
-                                        .unwrap_or_else(|| "Provider job failed".to_string()),
+                                    sanitized_message: resp.error.unwrap_or_else(|| {
+                                        "Remote execution failed without error detail".to_string()
+                                    }),
                                 });
                                 job.increment_revision();
-                                let _ = store.save_job_atomic(&job);
-                                let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                                if store.save_job_atomic(&job).is_ok() {
+                                    let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                                }
                                 return;
                             }
                             RemoteStatus::Canceled => {
                                 job.state = CloudJobState::Cancelled;
                                 job.increment_revision();
-                                let _ = store.save_job_atomic(&job);
-                                let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                                if store.save_job_atomic(&job).is_ok() {
+                                    let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                                }
                                 return;
                             }
                         }
@@ -633,12 +803,16 @@ impl CloudJobLifecycleService {
                         if consecutive_errors >= timing.max_consecutive_poll_errors {
                             job.state = CloudJobState::Failed;
                             job.error = Some(JobErrorRecord {
-                                code: "POLL_ERROR_LIMIT".to_string(),
-                                sanitized_message: format!("Consecutive polling errors: {}", e),
+                                code: "POLL_CONSECUTIVE_ERRORS".to_string(),
+                                sanitized_message: format!(
+                                    "Failed after {} consecutive polling network errors: {}",
+                                    consecutive_errors, e
+                                ),
                             });
                             job.increment_revision();
-                            let _ = store.save_job_atomic(&job);
-                            let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                            if store.save_job_atomic(&job).is_ok() {
+                                let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                            }
                             return;
                         }
                     }
@@ -649,6 +823,23 @@ impl CloudJobLifecycleService {
 
             // 2. Download Phase
             if job.state == CloudJobState::Downloading {
+                let output_url = match &job.output_url {
+                    Some(u) => u.clone(),
+                    None => {
+                        job.state = CloudJobState::Failed;
+                        job.error = Some(JobErrorRecord {
+                            code: "MISSING_OUTPUT_URL".to_string(),
+                            sanitized_message:
+                                "Provider reported success but output URL was missing".to_string(),
+                        });
+                        job.increment_revision();
+                        if store.save_job_atomic(&job).is_ok() {
+                            let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                        }
+                        return;
+                    }
+                };
+
                 let partial_path =
                     match store.artifact_partial_path(&job.project_id, &job.internal_job_id) {
                         Ok(p) => p,
@@ -659,28 +850,24 @@ impl CloudJobLifecycleService {
                                 sanitized_message: format!("{}", e),
                             });
                             job.increment_revision();
-                            let _ = store.save_job_atomic(&job);
-                            let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                            if store.save_job_atomic(&job).is_ok() {
+                                let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                            }
                             return;
                         }
                     };
 
-                let output_url = job.output_url.clone().unwrap_or_default();
                 let mut download_success = false;
-
-                while job.retry.download_attempts < timing.max_download_attempts {
-                    job.retry.download_attempts = job.retry.download_attempts.saturating_add(1);
-                    job.increment_revision();
-                    let _ = store.save_job_atomic(&job);
-
+                for attempt in 1..=timing.max_download_attempts {
+                    job.retry.download_attempts = attempt;
                     match provider.download_result(&output_url, &partial_path).await {
                         Ok(_) => {
                             download_success = true;
                             break;
                         }
-                        Err(_) => {
-                            tokio::time::sleep(Duration::from_millis(timing.poll_interval_ms))
-                                .await;
+                        Err(_e) => {
+                            let _ = std::fs::remove_file(&partial_path);
+                            tokio::time::sleep(Duration::from_millis(50 * (attempt as u64))).await;
                         }
                     }
                 }
@@ -695,15 +882,17 @@ impl CloudJobLifecycleService {
                         ),
                     });
                     job.increment_revision();
-                    let _ = store.save_job_atomic(&job);
-                    let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                    if store.save_job_atomic(&job).is_ok() {
+                        let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                    }
                     return;
                 }
 
                 job.state = CloudJobState::ValidatingOutput;
                 job.increment_revision();
-                let _ = store.save_job_atomic(&job);
-                let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                if store.save_job_atomic(&job).is_ok() {
+                    let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                }
             }
 
             // 3. Validation & Promotion Phase
@@ -718,8 +907,9 @@ impl CloudJobLifecycleService {
                                 sanitized_message: format!("{}", e),
                             });
                             job.increment_revision();
-                            let _ = store.save_job_atomic(&job);
-                            let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                            if store.save_job_atomic(&job).is_ok() {
+                                let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                            }
                             return;
                         }
                     };
@@ -734,8 +924,9 @@ impl CloudJobLifecycleService {
                                 sanitized_message: format!("{}", e),
                             });
                             job.increment_revision();
-                            let _ = store.save_job_atomic(&job);
-                            let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                            if store.save_job_atomic(&job).is_ok() {
+                                let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                            }
                             return;
                         }
                     };
@@ -744,16 +935,17 @@ impl CloudJobLifecycleService {
                 match validator.validate_and_promote_artifact(
                     &partial_path,
                     &final_path,
-                    None,
-                    false,
+                    job.validation_policy.expected_duration_sec,
+                    job.validation_policy.require_audio,
                 ) {
                     Ok(artifact_record) => {
-                        job.output = artifact_record;
                         job.state = CloudJobState::Completed;
+                        job.output = artifact_record;
                         job.timestamps.completed_at = Some(Utc::now().to_rfc3339());
                         job.increment_revision();
-                        let _ = store.save_job_atomic(&job);
-                        let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                        if store.save_job_atomic(&job).is_ok() {
+                            let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                        }
                     }
                     Err(e) => {
                         job.state = CloudJobState::Failed;
@@ -762,8 +954,9 @@ impl CloudJobLifecycleService {
                             sanitized_message: format!("Media validation failed: {}", e),
                         });
                         job.increment_revision();
-                        let _ = store.save_job_atomic(&job);
-                        let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                        if store.save_job_atomic(&job).is_ok() {
+                            let _ = event_sink.emit_job_updated(&job.to_event_payload());
+                        }
                     }
                 }
             }

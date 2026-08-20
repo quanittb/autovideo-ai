@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 // -----------------------------------------------------------------------------
 
 #[cfg(windows)]
-fn atomic_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub fn atomic_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
 
@@ -42,7 +42,7 @@ fn atomic_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn atomic_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub fn atomic_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::rename(src, dst)
 }
 
@@ -345,5 +345,19 @@ impl PersistentCloudJobStore {
             }
         }
         Ok(active_jobs)
+    }
+
+    pub fn find_job_by_client_request_id(
+        &self,
+        project_id: &str,
+        client_request_id: &str,
+    ) -> Result<Option<PersistentCloudJob>, CloudProviderError> {
+        let jobs = self.list_jobs_in_project(project_id)?;
+        for job in jobs {
+            if job.job_id == client_request_id || job.internal_job_id == client_request_id {
+                return Ok(Some(job));
+            }
+        }
+        Ok(None)
     }
 }

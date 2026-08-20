@@ -17,6 +17,37 @@ pub struct ValidatedSubmissionPlan {
     pub provider_id: String,
 }
 
+pub trait CloudSubmissionGate: Send + Sync {
+    fn validate_and_prepare(
+        &self,
+        request: &CloudJobRequest,
+        max_cost: Option<f64>,
+        cloud_provider: &dyn CloudVideoProvider,
+        registry: &ProviderRegistry,
+    ) -> Result<ValidatedSubmissionPlan, CloudProviderError>;
+}
+
+#[derive(Default, Clone)]
+pub struct DefaultCloudSubmissionGate;
+
+impl DefaultCloudSubmissionGate {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl CloudSubmissionGate for DefaultCloudSubmissionGate {
+    fn validate_and_prepare(
+        &self,
+        request: &CloudJobRequest,
+        max_cost: Option<f64>,
+        cloud_provider: &dyn CloudVideoProvider,
+        registry: &ProviderRegistry,
+    ) -> Result<ValidatedSubmissionPlan, CloudProviderError> {
+        validate_and_prepare_cloud_submission(request, max_cost, cloud_provider, registry)
+    }
+}
+
 pub fn validate_and_prepare_cloud_submission(
     request: &CloudJobRequest,
     max_cost: Option<f64>,
@@ -32,10 +63,10 @@ pub fn validate_and_prepare_cloud_submission(
     // 2. Determine real TaskClass
     let task_class = TaskClass::from_str_or_default(&request.task_type);
 
-    // 3. Obtain routing decision through single GenerationRouter & ProviderRegistry
+    // 3. Obtain routing decision through single GenerationRouter & ProviderRegistry with COST_SAVING policy
     let decision = GenerationRouter::route_with_registry(
         task_class,
-        RoutingPreference::Quality,
+        RoutingPreference::CostSaving,
         request,
         cloud_provider,
         None,

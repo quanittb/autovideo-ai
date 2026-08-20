@@ -103,13 +103,12 @@ impl CloudOutputValidator {
         // Check duration tolerance if expected duration is provided
         if let Some(exp_dur) = expected_duration_sec {
             if exp_dur > 0.0 {
-                // Allow generous bounds (min 0.5s or up to 3x) for MVP transformations
-                let min_acceptable = (exp_dur * 0.4).max(0.5);
-                let max_acceptable = (exp_dur * 2.5).max(60.0);
+                let min_acceptable = (exp_dur * 0.8).max(0.1);
+                let max_acceptable = exp_dur * 1.2;
                 if duration_sec < min_acceptable || duration_sec > max_acceptable {
                     return Err(CloudProviderError::ProviderUnavailable(format!(
-                        "Artifact duration {:.2}s exceeds tolerance for requested duration {:.2}s",
-                        duration_sec, exp_dur
+                        "Artifact duration {:.2}s exceeds tolerance bounds [{:.2}s, {:.2}s] for requested duration {:.2}s",
+                        duration_sec, min_acceptable, max_acceptable, exp_dur
                     )));
                 }
             }
@@ -125,18 +124,14 @@ impl CloudOutputValidator {
         // 3. Compute SHA256 hash
         let artifact_hash = Self::compute_file_sha256(partial_path)?;
 
-        // 4. Atomic promotion: partial -> final
+        // 4. Atomic promotion: partial -> final using atomic replace
         if let Some(parent) = final_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
 
-        if final_path.exists() {
-            let _ = fs::remove_file(final_path);
-        }
-
-        fs::rename(partial_path, final_path).map_err(|e| {
+        super::store::atomic_replace(partial_path, final_path).map_err(|e| {
             CloudProviderError::ProviderUnavailable(format!(
-                "Failed to promote {} to final artifact {}: {}",
+                "Failed to atomically promote {} to final artifact {}: {}",
                 partial_path.display(),
                 final_path.display(),
                 e

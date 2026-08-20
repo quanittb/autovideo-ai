@@ -236,6 +236,15 @@ impl Default for JobTimestamps {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationPolicy {
+    #[serde(default)]
+    pub expected_duration_sec: Option<f64>,
+    #[serde(default)]
+    pub require_audio: bool,
+}
+
 // -----------------------------------------------------------------------------
 // 4. Primary Persistent Record: PersistentCloudJob
 // -----------------------------------------------------------------------------
@@ -284,6 +293,9 @@ pub struct PersistentCloudJob {
     pub remote_status: Option<String>,
     #[serde(default)]
     pub output_url: Option<String>,
+
+    #[serde(default)]
+    pub validation_policy: ValidationPolicy,
 }
 
 fn default_schema_version() -> u32 {
@@ -333,6 +345,7 @@ impl PersistentCloudJob {
             progress_pct: None,
             remote_status: None,
             output_url: None,
+            validation_policy: ValidationPolicy::default(),
         }
     }
 
@@ -492,10 +505,12 @@ pub struct CloudJobResult {
     pub metadata_json_path: PathBuf,
 }
 
+#[deprecated(note = "Superseded by PersistentCloudJobStore and CloudJobLifecycleService")]
 pub struct CloudJobManager {
     jobs: RwLock<HashMap<String, CloudJobStatus>>,
 }
 
+#[allow(deprecated)]
 impl CloudJobManager {
     pub fn new() -> Self {
         Self {

@@ -15,22 +15,38 @@ use commands::*;
 use jobs::JobEngine;
 use std::sync::Arc;
 use system::StoragePaths;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Perform startup recovery on interrupted jobs
+    // Perform startup recovery on interrupted pipeline jobs
     let storage_paths = StoragePaths::default_paths();
     let engine = JobEngine::new(storage_paths.clone());
     let _ = engine.recover_interrupted_jobs();
 
-    // Perform startup recovery on non-terminal cloud jobs
-    let cloud_lifecycle = Arc::new(crate::ai::cloud::CloudJobLifecycleService::with_defaults(
-        storage_paths.clone(),
-    ));
-    let _ = cloud_lifecycle.recover_startup_jobs();
-
     tauri::Builder::default()
-        .manage(cloud_lifecycle)
+        .setup(|app| {
+            let handle = app.handle().clone();
+            let storage_paths = StoragePaths::default_paths();
+            let event_sink = Arc::new(crate::ai::cloud::TauriEventSink::new(handle));
+            let resolver = Arc::new(crate::ai::cloud::DefaultCloudProviderResolver::new());
+            let submission_gate = Arc::new(crate::ai::cloud::DefaultCloudSubmissionGate::new());
+            let lifecycle = Arc::new(crate::ai::cloud::CloudJobLifecycleService::new(
+                storage_paths,
+                resolver,
+                event_sink,
+                submission_gate,
+                crate::ai::cloud::LifecycleTimingConfig::production(),
+            ));
+
+            app.manage(lifecycle.clone());
+
+            tauri::async_runtime::spawn(async move {
+                let _ = lifecycle.recover_startup_jobs().await;
+            });
+
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![

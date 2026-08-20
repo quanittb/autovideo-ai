@@ -30,7 +30,15 @@ impl CloudProviderResolver for DefaultCloudProviderResolver {
         provider_id: &str,
     ) -> Result<Arc<dyn CloudVideoProvider>, CloudProviderError> {
         match provider_id {
-            "replicate" => Ok(Arc::new(ReplicateProvider::new())),
+            "replicate" => {
+                let provider = ReplicateProvider::new();
+                if !provider.is_configured() {
+                    return Err(CloudProviderError::ProviderUnavailable(
+                        "MISSING_PROVIDER_CREDENTIALS: REPLICATE_API_TOKEN environment variable is not configured".to_string(),
+                    ));
+                }
+                Ok(Arc::new(provider))
+            }
             other => Err(CloudProviderError::ProviderUnavailable(format!(
                 "Provider '{}' not supported or missing executable adapter",
                 other

@@ -4,7 +4,6 @@ use std::process::Command as StdCommand;
 use std::sync::Arc;
 use tauri::{command, AppHandle, Emitter};
 
-use crate::ai::cloud::CloudVideoProvider;
 use crate::ai::generative::backend::GenerativeBackend;
 use crate::ai::runtime::AiRuntime;
 use crate::error::AppError;

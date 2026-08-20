@@ -1,9 +1,11 @@
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
+    use crate::ai::cloud::job::CloudJobManager;
     use crate::ai::cloud::{
-        validate_and_prepare_cloud_submission, CloudJobManager, CloudJobRequest, CloudJobState,
-        CloudJobStatus, CloudProviderError, CloudVideoProvider, CostBreakdown, CostConfidence,
-        CostEstimate, CostGuard, CostStatus, LatencyTelemetry, ProviderRegistry, ReplicateProvider,
+        validate_and_prepare_cloud_submission, CloudJobRequest, CloudJobState, CloudJobStatus,
+        CloudProviderError, CloudVideoProvider, CostBreakdown, CostConfidence, CostEstimate,
+        CostGuard, CostStatus, LatencyTelemetry, ProviderRegistry, ReplicateProvider,
         SegmentPlanner,
     };
     use std::path::PathBuf;
