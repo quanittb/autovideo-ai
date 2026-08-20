@@ -148,9 +148,9 @@ impl CostGuard {
     }
 
     pub fn validate_budget(budget: f64) -> Result<f64, CloudProviderError> {
-        if budget.is_nan() || budget.is_infinite() || budget < 0.0 {
+        if budget.is_nan() || budget.is_infinite() || budget < 0.01 || budget > 1000.00 {
             return Err(CloudProviderError::RequestInvalid(format!(
-                "Invalid budget value: {} (must be a finite, non-negative number)",
+                "INVALID_BUDGET: {} (must be between $0.01 and $1000.00)",
                 budget
             )));
         }
@@ -160,7 +160,7 @@ impl CostGuard {
     pub fn check(&self, estimate: &CostEstimate) -> Result<(), CloudProviderError> {
         if estimate.status == CostConfidence::Unknown || estimate.estimated_usd.is_none() {
             return Err(CloudProviderError::RequestInvalid(
-                "Unknown cost estimate cannot be auto-submitted. Budget verification requires explicit pricing."
+                "COST_UNKNOWN: Unknown cost estimate cannot be auto-submitted. Budget verification requires explicit pricing."
                     .to_string(),
             ));
         }
@@ -179,7 +179,7 @@ impl CostGuard {
     pub fn check_breakdown(&self, breakdown: &CostBreakdown) -> Result<(), CloudProviderError> {
         if breakdown.confidence == CostConfidence::Unknown || breakdown.total_usd.is_none() {
             return Err(CloudProviderError::RequestInvalid(
-                "Unknown cost breakdown cannot be auto-submitted. Budget verification requires explicit pricing."
+                "COST_UNKNOWN: Unknown cost breakdown cannot be auto-submitted. Budget verification requires explicit pricing."
                     .to_string(),
             ));
         }

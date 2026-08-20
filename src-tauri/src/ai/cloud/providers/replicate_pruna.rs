@@ -133,7 +133,7 @@ impl CloudVideoProvider for PrunaPVideoReplaceProvider {
             supports_reference_image: true,
             supports_character_reference: true,
             supports_audio: true,
-            max_duration_sec: 300.0,
+            max_duration_sec: None,
             supported_resolutions: vec![
                 (576, 1024),
                 (720, 1280),
@@ -198,59 +198,12 @@ impl CloudVideoProvider for PrunaPVideoReplaceProvider {
 
     fn submit_job(
         &self,
-        request: &CloudJobRequest,
+        _request: &CloudJobRequest,
     ) -> Pin<Box<dyn Future<Output = Result<CloudJobHandle, CloudProviderError>> + Send + '_>> {
-        // Build mock prepared submission from request for direct compatibility
-        let source_video = request
-            .source_video
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("mock_source.mp4"));
-        let reference_images = request.get_reference_images();
-        let prompt = if request.prompt.trim().is_empty() {
-            None
-        } else {
-            Some(request.prompt.clone())
-        };
-
-        let spec = crate::ai::cloud::spec::ProviderSubmissionSpec {
-            provider_key: crate::ai::cloud::provider::ProviderKey::new(
-                self.provider_id(),
-                self.model_id(),
-            ),
-            source_video: source_video.clone(),
-            reference_images: if reference_images.is_empty() {
-                vec![PathBuf::from("mock_ref.jpg")]
-            } else {
-                reference_images
-            },
-            instruction_prompt: prompt,
-            resolution_tier: ResolutionTier::from_dimensions(request.resolution)
-                .unwrap_or(ResolutionTier::P720),
-            target_fps: crate::ai::cloud::provider::TargetFps::from_f64(request.fps),
-            save_audio: true,
-            ignore_audio: false,
-            turbo: false,
-            disable_safety_checker: false,
-            seed: None,
-        };
-
-        let prepared = PreparedProviderSubmission {
-            spec,
-            uploaded_source: crate::ai::cloud::uploader::UploadedAsset {
-                provider_file_id: Some("mock_source_id".to_string()),
-                input_uri: "https://replicate.delivery/mock_uploads/source.mp4".to_string(),
-                expires_at: None,
-                checksum: None,
-            },
-            uploaded_references: vec![crate::ai::cloud::uploader::UploadedAsset {
-                provider_file_id: Some("mock_ref_id".to_string()),
-                input_uri: "https://replicate.delivery/mock_uploads/ref.jpg".to_string(),
-                expires_at: None,
-                checksum: None,
-            }],
-        };
-
-        self.create_prediction(&prepared)
+        let err = CloudProviderError::OperationUnsupported(
+            "RAW_SUBMISSION_UNSUPPORTED: Pruna provider requires PreparedProviderSubmission via create_prediction".to_string(),
+        );
+        Box::pin(async move { Err(err) })
     }
 
     fn create_prediction(

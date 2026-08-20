@@ -233,7 +233,7 @@ mod tests {
                 supports_reference_image: true,
                 supports_character_reference: true,
                 supports_audio: true,
-                max_duration_sec: 300.0,
+                max_duration_sec: None,
                 supported_resolutions: vec![(720, 1280), (1080, 1920)],
                 estimated_cost_per_second: Some(0.03),
             }
@@ -1672,5 +1672,263 @@ mod tests {
         // Pruna is the specialized CharacterReplacement model (not MiniMax generic video-01)
         assert_eq!(dec.provider_id, "replicate");
         assert_eq!(dec.model_id, "prunaai/p-video-replace");
+    }
+
+    // -------------------------------------------------------------------------
+    // HARDENING TESTS (AUDIT CLOSEOUT)
+    // -------------------------------------------------------------------------
+
+    struct MinimalGenericProvider;
+    impl CloudVideoProvider for MinimalGenericProvider {
+        fn provider_id(&self) -> &str {
+            "generic"
+        }
+        fn model_id(&self) -> &str {
+            "generic_model"
+        }
+        fn provider_name(&self) -> &str {
+            "Generic Provider"
+        }
+        fn is_configured(&self) -> bool {
+            true
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                supports_text_to_video: false,
+                supports_image_to_video: false,
+                supports_video_to_video: false,
+                supports_reference_image: false,
+                supports_character_reference: false,
+                supports_audio: false,
+                max_duration_sec: None,
+                supported_resolutions: vec![],
+                estimated_cost_per_second: None,
+            }
+        }
+        fn estimate_cost(&self, _req: &CloudJobRequest) -> CostEstimate {
+            CostEstimate::default()
+        }
+        fn submit_job(
+            &self,
+            _req: &CloudJobRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<CloudJobHandle, CloudProviderError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async {
+                Err(CloudProviderError::OperationUnsupported(
+                    "RAW_SUBMISSION_UNSUPPORTED".to_string(),
+                ))
+            })
+        }
+        fn poll_status(
+            &self,
+            _remote_id: &str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<RemotePollResponse, CloudProviderError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async {
+                Err(CloudProviderError::OperationUnsupported(
+                    "POLL_UNSUPPORTED".to_string(),
+                ))
+            })
+        }
+        fn cancel_job(
+            &self,
+            _remote_id: &str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), CloudProviderError>> + Send + '_>,
+        > {
+            Box::pin(async { Ok(()) })
+        }
+        fn download_result(
+            &self,
+            _output_url: &str,
+            target_path: &Path,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<PathBuf, CloudProviderError>> + Send + '_>,
+        > {
+            let path = target_path.to_path_buf();
+            Box::pin(async move { Ok(path) })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_phase16_36_generic_create_prediction_fails_closed_zero_fabrication() {
+        let provider = MinimalGenericProvider;
+        let prepared = PreparedProviderSubmission {
+            spec: ProviderSubmissionSpec {
+                provider_key: ProviderKey::new("generic", "generic_model"),
+                source_video: PathBuf::from("dummy.mp4"),
+                reference_images: vec![PathBuf::from("ref.jpg")],
+                instruction_prompt: None,
+                resolution_tier: ResolutionTier::P720,
+                target_fps: TargetFps::Original,
+                save_audio: true,
+                ignore_audio: false,
+                turbo: false,
+                disable_safety_checker: false,
+                seed: None,
+            },
+            uploaded_source: UploadedAsset {
+                provider_file_id: None,
+                input_uri: "https://replicate.delivery/source.mp4".to_string(),
+                expires_at: None,
+                checksum: None,
+            },
+            uploaded_references: vec![UploadedAsset {
+                provider_file_id: None,
+                input_uri: "https://replicate.delivery/ref.jpg".to_string(),
+                expires_at: None,
+                checksum: None,
+            }],
+        };
+
+        let res = provider.create_prediction(&prepared).await;
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.unwrap_err());
+        assert!(err_msg.contains("PREPARED_SUBMISSION_UNSUPPORTED"));
+        assert!(!err_msg.contains("CHARACTER_REPLACEMENT"));
+    }
+
+    #[tokio::test]
+    async fn test_phase16_37_pruna_raw_submit_job_fails_closed_zero_network() {
+        let provider = PrunaPVideoReplaceProvider::with_policy(
+            Some("dummy_token".to_string()),
+            Arc::new(MockLiveExecutionPolicy::new(true)),
+        );
+        let raw_req = CloudJobRequest {
+            job_id: "raw_req".to_string(),
+            project_id: None,
+            prompt: "raw submit".to_string(),
+            negative_prompt: None,
+            source_video: Some(PathBuf::from("test.mp4")),
+            reference_image: Some(PathBuf::from("ref.jpg")),
+            reference_images: None,
+            duration_seconds: 5.0,
+            fps: 24.0,
+            resolution: (720, 1280),
+            task_type: "CHARACTER_REPLACEMENT".to_string(),
+        };
+
+        let res = provider.submit_job(&raw_req).await;
+        assert!(res.is_err());
+        let err_msg = format!("{}", res.unwrap_err());
+        assert!(err_msg.contains("RAW_SUBMISSION_UNSUPPORTED"));
+    }
+
+    #[test]
+    fn test_phase16_38_truthful_capabilities_unknown_max_duration() {
+        let provider = PrunaPVideoReplaceProvider::new();
+        assert_eq!(provider.capabilities().max_duration_sec, None);
+
+        let registry = ProviderRegistry::new();
+        let record = registry
+            .find("replicate", "prunaai/p-video-replace")
+            .unwrap();
+        assert_eq!(record.capabilities.max_duration_sec, None);
+        assert_eq!(record.max_duration_sec, None);
+    }
+
+    #[test]
+    fn test_phase16_39_original_fps_preserves_source_framerate() {
+        assert_eq!(TargetFps::from_f64(30.0), TargetFps::Original);
+        assert_eq!(TargetFps::from_f64(29.97), TargetFps::Original);
+        assert_eq!(TargetFps::from_f64(25.0), TargetFps::Original);
+        assert_eq!(TargetFps::from_f64(50.0), TargetFps::Original);
+        assert_eq!(TargetFps::from_f64(59.94), TargetFps::Original);
+        assert_eq!(TargetFps::from_f64(60.0), TargetFps::Original);
+        assert_eq!(TargetFps::from_f64(24.0), TargetFps::Fps24);
+        assert_eq!(TargetFps::from_f64(48.0), TargetFps::Fps48);
+
+        // Router routes 30fps source video successfully to Pruna via supports_original_fps
+        let registry = ProviderRegistry::new();
+        let req = CloudJobRequest {
+            job_id: "req_30fps".to_string(),
+            project_id: None,
+            prompt: "Replace actor".to_string(),
+            negative_prompt: None,
+            source_video: Some(PathBuf::from("src.mp4")),
+            reference_image: Some(PathBuf::from("ref.jpg")),
+            reference_images: None,
+            duration_seconds: 5.0,
+            fps: 30.0,
+            resolution: (720, 1280),
+            task_type: "CHARACTER_REPLACEMENT".to_string(),
+        };
+
+        let dec = GenerationRouter::route_with_registry(
+            TaskClass::CharacterReplacement,
+            RoutingPreference::CostSaving,
+            &req,
+            None,
+            &registry,
+        );
+
+        assert_eq!(dec.target, RoutingTarget::Cloud);
+        assert_eq!(dec.model_id, "prunaai/p-video-replace");
+    }
+
+    #[test]
+    fn test_phase16_40_unsupported_target_fps_not_claimed_as_generated_option() {
+        let registry = ProviderRegistry::new();
+        let record = registry
+            .find("replicate", "prunaai/p-video-replace")
+            .unwrap();
+        // Pruna only claims explicit target overrides 24 and 48
+        assert_eq!(record.supported_fps, vec![24.0, 48.0]);
+        assert!(!record.supported_fps.contains(&30.0));
+        assert!(!record.supported_fps.contains(&60.0));
+    }
+
+    #[test]
+    fn test_phase16_41_explicit_resolution_tier_mapping_and_no_arbitrary_thresholds() {
+        // Valid presets map cleanly
+        assert_eq!(
+            ResolutionTier::from_dimensions((720, 1280)).unwrap(),
+            ResolutionTier::P720
+        );
+        assert_eq!(
+            ResolutionTier::from_dimensions((1280, 720)).unwrap(),
+            ResolutionTier::P720
+        );
+        assert_eq!(
+            ResolutionTier::from_dimensions((576, 1024)).unwrap(),
+            ResolutionTier::P720
+        );
+        assert_eq!(
+            ResolutionTier::from_dimensions((512, 512)).unwrap(),
+            ResolutionTier::P720
+        );
+        assert_eq!(
+            ResolutionTier::from_dimensions((1080, 1920)).unwrap(),
+            ResolutionTier::P1080
+        );
+        assert_eq!(
+            ResolutionTier::from_dimensions((1920, 1080)).unwrap(),
+            ResolutionTier::P1080
+        );
+        assert_eq!(
+            ResolutionTier::from_dimensions((1080, 1080)).unwrap(),
+            ResolutionTier::P1080
+        );
+
+        // Arbitrary unmapped dimensions FAIL closed instead of guessing
+        assert!(ResolutionTier::from_dimensions((123, 456)).is_err());
+        assert!(ResolutionTier::from_dimensions((9999, 9999)).is_err());
+        assert!(ResolutionTier::from_dimensions((0, 720)).is_err());
+        assert!(ResolutionTier::from_dimensions((720, 0)).is_err());
+        let err_msg = format!(
+            "{}",
+            ResolutionTier::from_dimensions((123, 456)).unwrap_err()
+        );
+        assert!(err_msg.contains("UNSUPPORTED_RESOLUTION_PRESET"));
     }
 }

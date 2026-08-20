@@ -471,6 +471,9 @@ impl GenerationRouter {
     }
 
     fn check_fps_supported(record: &ProviderRecord, fps: f64) -> bool {
+        if record.supports_original_fps {
+            return true;
+        }
         if record.supported_fps.is_empty() {
             return true;
         }
@@ -499,13 +502,14 @@ impl GenerationRouter {
                     supports_reference_image: false,
                     supports_character_reference: false,
                     supports_audio: true,
-                    max_duration_sec: 3600.0,
+                    max_duration_sec: None,
                     supported_resolutions: vec![],
                     estimated_cost_per_second: Some(0.0),
                 },
                 max_duration_sec: None,
                 supported_resolutions: vec![],
                 supported_fps: vec![],
+                supports_original_fps: true,
                 pricing_unit: PricingUnit::FreeLocal,
                 pricing_amount: Some(0.0),
                 pricing_tiers: vec![],

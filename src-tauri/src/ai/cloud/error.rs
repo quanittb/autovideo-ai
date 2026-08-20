@@ -14,6 +14,7 @@ pub enum CloudProviderError {
     NetworkError(String),
     SecurityViolation(String),
     ProtocolViolation(String),
+    OperationUnsupported(String),
     Other(String),
 }
 
@@ -30,12 +31,13 @@ impl std::fmt::Display for CloudProviderError {
             Self::OutputInvalid(s) => write!(f, "CLOUD_OUTPUT_INVALID: {}", s),
             Self::CostLimitExceeded { estimated, limit } => write!(
                 f,
-                "CLOUD_COST_LIMIT_EXCEEDED: estimated ${:.2} exceeds limit ${:.2}",
+                "CLOUD_COST_LIMIT_EXCEEDED (BUDGET_EXCEEDED): estimated ${:.2} exceeds limit ${:.2}",
                 estimated, limit
             ),
             Self::NetworkError(s) => write!(f, "CLOUD_NETWORK_ERROR: {}", s),
             Self::SecurityViolation(s) => write!(f, "CLOUD_SECURITY_VIOLATION: {}", s),
             Self::ProtocolViolation(s) => write!(f, "CLOUD_PROTOCOL_VIOLATION: {}", s),
+            Self::OperationUnsupported(s) => write!(f, "CLOUD_OPERATION_UNSUPPORTED: {}", s),
             Self::Other(s) => write!(f, "CLOUD_ERROR: {}", s),
         }
     }

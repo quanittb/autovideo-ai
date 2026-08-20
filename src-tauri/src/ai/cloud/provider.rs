@@ -40,17 +40,42 @@ impl ResolutionTier {
         }
     }
 
+    /// Explicit mapping of known AutoVideo AI application presets to provider resolution tiers.
+    /// Does not guess or use arbitrary unbounded thresholds.
     pub fn from_dimensions(res: (u32, u32)) -> Result<Self, CloudProviderError> {
-        let max_dim = res.0.max(res.1);
-        if max_dim <= 1280 {
-            Ok(Self::P720)
-        } else if max_dim <= 1920 {
-            Ok(Self::P1080)
-        } else {
-            Err(CloudProviderError::RequestInvalid(format!(
-                "Requested resolution {:?} exceeds maximum supported 1080p tier",
+        let (w, h) = res;
+        if w == 0 || h == 0 {
+            return Err(CloudProviderError::RequestInvalid(format!(
+                "INVALID_RESOLUTION: Dimensions {:?} contain zero",
                 res
-            )))
+            )));
+        }
+
+        match (w, h) {
+            // 720p Tier presets (~1 Megapixel)
+            (720, 1280)
+            | (1280, 720)
+            | (576, 1024)
+            | (1024, 576)
+            | (512, 512)
+            | (640, 640)
+            | (720, 720)
+            | (720, 960)
+            | (960, 720)
+            | (288, 512)
+            | (512, 288)
+            | (320, 240)
+            | (240, 320) => Ok(Self::P720),
+
+            // 1080p Tier presets (~2 Megapixels)
+            (1080, 1920) | (1920, 1080) | (1080, 1080) | (1080, 1440) | (1440, 1080) => {
+                Ok(Self::P1080)
+            }
+
+            _ => Err(CloudProviderError::RequestInvalid(format!(
+                "UNSUPPORTED_RESOLUTION_PRESET: Resolution {}x{} is not a recognized AutoVideo AI resolution preset for cloud transformation (must match explicit 720p or 1080p presets)",
+                w, h
+            ))),
         }
     }
 }
@@ -58,6 +83,7 @@ impl ResolutionTier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TargetFps {
+    #[serde(alias = "original", alias = "ORIGINAL")]
     Original,
     #[serde(alias = "24")]
     Fps24,
@@ -80,7 +106,20 @@ impl TargetFps {
         } else if (fps - 48.0).abs() < 0.5 {
             Self::Fps48
         } else {
+            // Source framerates such as 25, 29.97, 30, 50, 60 map to Original to preserve the source framerate
             Self::Original
+        }
+    }
+
+    pub fn is_explicit_target(&self) -> bool {
+        !matches!(self, Self::Original)
+    }
+
+    pub fn explicit_target_fps(&self) -> Option<u32> {
+        match self {
+            Self::Original => None,
+            Self::Fps24 => Some(24),
+            Self::Fps48 => Some(48),
         }
     }
 }
@@ -93,7 +132,8 @@ pub struct ProviderCapabilities {
     pub supports_reference_image: bool,
     pub supports_character_reference: bool,
     pub supports_audio: bool,
-    pub max_duration_sec: f64,
+    #[serde(default)]
+    pub max_duration_sec: Option<f64>,
     pub supported_resolutions: Vec<(u32, u32)>,
     pub estimated_cost_per_second: Option<f64>,
 }
@@ -143,25 +183,14 @@ pub trait CloudVideoProvider: Send + Sync {
 
     fn create_prediction(
         &self,
-        prepared: &PreparedProviderSubmission,
+        _prepared: &PreparedProviderSubmission,
     ) -> Pin<Box<dyn Future<Output = Result<CloudJobHandle, CloudProviderError>> + Send + '_>> {
-        // Default adapter bridge for providers that do not implement create_prediction directly
-        let prompt = prepared.spec.instruction_prompt.clone().unwrap_or_default();
-        let job_id = format!("job-{}", uuid::Uuid::new_v4());
-        let req = CloudJobRequest {
-            job_id,
-            project_id: None,
-            prompt,
-            negative_prompt: None,
-            source_video: Some(prepared.spec.source_video.clone()),
-            reference_image: prepared.spec.reference_images.first().cloned(),
-            reference_images: Some(prepared.spec.reference_images.clone()),
-            duration_seconds: 6.0,
-            fps: 24.0,
-            resolution: (720, 1280),
-            task_type: "CHARACTER_REPLACEMENT".to_string(),
-        };
-        self.submit_job(&req)
+        let err = CloudProviderError::OperationUnsupported(format!(
+            "PREPARED_SUBMISSION_UNSUPPORTED: Provider {}/{} does not implement prepared prediction creation",
+            self.provider_id(),
+            self.model_id()
+        ));
+        Box::pin(async move { Err(err) })
     }
 
     fn poll_status(

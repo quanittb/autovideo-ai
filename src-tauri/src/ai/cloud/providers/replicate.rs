@@ -74,7 +74,7 @@ impl CloudVideoProvider for ReplicateProvider {
             supports_reference_image: false,
             supports_character_reference: false,
             supports_audio: false,
-            max_duration_sec: 10.0,
+            max_duration_sec: Some(10.0),
             supported_resolutions: vec![(512, 512), (720, 1280), (1080, 1920)],
             estimated_cost_per_second: None,
         }

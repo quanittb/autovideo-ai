@@ -41,6 +41,8 @@ pub struct ProviderRecord {
     pub max_duration_sec: Option<f64>,
     pub supported_resolutions: Vec<(u32, u32)>,
     pub supported_fps: Vec<f64>,
+    #[serde(default = "default_supports_original_fps")]
+    pub supports_original_fps: bool,
     pub pricing_unit: PricingUnit,
     pub pricing_amount: Option<f64>,
     #[serde(default)]
@@ -50,6 +52,10 @@ pub struct ProviderRecord {
     pub currency: String,
     pub source_url: String,
     pub observed_at: String, // ISO 8601 Date
+}
+
+fn default_supports_original_fps() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,7 +92,7 @@ impl ProviderRegistry {
                 supports_reference_image: false,
                 supports_character_reference: false,
                 supports_audio: true,
-                max_duration_sec: 3600.0,
+                max_duration_sec: None,
                 supported_resolutions: vec![
                     (288, 512),
                     (512, 512),
@@ -109,6 +115,7 @@ impl ProviderRegistry {
                 (3840, 2160),
             ],
             supported_fps: vec![23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0],
+            supports_original_fps: true,
             pricing_unit: PricingUnit::FreeLocal,
             pricing_amount: Some(0.0),
             pricing_tiers: vec![],
@@ -131,13 +138,14 @@ impl ProviderRegistry {
                 supports_reference_image: false,
                 supports_character_reference: false,
                 supports_audio: false,
-                max_duration_sec: 10.0,
+                max_duration_sec: Some(10.0),
                 supported_resolutions: vec![(512, 512), (576, 1024), (720, 1280), (1080, 1920)],
                 estimated_cost_per_second: None,
             },
             max_duration_sec: Some(10.0),
             supported_resolutions: vec![(512, 512), (576, 1024), (720, 1280), (1080, 1920)],
             supported_fps: vec![24.0, 25.0, 30.0],
+            supports_original_fps: false,
             pricing_unit: PricingUnit::PerPrediction,
             pricing_amount: Some(0.50),
             pricing_tiers: vec![],
@@ -160,7 +168,7 @@ impl ProviderRegistry {
                 supports_reference_image: true,
                 supports_character_reference: true,
                 supports_audio: true,
-                max_duration_sec: 300.0,
+                max_duration_sec: None,
                 supported_resolutions: vec![
                     (576, 1024),
                     (720, 1280),
@@ -180,7 +188,8 @@ impl ProviderRegistry {
                 (1920, 1080),
                 (512, 512),
             ],
-            supported_fps: vec![24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 59.94, 60.0],
+            supported_fps: vec![24.0, 48.0],
+            supports_original_fps: true,
             pricing_unit: PricingUnit::PerSecond,
             pricing_amount: Some(0.03),
             pricing_tiers: vec![
@@ -215,13 +224,14 @@ impl ProviderRegistry {
                 supports_reference_image: true,
                 supports_character_reference: false,
                 supports_audio: false,
-                max_duration_sec: 0.0,
+                max_duration_sec: None,
                 supported_resolutions: vec![(512, 512), (720, 1280), (1080, 1920)],
                 estimated_cost_per_second: None,
             },
             max_duration_sec: None,
             supported_resolutions: vec![(512, 512), (720, 1280), (1080, 1920), (1920, 1080)],
             supported_fps: vec![24.0, 30.0, 60.0],
+            supports_original_fps: true,
             pricing_unit: PricingUnit::PerPrediction,
             pricing_amount: Some(0.005),
             pricing_tiers: vec![],
@@ -244,13 +254,14 @@ impl ProviderRegistry {
                 supports_reference_image: true,
                 supports_character_reference: true,
                 supports_audio: false,
-                max_duration_sec: 5.0,
+                max_duration_sec: Some(5.0),
                 supported_resolutions: vec![(288, 512), (512, 512), (512, 768)],
                 estimated_cost_per_second: Some(0.0),
             },
             max_duration_sec: Some(5.0),
             supported_resolutions: vec![(288, 512), (512, 512), (512, 768)],
             supported_fps: vec![8.0, 12.0, 16.0, 24.0, 30.0],
+            supports_original_fps: false,
             pricing_unit: PricingUnit::FreeLocal,
             pricing_amount: Some(0.0),
             pricing_tiers: vec![],

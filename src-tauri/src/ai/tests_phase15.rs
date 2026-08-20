@@ -277,7 +277,7 @@ mod tests {
                 supports_reference_image: true,
                 supports_character_reference: true,
                 supports_audio: true,
-                max_duration_sec: 10.0,
+                max_duration_sec: Some(10.0),
                 supported_resolutions: vec![(320, 240), (576, 1024), (1080, 1920)],
                 estimated_cost_per_second: None,
             }
@@ -300,6 +300,21 @@ mod tests {
         fn submit_job(
             &self,
             _req: &CloudJobRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<CloudJobHandle, CloudProviderError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            let err =
+                CloudProviderError::OperationUnsupported("RAW_SUBMISSION_UNSUPPORTED".to_string());
+            Box::pin(async move { Err(err) })
+        }
+
+        fn create_prediction(
+            &self,
+            _prepared: &crate::ai::cloud::spec::PreparedProviderSubmission,
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<Output = Result<CloudJobHandle, CloudProviderError>>
