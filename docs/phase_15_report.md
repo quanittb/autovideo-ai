@@ -1,73 +1,56 @@
-# Phase 15 Report — Persistent Cloud Job Lifecycle & Production Remediation
+# Phase 15 Report — Persistent Cloud Job Lifecycle & Safety Finalization
 
 ## 1. Executive Summary & Baselines
 
-- **Starting Baseline HEAD**: `3a1006ad16f6793ef2b66bd4048fac8b6e463ab7`
-- **Initial Implementation Commit**: `ef096b2eb4bfa9b3e5e9b8344092555c95e38617`
-- **Remediation Implementation Commit**: `d7678c80ebf396704dcfbc5256b6ae151adde239`
+- **Baseline HEAD**: `332729f0eb7662a6266d5b491338e72773c320ad`
+- **Final Implementation Commit**: `7493f00b4bebb8b68a405dc507e51ab16f937773`
 - **Paid Live API Calls Incurred**: **$0.00**
 - **Test Status**: 24/24 Phase 15 unit tests passed, 639/639 full repository tests passed.
 
-Phase 15 implements an authoritative, persistent, recoverable, cancellable, and strictly output-validated cloud job lifecycle service. Following independent review, all production blockers and safety gaps have been closed and verified.
+Phase 15 implements an authoritative, crash-safe, recoverable, cancellable, and strictly output-validated cloud job lifecycle service. Following final safety review, all remaining lock, deadlock, remote reconciliation, event persistence, and validation policy gaps have been closed and verified.
 
 ---
 
-## 2. Key Remediation Architectural Enhancements
+## 2. Key Safety Enhancements
 
-### 1. Cost-Saving Policy Restored & Injectable Submission Gate
-- Reverted production submission routing policy from `Quality` to `RoutingPreference::CostSaving` in `src-tauri/src/ai/cloud/submission.rs`.
-- Introduced `CloudSubmissionGate` trait with `DefaultCloudSubmissionGate` for production and `MockSubmissionGate` for deterministic lifecycle testing.
-- Added regression test `test_phase15_17_production_cost_saving_regression_blocks_full_transformation` proving that `FullTransformation` under production `CostSaving` remains blocked from automatic cloud submission.
+### 1. Non-Blocking Polling & Cancellation Lock Design
+- **Eliminated Long-Held Mutexes**: Per-job locks are never held across network polling, provider sleeps, downloads, or background lifetimes. Locks are strictly scoped to short state read/mutate/persist sections.
+- **Immediate Cancellation Signaling**: Introduced per-job `tokio::sync::watch` cancellation channels registered in `cancellation_senders`.
+- **Responsive Wakeup**: Background polling loops use `tokio::select!` on `cancel_rx.changed()`, immediately waking up and canceling without waiting for polling timeouts or sleep intervals.
+- **Verified**: Proven via `test_phase15_06_cancellation_non_blocking_immediate` where a task sleeping on a 10s polling interval is cancelled in <50ms without waiting.
 
-### 2. Client Request Deduplication & Identity Indexing
-- Prevents multiple persistent jobs from being created when client requests (e.g. `job_id = "frontend-request-123"`) are retried.
-- Employs per-request concurrency locking keyed by `format!("{}:{}", project_id, client_request_id)`.
-- Index lookup via `PersistentCloudJobStore::find_job_by_client_request_id` scans for existing records and rejects duplicate submissions (`DUPLICATE_SUBMISSION_PREVENTED`).
-- Verified sequentially, concurrently, and across application restarts.
+### 2. Deadlock-Free `resume_unblock_job`
+- Refactored cancellation reconciliation into an internal non-reentrant helper `reconcile_cancellation` that operates without acquiring redundant nested locks.
+- **Verified**: Proven via `test_phase15_07_resume_unblock_job_no_deadlock` under a 2-second timeout guard.
 
-### 3. Comprehensive Cancellation Reconciliation
-- Cancellation intent is persisted to disk first (`cancellation_requested = true`, incrementing `state_revision`).
-- Local polling tasks abort safely.
-- If `remote_job_id` exists:
-  - Resolves provider adapter and invokes `provider.cancel_job(&remote_id).await`.
-  - Transitions to `CloudJobState::Cancelled` only upon confirmed remote cancellation.
-  - If remote cancellation fails or credentials are missing: transitions to `CloudJobState::Blocked` (`CANCELLATION_FAILED_REMOTE` or `MISSING_PROVIDER_CREDENTIALS`), preserving cancellation intent and remote ID without false `Cancelled` reports.
-- Startup recovery reconciles interrupted cancellations without resubmitting.
+### 3. Remote Cancellation Failure & Credential Safety
+- In `spawn_polling_task`, `cancel_cloud_generation`, and `recover_startup_jobs`:
+  - Remote cancellation results are strictly checked.
+  - If remote cancellation succeeds $\rightarrow$ `CloudJobState::Cancelled`.
+  - If remote cancellation fails $\rightarrow$ `CloudJobState::Blocked` (`CANCELLATION_FAILED_REMOTE`), preserving `cancellation_requested = true` and `remote_job_id` without ever reporting false `Cancelled` status.
+  - If provider credentials are missing $\rightarrow$ `CloudJobState::Blocked` (`MISSING_PROVIDER_CREDENTIALS`).
+- **Verified**: Proven via `test_phase15_08_startup_recovery_cancel_failure_blocks`.
 
-### 4. Production TauriEventSink & Setup-Hook Recovery
-- Created `TauriEventSink` using `tauri::AppHandle` to emit `cloud-job://updated` events with `CloudJobEventPayload`.
-- Payload excludes secrets, authorization headers, and source hashes.
-- Startup initialization moved into `tauri::Builder::setup(...)` hook with background recovery spawned on `tauri::async_runtime`.
+### 4. Persist-Before-Event Enforcement with Injected Failure Seam
+- In every execution path (synchronous methods, recovery routines, and background tasks), disk persistence via `store.save_job_atomic(&job)` must succeed before `event_sink.emit_job_updated(...)` is called.
+- Added injectable failure seam `fail_next_save: Arc<AtomicBool>` in `PersistentCloudJobStore`.
+- **Verified**: Proven via `test_phase15_09_persist_before_event_with_injected_store_failure` showing that when atomic persistence fails, zero events are emitted and previous disk state remains unmutated.
 
-### 5. Strict Persist-Before-Event Enforcement
-- In every mutation path, `store.save_job_atomic(&job)` must succeed before `event_sink.emit_job_updated(...)` is invoked.
-- Proven via `test_phase15_09_persist_before_event_enforcement`.
+### 5. Real Project Audio Validation Policy
+- Replaced hardcoded checks with dynamic derivation from actual `Project` metadata:
+  ```rust
+  let require_audio = project.transformation_config.preservation.preserve_original_audio
+      && project.source_media.as_ref().map(|m| m.has_audio).unwrap_or(false);
+  ```
+- **Verified**: Proven via `test_phase15_10_real_project_audio_policy_derivation` across all three permutations (source audio + preserve true $\rightarrow$ true; source audio + preserve false $\rightarrow$ false; source no-audio + preserve true $\rightarrow$ false).
 
-### 6. Real Duration & Audio Validation
-- `PersistentCloudJob` contains `ValidationPolicy { expected_duration_sec, require_audio }` derived from `CloudJobRequest`.
-- Output validation enforces duration tolerance bounds ($[0.8\times, 1.2\times]$ expected duration) and audio presence when audio preservation is requested.
-- Verified: wrong duration fails; missing audio on preservation fails; audio omission on audio-free generation succeeds.
-
-### 7. Atomic Artifact Promotion
-- `CloudOutputValidator` utilizes `atomic_replace` (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH` on Windows) to atomically promote `.partial` downloads to final `.mp4` artifacts.
-- No destructive prior deletion of existing final artifacts.
-
-### 8. Production Missing-Credential Handling & Local Validation Recovery
-- `DefaultCloudProviderResolver` inspects `provider.is_configured()`, returning `MISSING_PROVIDER_CREDENTIALS` when unconfigured.
-- Recovering jobs in `CloudJobState::ValidatingOutput` directly inspects and promotes local `.partial` files without requiring remote provider credentials.
+### 6. Hardened Store Load Recovery
+- `load_job` returns an explicit error if `atomic_replace` fails during promotion of `.tmp` files.
+- `save_job_atomic` preserves fsynced `.tmp` files on rename failure to maintain recovery evidence.
 
 ---
 
-## 3. Storage & State Revision Architecture
-
-### Directory & File Layout
-- **Cloud Jobs Storage Directory**: `<project_dir>/cloud-jobs/`
-- **Authoritative Job Manifest**: `<project_dir>/cloud-jobs/<internal_job_id>.json`
-- **Atomic Staging Manifest**: `<project_dir>/cloud-jobs/<internal_job_id>.json.tmp`
-- **Artifact Temporary Partial**: `<project_dir>/cloud-jobs/artifacts/<internal_job_id>.partial`
-- **Artifact Final Output**: `<project_dir>/cloud-jobs/artifacts/<internal_job_id>.mp4`
-
-### Recovery Selection Matrix
+## 3. Storage & State Revision Recovery Matrix
 
 | Primary Status | Temp Status | Action / Selected Record | Rationale |
 |---|---|---|---|
@@ -90,12 +73,12 @@ test ai::tests_phase15::tests::test_phase15_02_restart_restores_processing_job .
 test ai::tests_phase15::tests::test_phase15_03_dedupe_sequential_same_client_request_id ... ok
 test ai::tests_phase15::tests::test_phase15_04_dedupe_concurrent_same_client_request_id ... ok
 test ai::tests_phase15::tests::test_phase15_05_dedupe_restart_then_retry_same_client_request_id ... ok
-test ai::tests_phase15::tests::test_phase15_06_cancellation_normal_reconciliation_flow ... ok
-test ai::tests_phase15::tests::test_phase15_07_cancellation_restart_reconciliation ... ok
-test ai::tests_phase15::tests::test_phase15_08_cancellation_remote_failure_blocks ... ok
-test ai::tests_phase15::tests::test_phase15_09_persist_before_event_enforcement ... ok
-test ai::tests_phase15::tests::test_phase15_10_validation_wrong_duration_fails ... ok
-test ai::tests_phase15::tests::test_phase15_11_validation_audio_preservation ... ok
+test ai::tests_phase15::tests::test_phase15_06_cancellation_non_blocking_immediate ... ok
+test ai::tests_phase15::tests::test_phase15_07_resume_unblock_job_no_deadlock ... ok
+test ai::tests_phase15::tests::test_phase15_08_startup_recovery_cancel_failure_blocks ... ok
+test ai::tests_phase15::tests::test_phase15_09_persist_before_event_with_injected_store_failure ... ok
+test ai::tests_phase15::tests::test_phase15_10_real_project_audio_policy_derivation ... ok
+test ai::tests_phase15::tests::test_phase15_11_validation_wrong_duration_fails ... ok
 test ai::tests_phase15::tests::test_phase15_12_atomic_artifact_promotion ... ok
 test ai::tests_phase15::tests::test_phase15_13_missing_credentials_real_resolver_blocks_and_resumes ... ok
 test ai::tests_phase15::tests::test_phase15_14_validating_output_recovery_no_provider_needed ... ok
@@ -110,7 +93,7 @@ test ai::tests_phase15::tests::test_phase15_22_polling_timeout_fails_bounded ...
 test ai::tests_phase15::tests::test_phase15_23_download_retry_bounded ... ok
 test ai::tests_phase15::tests::test_phase15_24_ambiguous_submission_blocks_auto_resubmit ... ok
 
-test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 615 filtered out; finished in 5.41s
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 615 filtered out; finished in 5.19s
 ```
 
 ### 2. Phase 14 Test Suite (`cargo test -- test_phase14 --test-threads=1`)
@@ -125,7 +108,7 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 633 filtered out; fi
 
 ### 4. Full Rust Test Suite (`cargo test -- --test-threads=1`)
 ```
-test result: ok. 639 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1749.58s
+test result: ok. 639 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1713.77s
 ```
 
 ### 5. Formatting & Static Checking
@@ -147,24 +130,16 @@ dist/index.html                   0.49 kB │ gzip:   0.32 kB
 dist/assets/index-TXUKyMTD.css   87.21 kB │ gzip:  12.27 kB
 dist/assets/window-D1F3Wgkb.js   13.92 kB │ gzip:   3.43 kB
 dist/assets/index-B9n8H4kj.js   471.99 kB │ gzip: 119.03 kB
-✓ built in 10.70s
+✓ built in 10.50s
 ```
 
 ---
 
-## 5. Files Changed
+## 5. Summary of Files Changed
 
 | File | Type | Description |
 |---|---|---|
-| `src-tauri/src/ai/cloud/submission.rs` | Modified | Restored Phase 14 CostSaving routing preference; added `CloudSubmissionGate` & `DefaultCloudSubmissionGate` |
-| `src-tauri/src/ai/cloud/job.rs` | Modified | Added `ValidationPolicy` to `PersistentCloudJob`; deprecated memory-only `CloudJobManager` |
-| `src-tauri/src/ai/cloud/store.rs` | Modified | Made `pub fn atomic_replace` public; added `find_job_by_client_request_id` |
-| `src-tauri/src/ai/cloud/validator.rs` | Modified | Enforced duration & audio tolerance checks; used `atomic_replace` for artifact promotion |
-| `src-tauri/src/ai/cloud/resolver.rs` | Modified | Added `provider.is_configured()` check in `DefaultCloudProviderResolver` |
-| `src-tauri/src/ai/cloud/lifecycle.rs` | Modified | Added `TauriEventSink`, client request deduplication, cancellation reconciliation, setup-hook recovery |
-| `src-tauri/src/ai/cloud/mod.rs` | Modified | Re-exported `TauriEventSink`, `CloudSubmissionGate`, `ValidationPolicy`; removed deprecated `CloudJobManager` export |
-| `src-tauri/src/lib.rs` | Modified | Managed `CloudJobLifecycleService` with `TauriEventSink` in `.setup(...)` hook with async runtime recovery |
-| `src-tauri/src/commands/mod.rs` | Modified | Bound cloud IPC commands to authoritative managed lifecycle service |
-| `src-tauri/src/ai/tests_phase15.rs` | Modified | 24 comprehensive unit tests covering all Phase 15 and remediation requirements |
-| `src-tauri/src/ai/tests_cloud_mvp.rs` | Modified | Updated test assertions to use canonical `CloudJobState` |
-| `docs/phase_15_report.md` | Modified | Complete verified remediation and lifecycle report |
+| `src-tauri/src/ai/cloud/lifecycle.rs` | Modified | Non-blocking cancellation channels, deadlock-free resume, persist-before-event enforcement, real audio validation policy |
+| `src-tauri/src/ai/cloud/store.rs` | Modified | Hardened load recovery, preserved fsynced tmp, injected persistence failure seam |
+| `src-tauri/src/ai/tests_phase15.rs` | Modified | 24 unit tests covering non-blocking cancellation, deadlock freedom, cancel failure handling, audio policy derivation, and persistence failure seam |
+| `docs/phase_15_report.md` | Modified | Final safety verification report |
