@@ -12,11 +12,11 @@ This benchmark protocol defines the evaluation methodology, metrics, and executi
 | Dimension | Metric / Criterion | Threshold / Target | Evaluation Method |
 | :--- | :--- | :--- | :--- |
 | **Alpha Transparency Decodability** | Presence of decodable alpha channel in VP9 container | 100% Pass | FFprobe `alpha_mode=1` + `ffmpeg -c:v libvpx-vp9 -filter_complex "[0:v]alphaextract[a]"` |
-| **Edge / Hair Matting Fidelity** | Subject boundary crispness, fine-edge preservation (hair, fur, motion blur) | Score >= 4.0 / 5.0 | Visual evaluation against source RGB plate |
-| **Temporal Stability & Flicker** | Inter-frame consistency of alpha matte, absence of temporal buzzing/holes | Score >= 4.0 / 5.0 | Sequential frame difference analysis |
-| **Audio Preservation** | Unaltered preservation of source audio stream when requested | 100% Pass | Stream codec & duration match via FFprobe |
-| **Latency & Throughput** | Server processing time per second of video input | < 3.0s latency / input second | Timestamped lifecycle telemetry |
-| **Pricing Predictability** | Observed cost vs estimated cost formula ($0.0042/s) | 100% match | CostRecord ledger verification |
+| **Edge / Hair Matting Fidelity** | Subject boundary crispness, fine-edge preservation (hair, fur, motion blur) | Score >= 4.0 / 5.0 | Visual evaluation against source RGB plate (Phase 20 acceptance) |
+| **Temporal Stability & Flicker** | Inter-frame consistency of alpha matte, absence of temporal buzzing/holes | Score >= 4.0 / 5.0 | Sequential frame difference analysis (Phase 20 acceptance) |
+| **Audio Preservation** | Required audio stream present, duration in tolerance, A/V sync acceptable | 100% Pass | FFprobe stream presence & duration match; audio codec recorded as informational unless officially guaranteed by provider |
+| **Latency & Throughput** | Server processing time per second of video input | < 3.0s latency / input second | AutoVideo AI acceptance target (internal benchmark target, not a documented provider SLA/guarantee) |
+| **Pricing Predictability** | Pre-submit estimate vs observed billed cost | Follows registry formula ($0.0042/s * probed duration) | Pre-submit estimate must strictly follow registry formula; observed monetary billed cost is recorded when reliably available from billing data; if unavailable, `actualCost` remains `None` (never infer billed cost from `predict_time` or `total_time`) |
 
 ---
 
@@ -40,7 +40,7 @@ This benchmark protocol defines the evaluation methodology, metrics, and executi
 3. Network access to `https://api.replicate.com` and `https://replicate.delivery`.
 
 ### Steps:
-1. **Preflight Probe**: Run `SourceMediaProbe::probe_file` on test media to extract exact duration, dimensions, FPS, and audio characteristics.
+1. **Preflight Single Probe**: Run `SourceMediaProbe::probe_file` ONCE on test media to extract exact duration, dimensions, FPS, and audio characteristics into `SourceMediaFacts`.
 2. **Cost Gate Check**: Compute estimated cost via `GenerationRouter` / `ProviderRegistry` ($0.0042/s * probed duration) and confirm `reserved_budget <= max_budget`.
 3. **Submission**: Submit prepared request with `background_color: "Transparent"`, `output_container_and_codec: "webm_vp9"`, `preserve_audio: bool`.
 4. **Polling & Download**: Poll prediction status until `succeeded`, then download output WebM artifact to temporary storage with SSRF verification.
