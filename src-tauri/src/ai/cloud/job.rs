@@ -149,6 +149,32 @@ pub struct InputAssets {
     pub reference_image_path: Option<PathBuf>,
     #[serde(default)]
     pub reference_image_hash: Option<String>,
+    #[serde(default)]
+    pub reference_image_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub reference_image_hashes: Vec<String>,
+}
+
+impl InputAssets {
+    pub fn get_reference_paths(&self) -> Vec<PathBuf> {
+        if !self.reference_image_paths.is_empty() {
+            self.reference_image_paths.clone()
+        } else if let Some(ref p) = self.reference_image_path {
+            vec![p.clone()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn get_reference_hashes(&self) -> Vec<String> {
+        if !self.reference_image_hashes.is_empty() {
+            self.reference_image_hashes.clone()
+        } else if let Some(ref h) = self.reference_image_hash {
+            vec![h.clone()]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -452,12 +478,28 @@ pub struct CloudJobRequest {
     pub source_video: Option<PathBuf>,
     #[serde(alias = "reference_image")]
     pub reference_image: Option<PathBuf>,
+    #[serde(default, alias = "reference_images")]
+    pub reference_images: Option<Vec<PathBuf>>,
     #[serde(alias = "duration_seconds")]
     pub duration_seconds: f64,
     pub fps: f64,
     pub resolution: (u32, u32),
     #[serde(alias = "task_type")]
     pub task_type: String,
+}
+
+impl CloudJobRequest {
+    pub fn get_reference_images(&self) -> Vec<PathBuf> {
+        if let Some(ref list) = self.reference_images {
+            if !list.is_empty() {
+                return list.clone();
+            }
+        }
+        if let Some(ref img) = self.reference_image {
+            return vec![img.clone()];
+        }
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

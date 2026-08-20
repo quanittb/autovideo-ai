@@ -641,6 +641,7 @@ export interface CloudJobRequest {
   negativePrompt?: string;
   sourceVideo?: string;
   referenceImage?: string;
+  referenceImages?: string[];
   durationSeconds: number;
   fps: number;
   resolution: [number, number];

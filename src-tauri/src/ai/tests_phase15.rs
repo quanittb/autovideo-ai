@@ -136,6 +136,7 @@ mod tests {
             negative_prompt: Some("blurry, low quality".to_string()),
             source_video: Some(sample_mp4.to_path_buf()),
             reference_image: None,
+            reference_images: None,
             duration_seconds: 1.0,
             fps: 25.0,
             resolution: (576, 1024),
@@ -157,7 +158,6 @@ mod tests {
             &self,
             _request: &CloudJobRequest,
             _max_cost: Option<f64>,
-            _cloud_provider: &dyn CloudVideoProvider,
             _registry: &ProviderRegistry,
         ) -> Result<ValidatedSubmissionPlan, CloudProviderError> {
             if let Some(ref r) = self.fail_reason {
@@ -189,7 +189,7 @@ mod tests {
                     auto_submit_allowed: true,
                 },
                 budget_limit: 3.00,
-                provider_id: "replicate".to_string(),
+                provider_key: crate::ai::cloud::ProviderKey::new("replicate", "minimax/video-01"),
             })
         }
     }
@@ -253,6 +253,14 @@ mod tests {
             "replicate"
         }
 
+        fn model_id(&self) -> &str {
+            "minimax/video-01"
+        }
+
+        fn model_version_hint(&self) -> Option<&str> {
+            Some("minimax/video-01")
+        }
+
         fn provider_name(&self) -> &str {
             "Mock Provider"
         }
@@ -312,6 +320,7 @@ mod tests {
                         remote_id,
                         provider_id: "replicate".to_string(),
                         model: "minimax/video-01".to_string(),
+                        model_version: Some("minimax/video-01".to_string()),
                     }),
                     Err(err) => Err(CloudProviderError::ProviderUnavailable(err)),
                 }
@@ -409,6 +418,7 @@ mod tests {
         fn resolve_provider(
             &self,
             _provider_id: &str,
+            _model_id: &str,
         ) -> Result<Arc<dyn CloudVideoProvider>, CloudProviderError> {
             match &self.provider {
                 Some(p) => Ok(p.clone()),
@@ -417,6 +427,21 @@ mod tests {
                         .to_string(),
                 )),
             }
+        }
+
+        fn resolve_runtime(
+            &self,
+            provider_id: &str,
+            model_id: &str,
+        ) -> Result<crate::ai::cloud::resolver::ResolvedProviderRuntime, CloudProviderError>
+        {
+            let provider = self.resolve_provider(provider_id, model_id)?;
+            let uploader: Arc<dyn crate::ai::cloud::uploader::ProviderAssetUploader> = Arc::new(
+                crate::ai::cloud::uploader::MockAssetUploader::with_policy(Arc::new(
+                    crate::ai::cloud::live_execution_guard::MockLiveExecutionPolicy::new(true),
+                )),
+            );
+            Ok(crate::ai::cloud::resolver::ResolvedProviderRuntime { provider, uploader })
         }
     }
 

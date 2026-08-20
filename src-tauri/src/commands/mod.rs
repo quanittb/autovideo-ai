@@ -1632,14 +1632,13 @@ pub fn generate_video_pipeline(
 pub fn get_cloud_cost_estimate(
     request: crate::ai::cloud::CloudJobRequest,
 ) -> Result<crate::ai::cloud::CostEstimate, String> {
-    let task_class = crate::ai::cloud::TaskClass::from_str_or_default(&request.task_type);
-    let provider = crate::ai::cloud::ReplicateProvider::new();
+    let task_class = crate::ai::cloud::TaskClass::from_str_strict(&request.task_type)
+        .map_err(|e| format!("{}", e))?;
     let registry = crate::ai::cloud::ProviderRegistry::new();
     let decision = crate::ai::cloud::GenerationRouter::route_with_registry(
         task_class,
         crate::ai::cloud::RoutingPreference::CostSaving,
         &request,
-        &provider,
         None,
         &registry,
     );
@@ -1652,10 +1651,9 @@ pub fn get_generation_route(
     mode: crate::ai::cloud::UserExecutionMode,
     request: crate::ai::cloud::CloudJobRequest,
 ) -> Result<crate::ai::cloud::RoutingDecision, String> {
-    let provider = crate::ai::cloud::ReplicateProvider::new();
     let registry = crate::ai::cloud::ProviderRegistry::new();
     Ok(crate::ai::cloud::GenerationRouter::route_with_registry(
-        task, mode, &request, &provider, None, &registry,
+        task, mode, &request, None, &registry,
     ))
 }
 

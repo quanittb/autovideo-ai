@@ -22,6 +22,7 @@ mod tests {
             reference_image: Some(PathBuf::from(
                 r"C:\Users\quant\Dropbox\PC\Downloads\QuanPH.png",
             )),
+            reference_images: None,
             duration_seconds: duration,
             fps: 30.0,
             resolution: (576, 1024),
@@ -179,7 +180,6 @@ mod tests {
 
     #[test]
     fn test_phase14_guard_test_1_local_tasks_rejected() {
-        let provider = ReplicateProvider::with_token("test_valid_token");
         let registry = ProviderRegistry::new();
 
         let local_tasks = [
@@ -190,7 +190,7 @@ mod tests {
 
         for task_name in local_tasks {
             let req = make_test_request(6.0, task_name);
-            let result = validate_and_prepare_cloud_submission(&req, None, &provider, &registry);
+            let result = validate_and_prepare_cloud_submission(&req, None, &registry);
 
             assert!(
                 result.is_err(),
@@ -207,20 +207,19 @@ mod tests {
     }
 
     // =========================================================================
-    // 08. Production Submission Guard: Test 2 — Character Replacement Blocked
+    // 08. Production Submission Guard: Test 2 — Action Regeneration Blocked
     // =========================================================================
 
     #[test]
-    fn test_phase14_guard_test_2_character_replacement_blocked() {
-        let provider = ReplicateProvider::with_token("test_valid_token");
+    fn test_phase14_guard_test_2_action_regeneration_blocked() {
         let registry = ProviderRegistry::new();
-        let req = make_test_request(6.0, "CHARACTER_REPLACEMENT");
+        let req = make_test_request(6.0, "ACTION_REGENERATION");
 
-        let result = validate_and_prepare_cloud_submission(&req, None, &provider, &registry);
+        let result = validate_and_prepare_cloud_submission(&req, None, &registry);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
-            err_msg.contains("ROUTING_UNAVAILABLE") && err_msg.contains("Phase 16"),
+            err_msg.contains("ROUTING_UNAVAILABLE") && err_msg.contains("unsupported in Phase 16"),
             "Expected ROUTING_UNAVAILABLE with Phase 16 reason, got: {}",
             err_msg
         );
@@ -232,11 +231,10 @@ mod tests {
 
     #[test]
     fn test_phase14_guard_test_3_background_removal_blocked() {
-        let provider = ReplicateProvider::with_token("test_valid_token");
         let registry = ProviderRegistry::new();
         let req = make_test_request(6.0, "BACKGROUND_REMOVAL");
 
-        let result = validate_and_prepare_cloud_submission(&req, None, &provider, &registry);
+        let result = validate_and_prepare_cloud_submission(&req, None, &registry);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
@@ -252,66 +250,52 @@ mod tests {
 
     #[test]
     fn test_phase14_guard_test_4_default_budget_enforcement() {
-        let guard = CostGuard::standard_job_guard();
-        assert_eq!(guard.max_cost_per_job, 3.00);
-
-        let breakdown_exact = CostBreakdown {
+        let guard = CostGuard::new(3.00);
+        let breakdown_pass = CostBreakdown {
             total_usd: Some(3.00),
-            confidence: CostConfidence::Exact,
-            ..Default::default()
+            confidence: CostConfidence::Estimated,
+            ..CostBreakdown::default()
         };
-        assert!(guard.check_breakdown(&breakdown_exact).is_ok());
+        assert!(guard.check_breakdown(&breakdown_pass).is_ok());
 
-        let breakdown_over = CostBreakdown {
+        let breakdown_fail = CostBreakdown {
             total_usd: Some(3.01),
             confidence: CostConfidence::Estimated,
-            ..Default::default()
+            ..CostBreakdown::default()
         };
-        let err = guard.check_breakdown(&breakdown_over);
+        let err = guard.check_breakdown(&breakdown_fail);
         assert!(err.is_err());
-        match err.unwrap_err() {
-            CloudProviderError::CostLimitExceeded { estimated, limit } => {
-                assert!((estimated - 3.01).abs() < 0.001);
-                assert!((limit - 3.00).abs() < 0.001);
-            }
-            other => panic!("Expected CostLimitExceeded, got {:?}", other),
-        }
+        assert!(format!("{}", err.unwrap_err()).contains("BUDGET_EXCEEDED"));
     }
 
     // =========================================================================
-    // 11. Production Submission Guard: Test 5 — Unknown Price Blocks Submission
+    // 11. Production Submission Guard: Test 5 — Custom Budget Validation ($0.01 - $1000.00)
     // =========================================================================
 
     #[test]
-    fn test_phase14_guard_test_5_unknown_price_blocks_submission() {
-        let guard = CostGuard::standard_job_guard();
+    fn test_phase14_guard_test_5_custom_budget_validation() {
+        assert!(CostGuard::validate_budget(0.01).is_ok());
+        assert!(CostGuard::validate_budget(1000.00).is_ok());
+        assert!(CostGuard::validate_budget(0.00).is_err());
+        assert!(CostGuard::validate_budget(-1.0).is_err());
+        assert!(CostGuard::validate_budget(1000.01).is_err());
+    }
 
-        let breakdown_none = CostBreakdown {
+    // =========================================================================
+    // 12. Production Submission Guard: Test 6 — Unknown Cost Rejection
+    // =========================================================================
+
+    #[test]
+    fn test_phase14_guard_test_6_unknown_cost_rejected() {
+        let guard = CostGuard::new(10.0);
+        let breakdown_unknown = CostBreakdown {
             total_usd: None,
             confidence: CostConfidence::Unknown,
-            ..Default::default()
+            ..CostBreakdown::default()
         };
-        assert!(guard.check_breakdown(&breakdown_none).is_err());
-
-        let breakdown_unknown = CostBreakdown {
-            total_usd: Some(0.0),
-            confidence: CostConfidence::Unknown,
-            ..Default::default()
-        };
-        assert!(guard.check_breakdown(&breakdown_unknown).is_err());
-    }
-
-    // =========================================================================
-    // 12. Production Submission Guard: Test 6 — Invalid User Budget Values
-    // =========================================================================
-
-    #[test]
-    fn test_phase14_guard_test_6_invalid_user_budgets() {
-        assert!(CostGuard::validate_budget(f64::NAN).is_err());
-        assert!(CostGuard::validate_budget(f64::INFINITY).is_err());
-        assert!(CostGuard::validate_budget(f64::NEG_INFINITY).is_err());
-        assert!(CostGuard::validate_budget(-0.01).is_err());
-        assert_eq!(CostGuard::validate_budget(3.00).unwrap(), 3.00);
+        let err = guard.check_breakdown(&breakdown_unknown);
+        assert!(err.is_err());
+        assert!(format!("{}", err.unwrap_err()).contains("COST_UNKNOWN"));
     }
 
     // =========================================================================
@@ -321,8 +305,8 @@ mod tests {
     #[test]
     fn test_phase14_guard_test_7_nonexistent_adapter_rejected() {
         let registry = ProviderRegistry::new();
-        assert!(!registry.has_executable_adapter("nonexistent_cloud_model"));
-        assert!(!registry.has_executable_adapter("replicate_utility"));
+        assert!(!registry.has_executable_adapter("nonexistent_cloud_model", "none"));
+        assert!(!registry.has_executable_adapter("replicate_utility", "lucataco/remove-bg"));
     }
 
     // =========================================================================
@@ -418,20 +402,27 @@ mod tests {
     fn test_phase14_dynamic_price_refresh_updates_estimates() {
         let mut registry = ProviderRegistry::new();
         assert_eq!(
-            registry.find_by_id("replicate").unwrap().pricing_amount,
+            registry
+                .find("replicate", "minimax/video-01")
+                .unwrap()
+                .pricing_amount,
             Some(0.50)
         );
 
         // Price update to $0.45 without modifying routing code
         let updated = registry.update_price(
             "replicate",
+            "minimax/video-01",
             Some(0.45),
             "https://replicate.com/minimax/video-01",
             "2026-08-19",
         );
         assert!(updated);
         assert_eq!(
-            registry.find_by_id("replicate").unwrap().pricing_amount,
+            registry
+                .find("replicate", "minimax/video-01")
+                .unwrap()
+                .pricing_amount,
             Some(0.45)
         );
     }

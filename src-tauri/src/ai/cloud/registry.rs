@@ -1,4 +1,5 @@
 use super::provider::ProviderCapabilities;
+use super::router::TaskClass;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -21,7 +22,15 @@ pub enum PricingUnit {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PricingTier {
+    pub resolution_tier: String,
+    pub pricing_unit: PricingUnit,
+    pub pricing_amount: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderRecord {
     pub provider_id: String,
@@ -34,6 +43,10 @@ pub struct ProviderRecord {
     pub supported_fps: Vec<f64>,
     pub pricing_unit: PricingUnit,
     pub pricing_amount: Option<f64>,
+    #[serde(default)]
+    pub pricing_tiers: Vec<PricingTier>,
+    #[serde(default)]
+    pub resolution_tiers: Vec<String>,
     pub currency: String,
     pub source_url: String,
     pub observed_at: String, // ISO 8601 Date
@@ -98,13 +111,14 @@ impl ProviderRegistry {
             supported_fps: vec![23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0],
             pricing_unit: PricingUnit::FreeLocal,
             pricing_amount: Some(0.0),
+            pricing_tiers: vec![],
+            resolution_tiers: vec![],
             currency: "USD".to_string(),
             source_url: "https://ffmpeg.org".to_string(),
             observed_at: "2026-08-19".to_string(),
         });
 
-        // 2. Specialized Cloud Video Transformation (Replicate Minimax Video-01)
-        // Truthful capability declaration: Current adapter only serializes prompt & prompt_optimizer (text-to-video)
+        // 2. Replicate Minimax Video-01 (Text-to-video legacy model)
         self.records.push(ProviderRecord {
             provider_id: "replicate".to_string(),
             model_id: "minimax/video-01".to_string(),
@@ -126,13 +140,68 @@ impl ProviderRegistry {
             supported_fps: vec![24.0, 25.0, 30.0],
             pricing_unit: PricingUnit::PerPrediction,
             pricing_amount: Some(0.50),
+            pricing_tiers: vec![],
+            resolution_tiers: vec![],
             currency: "USD".to_string(),
             source_url: "https://replicate.com/minimax/video-01".to_string(),
             observed_at: "2026-08-19".to_string(),
         });
 
-        // 3. Utility Cloud (Low-Cost Background Removal)
-        // Note: Adapter in providers/ is not yet implemented (deferred to Phase 17).
+        // 3. Official Replicate Pruna Character Replacement (p-video-replace)
+        self.records.push(ProviderRecord {
+            provider_id: "replicate".to_string(),
+            model_id: "prunaai/p-video-replace".to_string(),
+            model_version: "official-current".to_string(),
+            execution_class: ExecutionClass::SpecializedVideoTransformation,
+            capabilities: ProviderCapabilities {
+                supports_text_to_video: false,
+                supports_image_to_video: false,
+                supports_video_to_video: true,
+                supports_reference_image: true,
+                supports_character_reference: true,
+                supports_audio: true,
+                max_duration_sec: 300.0,
+                supported_resolutions: vec![
+                    (576, 1024),
+                    (720, 1280),
+                    (1080, 1920),
+                    (1280, 720),
+                    (1920, 1080),
+                    (512, 512),
+                ],
+                estimated_cost_per_second: Some(0.03),
+            },
+            max_duration_sec: None,
+            supported_resolutions: vec![
+                (576, 1024),
+                (720, 1280),
+                (1080, 1920),
+                (1280, 720),
+                (1920, 1080),
+                (512, 512),
+            ],
+            supported_fps: vec![24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 59.94, 60.0],
+            pricing_unit: PricingUnit::PerSecond,
+            pricing_amount: Some(0.03),
+            pricing_tiers: vec![
+                PricingTier {
+                    resolution_tier: "720p".to_string(),
+                    pricing_unit: PricingUnit::PerSecond,
+                    pricing_amount: 0.03,
+                },
+                PricingTier {
+                    resolution_tier: "1080p".to_string(),
+                    pricing_unit: PricingUnit::PerSecond,
+                    pricing_amount: 0.06,
+                },
+            ],
+            resolution_tiers: vec!["720p".to_string(), "1080p".to_string()],
+            currency: "USD".to_string(),
+            source_url: "https://replicate.com/prunaai/p-video-replace".to_string(),
+            observed_at: "2026-08-20".to_string(),
+        });
+
+        // 4. Utility Cloud (Low-Cost Background Removal)
         self.records.push(ProviderRecord {
             provider_id: "replicate_utility".to_string(),
             model_id: "lucataco/remove-bg".to_string(),
@@ -155,12 +224,14 @@ impl ProviderRegistry {
             supported_fps: vec![24.0, 30.0, 60.0],
             pricing_unit: PricingUnit::PerPrediction,
             pricing_amount: Some(0.005),
+            pricing_tiers: vec![],
+            resolution_tiers: vec![],
             currency: "USD".to_string(),
             source_url: "https://replicate.com/lucataco/remove-bg".to_string(),
             observed_at: "2026-08-19".to_string(),
         });
 
-        // 4. Local Generative Fallback (SD1.5 + AnimateDiff)
+        // 5. Local Generative Fallback (SD1.5 + AnimateDiff)
         self.records.push(ProviderRecord {
             provider_id: "local_diffusers".to_string(),
             model_id: "sd15-animatediff-v3".to_string(),
@@ -182,6 +253,8 @@ impl ProviderRegistry {
             supported_fps: vec![8.0, 12.0, 16.0, 24.0, 30.0],
             pricing_unit: PricingUnit::FreeLocal,
             pricing_amount: Some(0.0),
+            pricing_tiers: vec![],
+            resolution_tiers: vec![],
             currency: "USD".to_string(),
             source_url: "https://huggingface.co/runwayml/stable-diffusion-v1-5".to_string(),
             observed_at: "2026-08-19".to_string(),
@@ -190,6 +263,16 @@ impl ProviderRegistry {
 
     pub fn list_records(&self) -> &[ProviderRecord] {
         &self.records
+    }
+
+    pub fn find(&self, provider_id: &str, model_id: &str) -> Option<&ProviderRecord> {
+        self.records
+            .iter()
+            .find(|r| r.provider_id == provider_id && r.model_id == model_id)
+    }
+
+    pub fn find_by_model_id(&self, model_id: &str) -> Option<&ProviderRecord> {
+        self.records.iter().find(|r| r.model_id == model_id)
     }
 
     pub fn find_by_id(&self, provider_id: &str) -> Option<&ProviderRecord> {
@@ -202,16 +285,46 @@ impl ProviderRegistry {
             .find(|r| r.execution_class == exec_class)
     }
 
-    pub fn has_executable_adapter(&self, provider_id: &str) -> bool {
-        match provider_id {
-            "local_ffmpeg" | "replicate" | "local_diffusers" => true,
+    pub fn find_candidates_for_task(&self, task: TaskClass) -> Vec<&ProviderRecord> {
+        self.records
+            .iter()
+            .filter(|r| match task {
+                TaskClass::CharacterReplacement => {
+                    r.capabilities.supports_video_to_video
+                        && r.capabilities.supports_character_reference
+                }
+                TaskClass::FullGenerativeTransformation => r.capabilities.supports_text_to_video,
+                TaskClass::BackgroundRemoval => r.execution_class == ExecutionClass::UtilityCloud,
+                TaskClass::StyleFilter
+                | TaskClass::BackgroundComposite
+                | TaskClass::AudioTransformation => {
+                    r.execution_class == ExecutionClass::LocalDeterministic
+                }
+                TaskClass::ActionRegeneration => false,
+            })
+            .collect()
+    }
+
+    pub fn has_executable_adapter(&self, provider_id: &str, model_id: &str) -> bool {
+        match (provider_id, model_id) {
+            ("local_ffmpeg", "ffmpeg_native") => true,
+            ("replicate", "prunaai/p-video-replace") => true,
+            ("replicate", "minimax/video-01") => true,
+            ("local_diffusers", "sd15-animatediff-v3") => true,
             _ => false,
         }
+    }
+
+    pub fn has_executable_adapter_for_provider(&self, provider_id: &str) -> bool {
+        self.records.iter().any(|r| {
+            r.provider_id == provider_id && self.has_executable_adapter(&r.provider_id, &r.model_id)
+        })
     }
 
     pub fn update_price(
         &mut self,
         provider_id: &str,
+        model_id: &str,
         pricing_amount: Option<f64>,
         source_url: &str,
         observed_at: &str,
@@ -219,7 +332,7 @@ impl ProviderRegistry {
         if let Some(r) = self
             .records
             .iter_mut()
-            .find(|r| r.provider_id == provider_id)
+            .find(|r| r.provider_id == provider_id && r.model_id == model_id)
         {
             r.pricing_amount = pricing_amount;
             r.source_url = source_url.to_string();
@@ -234,7 +347,7 @@ impl ProviderRegistry {
         if let Some(idx) = self
             .records
             .iter()
-            .position(|r| r.provider_id == record.provider_id)
+            .position(|r| r.provider_id == record.provider_id && r.model_id == record.model_id)
         {
             self.records[idx] = record;
         } else {

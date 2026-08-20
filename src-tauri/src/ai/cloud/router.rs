@@ -1,6 +1,7 @@
 use super::cost::{CostBreakdown, CostConfidence, CostEstimate};
+use super::error::CloudProviderError;
 use super::job::CloudJobRequest;
-use super::provider::CloudVideoProvider;
+use super::provider::ResolutionTier;
 use super::registry::{ExecutionClass, PricingUnit, ProviderRecord, ProviderRegistry};
 use crate::ai::generative::hardware::{CapabilityReport, CapabilityTier};
 use serde::{Deserialize, Serialize};
@@ -63,40 +64,47 @@ impl TaskClass {
         }
     }
 
-    pub fn from_str_or_default(s: &str) -> Self {
+    pub fn from_str_strict(s: &str) -> Result<Self, CloudProviderError> {
         let normalized = s.trim().to_uppercase().replace('-', "_");
         match normalized.as_str() {
             "CHARACTER_REPLACEMENT" | "CHARACTERREPLACEMENT" | "CHARACTER" => {
-                TaskClass::CharacterReplacement
+                Ok(TaskClass::CharacterReplacement)
             }
             "BACKGROUND_REMOVAL" | "BACKGROUNDREMOVAL" | "REMOVE_BG" | "REMOVEBG"
-            | "REMOVE_BACKGROUND" | "REMOVEBACKGROUND" => TaskClass::BackgroundRemoval,
+            | "REMOVE_BACKGROUND" | "REMOVEBACKGROUND" => Ok(TaskClass::BackgroundRemoval),
             "BACKGROUND_COMPOSITE"
             | "BACKGROUNDCOMPOSITE"
             | "BACKGROUND_REPLACEMENT"
             | "BACKGROUNDREPLACEMENT"
-            | "BACKGROUND" => TaskClass::BackgroundComposite,
+            | "BACKGROUND" => Ok(TaskClass::BackgroundComposite),
             "STYLE_FILTER"
             | "STYLEFILTER"
             | "STYLE_TRANSFORMATION"
             | "STYLETRANSFORMATION"
-            | "STYLE" => TaskClass::StyleFilter,
+            | "STYLE" => Ok(TaskClass::StyleFilter),
             "AUDIO_TRANSFORMATION" | "AUDIOTRANSFORMATION" | "AUDIO_MUX" | "AUDIOMUX" | "AUDIO" => {
-                TaskClass::AudioTransformation
+                Ok(TaskClass::AudioTransformation)
             }
             "ACTION_REGENERATION"
             | "ACTIONREGENERATION"
             | "ACTION_TRANSFORMATION"
             | "ACTIONTRANSFORMATION"
-            | "ACTION" => TaskClass::ActionRegeneration,
+            | "ACTION" => Ok(TaskClass::ActionRegeneration),
             "FULL_GENERATIVE_TRANSFORMATION"
             | "FULLGENERATIVETRANSFORMATION"
             | "FULL_TRANSFORMATION"
             | "FULLTRANSFORMATION"
             | "FULL"
-            | "GENERATIVE" => TaskClass::FullGenerativeTransformation,
-            _ => TaskClass::CharacterReplacement,
+            | "GENERATIVE" => Ok(TaskClass::FullGenerativeTransformation),
+            _ => Err(CloudProviderError::RequestInvalid(format!(
+                "UNKNOWN_TASK_CLASS: '{}' is not a recognized task class",
+                s
+            ))),
         }
+    }
+
+    pub fn from_str_or_default(s: &str) -> Self {
+        Self::from_str_strict(s).unwrap_or(TaskClass::CharacterReplacement)
     }
 }
 
@@ -155,22 +163,19 @@ impl GenerationRouter {
         task: TaskClass,
         mode: RoutingPreference,
         request: &CloudJobRequest,
-        cloud_provider: &dyn CloudVideoProvider,
         hardware: Option<&CapabilityReport>,
     ) -> RoutingDecision {
         let registry = ProviderRegistry::new();
-        Self::route_with_registry(task, mode, request, cloud_provider, hardware, &registry)
+        Self::route_with_registry(task, mode, request, hardware, &registry)
     }
 
     pub fn route_with_registry(
         task: TaskClass,
         mode: RoutingPreference,
         request: &CloudJobRequest,
-        cloud_provider: &dyn CloudVideoProvider,
         hardware: Option<&CapabilityReport>,
         registry: &ProviderRegistry,
     ) -> RoutingDecision {
-        let is_cloud_auth_configured = cloud_provider.is_configured();
         let target_res = request.resolution;
         let target_fps = request.fps;
         let duration = if request.duration_seconds <= 0.0 {
@@ -190,7 +195,7 @@ impl GenerationRouter {
             );
         }
 
-        // 2. Local Deterministic Tasks: Crop, color, style filters, audio mux, background compositing
+        // 2. Local Deterministic Tasks
         let is_local_deterministic = matches!(
             task,
             TaskClass::StyleFilter
@@ -208,7 +213,7 @@ impl GenerationRouter {
             );
         }
 
-        // 3. Full Generative Transformation Guard: Disabled in CostSaving mode unless short/preview
+        // 3. Full Generative Transformation Guard: Blocked in CostSaving
         if task == TaskClass::FullGenerativeTransformation && mode == RoutingPreference::CostSaving
         {
             let breakdown = CostBreakdown {
@@ -216,6 +221,9 @@ impl GenerationRouter {
                 model_id: "none".to_string(),
                 billable_duration_sec: duration,
                 resolution: target_res,
+                resolution_tier: None,
+                unit_rate_usd: None,
+                pricing_observed_at: None,
                 segment_count: 1,
                 overlap_duration_sec: 0.0,
                 retry_allowance_usd: 0.0,
@@ -244,16 +252,55 @@ impl GenerationRouter {
             };
         }
 
-        // 4. Utility Cloud Tasks (Background Removal)
+        // 4. Action Regeneration: Explicitly unsupported in Phase 16
+        if task == TaskClass::ActionRegeneration {
+            let breakdown = CostBreakdown {
+                provider_id: "none".to_string(),
+                model_id: "none".to_string(),
+                billable_duration_sec: duration,
+                resolution: target_res,
+                resolution_tier: None,
+                unit_rate_usd: None,
+                pricing_observed_at: None,
+                segment_count: 1,
+                overlap_duration_sec: 0.0,
+                retry_allowance_usd: 0.0,
+                inference_cost_usd: None,
+                transfer_storage_cost_usd: None,
+                total_usd: None,
+                confidence: CostConfidence::Unknown,
+                currency: "USD".to_string(),
+                breakdown: "Action regeneration cloud adapter not implemented (explicitly unsupported in Phase 16)".to_string(),
+            };
+
+            return RoutingDecision {
+                target: RoutingTarget::Unavailable,
+                execution_class: ExecutionClass::SpecializedVideoTransformation,
+                provider_id: "none".to_string(),
+                model_id: "none".to_string(),
+                task,
+                mode,
+                reason: "Action regeneration cloud adapter not implemented (explicitly unsupported in Phase 16)".to_string(),
+                estimated_cost: breakdown.to_estimate(),
+                cost_breakdown: breakdown,
+                fallback_available: false,
+                auto_submit_allowed: false,
+            };
+        }
+
+        // 5. Utility Cloud Tasks (Background Removal)
         if task == TaskClass::BackgroundRemoval {
-            // Check if executable adapter exists in providers/
-            let has_adapter = registry.has_executable_adapter("replicate_utility");
+            let has_adapter =
+                registry.has_executable_adapter("replicate_utility", "lucataco/remove-bg");
             if !has_adapter {
                 let breakdown = CostBreakdown {
                     provider_id: "replicate_utility".to_string(),
                     model_id: "lucataco/remove-bg".to_string(),
                     billable_duration_sec: duration,
                     resolution: target_res,
+                    resolution_tier: None,
+                    unit_rate_usd: None,
+                    pricing_observed_at: None,
                     segment_count: 1,
                     overlap_duration_sec: 0.0,
                     retry_allowance_usd: 0.0,
@@ -283,162 +330,119 @@ impl GenerationRouter {
             }
         }
 
-        // 5. Specialized Video Transformation Tasks (Character Replacement, Action Regeneration)
-        if matches!(
-            task,
-            TaskClass::CharacterReplacement | TaskClass::ActionRegeneration
-        ) {
-            // Capability truth check: Character replacement requires video-to-video / character reference serialization.
-            // Current Replicate MiniMax adapter only serializes prompt & prompt_optimizer (text-to-video).
-            // Therefore, character replacement cannot be executed by the current MiniMax adapter.
-            let record_opt =
-                registry.find_by_execution_class(ExecutionClass::SpecializedVideoTransformation);
-            if let Some(record) = record_opt {
-                let adapter_supports_character_inputs = record.capabilities.supports_video_to_video
-                    && record.capabilities.supports_character_reference;
+        // 6. Character Replacement: Deterministic Candidate Selection
+        if task == TaskClass::CharacterReplacement {
+            let candidates = registry.find_candidates_for_task(TaskClass::CharacterReplacement);
+            let res_tier_res = ResolutionTier::from_dimensions(target_res);
 
-                if !adapter_supports_character_inputs {
-                    let breakdown = CostBreakdown {
-                        provider_id: record.provider_id.clone(),
-                        model_id: record.model_id.clone(),
-                        billable_duration_sec: duration,
-                        resolution: target_res,
-                        segment_count: 1,
-                        overlap_duration_sec: 0.0,
-                        retry_allowance_usd: 0.0,
-                        inference_cost_usd: None,
-                        transfer_storage_cost_usd: None,
-                        total_usd: None,
-                        confidence: CostConfidence::Unknown,
-                        currency: "USD".to_string(),
-                        breakdown:
-                            "Specialized provider adapter not implemented for required character replacement inputs (deferred to Phase 16)"
-                                .to_string(),
-                    };
+            let mut valid_candidates: Vec<(&ProviderRecord, f64)> = Vec::new();
 
-                    return RoutingDecision {
-                        target: RoutingTarget::Unavailable,
-                        execution_class: record.execution_class,
-                        provider_id: record.provider_id.clone(),
-                        model_id: record.model_id.clone(),
-                        task,
-                        mode,
-                        reason: "Specialized provider adapter not implemented for required character replacement inputs (deferred to Phase 16)".to_string(),
-                        estimated_cost: breakdown.to_estimate(),
-                        cost_breakdown: breakdown,
-                        fallback_available: false,
-                        auto_submit_allowed: false,
-                    };
-                }
-
-                // Check resolution & FPS constraints
+            for record in candidates {
                 if !Self::check_resolution_supported(record, target_res) {
-                    let breakdown = CostBreakdown {
-                        provider_id: record.provider_id.clone(),
-                        model_id: record.model_id.clone(),
-                        billable_duration_sec: duration,
-                        resolution: target_res,
-                        segment_count: 1,
-                        overlap_duration_sec: 0.0,
-                        retry_allowance_usd: 0.0,
-                        inference_cost_usd: None,
-                        transfer_storage_cost_usd: None,
-                        total_usd: None,
-                        confidence: CostConfidence::Unknown,
-                        currency: "USD".to_string(),
-                        breakdown: format!(
-                            "Unsupported resolution {:?} by provider {}",
-                            target_res, record.provider_id
-                        ),
-                    };
-
-                    return RoutingDecision {
-                        target: RoutingTarget::Unavailable,
-                        execution_class: record.execution_class,
-                        provider_id: record.provider_id.clone(),
-                        model_id: record.model_id.clone(),
-                        task,
-                        mode,
-                        reason: format!(
-                            "Requested resolution {:?} is not supported by provider {}. Supported resolutions: {:?}",
-                            target_res, record.provider_id, record.supported_resolutions
-                        ),
-                        estimated_cost: breakdown.to_estimate(),
-                        cost_breakdown: breakdown,
-                        fallback_available: false,
-                        auto_submit_allowed: false,
-                    };
+                    continue;
                 }
-
                 if !Self::check_fps_supported(record, target_fps) {
-                    let breakdown = CostBreakdown {
-                        provider_id: record.provider_id.clone(),
-                        model_id: record.model_id.clone(),
-                        billable_duration_sec: duration,
-                        resolution: target_res,
-                        segment_count: 1,
-                        overlap_duration_sec: 0.0,
-                        retry_allowance_usd: 0.0,
-                        inference_cost_usd: None,
-                        transfer_storage_cost_usd: None,
-                        total_usd: None,
-                        confidence: CostConfidence::Unknown,
-                        currency: "USD".to_string(),
-                        breakdown: format!(
-                            "Unsupported frame rate {:.1} fps by provider {}",
-                            target_fps, record.provider_id
-                        ),
-                    };
-
-                    return RoutingDecision {
-                        target: RoutingTarget::Unavailable,
-                        execution_class: record.execution_class,
-                        provider_id: record.provider_id.clone(),
-                        model_id: record.model_id.clone(),
-                        task,
-                        mode,
-                        reason: format!(
-                            "Requested frame rate {:.1} fps is not supported by provider {}. Supported fps: {:?}",
-                            target_fps, record.provider_id, record.supported_fps
-                        ),
-                        estimated_cost: breakdown.to_estimate(),
-                        cost_breakdown: breakdown,
-                        fallback_available: false,
-                        auto_submit_allowed: false,
-                    };
+                    continue;
                 }
 
+                // Compute cost
+                let cost = if let Ok(tier) = res_tier_res {
+                    if let Some(pt) = record
+                        .pricing_tiers
+                        .iter()
+                        .find(|t| t.resolution_tier == tier.as_str())
+                    {
+                        pt.pricing_amount * duration
+                    } else if let Some(amount) = record.pricing_amount {
+                        amount * duration
+                    } else {
+                        continue;
+                    }
+                } else if let Some(amount) = record.pricing_amount {
+                    amount * duration
+                } else {
+                    continue;
+                };
+
+                valid_candidates.push((record, cost));
+            }
+
+            // Deterministic sort by: (cost, provider_id, model_id)
+            valid_candidates.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.provider_id.cmp(&b.0.provider_id))
+                    .then_with(|| a.0.model_id.cmp(&b.0.model_id))
+            });
+
+            if let Some((record, _cost)) = valid_candidates.first() {
                 return Self::build_cloud_decision(
                     task,
                     mode,
                     record,
                     request,
-                    is_cloud_auth_configured,
-                    "Specialized video transformation provider selected",
+                    "Specialized character replacement provider selected",
+                );
+            } else {
+                // Return unavailable with clear explanation
+                let breakdown = CostBreakdown {
+                    provider_id: "none".to_string(),
+                    model_id: "none".to_string(),
+                    billable_duration_sec: duration,
+                    resolution: target_res,
+                    resolution_tier: None,
+                    unit_rate_usd: None,
+                    pricing_observed_at: None,
+                    segment_count: 1,
+                    overlap_duration_sec: 0.0,
+                    retry_allowance_usd: 0.0,
+                    inference_cost_usd: None,
+                    transfer_storage_cost_usd: None,
+                    total_usd: None,
+                    confidence: CostConfidence::Unknown,
+                    currency: "USD".to_string(),
+                    breakdown: format!(
+                        "No character replacement provider supports requested resolution {:?} / fps {:.1}",
+                        target_res, target_fps
+                    ),
+                };
+
+                return RoutingDecision {
+                    target: RoutingTarget::Unavailable,
+                    execution_class: ExecutionClass::SpecializedVideoTransformation,
+                    provider_id: "none".to_string(),
+                    model_id: "none".to_string(),
+                    task,
+                    mode,
+                    reason: format!(
+                        "No character replacement provider supports requested resolution {:?} / fps {:.1}",
+                        target_res, target_fps
+                    ),
+                    estimated_cost: breakdown.to_estimate(),
+                    cost_breakdown: breakdown,
+                    fallback_available: false,
+                    auto_submit_allowed: false,
+                };
+            }
+        }
+
+        // 7. Full Generative Transformation in non-CostSaving mode
+        if task == TaskClass::FullGenerativeTransformation && mode != RoutingPreference::CostSaving
+        {
+            let candidates =
+                registry.find_candidates_for_task(TaskClass::FullGenerativeTransformation);
+            if let Some(record) = candidates.first() {
+                return Self::build_cloud_decision(
+                    task,
+                    mode,
+                    record,
+                    request,
+                    "Generative video provider selected for full transformation",
                 );
             }
         }
 
-        // 5.5 Full Generative Transformation / Text-to-Video Cloud Selection
-        if task == TaskClass::FullGenerativeTransformation && mode != RoutingPreference::CostSaving
-        {
-            if let Some(record) =
-                registry.find_by_execution_class(ExecutionClass::SpecializedVideoTransformation)
-            {
-                if record.capabilities.supports_text_to_video {
-                    return Self::build_cloud_decision(
-                        task,
-                        mode,
-                        record,
-                        request,
-                        is_cloud_auth_configured,
-                        "Generative video provider selected for full transformation",
-                    );
-                }
-            }
-        }
-
-        // 6. Fallback to Local/Hybrid
+        // 8. Fallback to Local/Hybrid
         let hw_tier = hardware
             .map(|h| h.selected_tier)
             .unwrap_or(CapabilityTier::LowVram);
@@ -463,6 +467,7 @@ impl GenerationRouter {
         }
         record.supported_resolutions.contains(&res)
             || record.supported_resolutions.contains(&(res.1, res.0))
+            || (!record.resolution_tiers.is_empty() && ResolutionTier::from_dimensions(res).is_ok())
     }
 
     fn check_fps_supported(record: &ProviderRecord, fps: f64) -> bool {
@@ -503,6 +508,8 @@ impl GenerationRouter {
                 supported_fps: vec![],
                 pricing_unit: PricingUnit::FreeLocal,
                 pricing_amount: Some(0.0),
+                pricing_tiers: vec![],
+                resolution_tiers: vec![],
                 currency: "USD".to_string(),
                 source_url: "https://ffmpeg.org".to_string(),
                 observed_at: "2026-08-19".to_string(),
@@ -518,6 +525,9 @@ impl GenerationRouter {
             model_id: record.model_id.clone(),
             billable_duration_sec: duration,
             resolution: request.resolution,
+            resolution_tier: None,
+            unit_rate_usd: Some(0.0),
+            pricing_observed_at: Some(record.observed_at.clone()),
             segment_count: 1,
             overlap_duration_sec: 0.0,
             retry_allowance_usd: 0.0,
@@ -526,7 +536,7 @@ impl GenerationRouter {
             total_usd: Some(0.0),
             confidence: CostConfidence::Exact,
             currency: "USD".to_string(),
-            breakdown: "$0.00 local deterministic processing".to_string(),
+            breakdown: format!("{}: Free Local Deterministic Execution ($0.00)", reason),
         };
 
         RoutingDecision {
@@ -539,8 +549,8 @@ impl GenerationRouter {
             reason: reason.to_string(),
             estimated_cost: breakdown.to_estimate(),
             cost_breakdown: breakdown,
-            fallback_available: false,
-            auto_submit_allowed: true,
+            fallback_available: true,
+            auto_submit_allowed: false,
         }
     }
 
@@ -549,7 +559,6 @@ impl GenerationRouter {
         mode: RoutingPreference,
         record: &ProviderRecord,
         request: &CloudJobRequest,
-        is_cloud_auth_configured: bool,
         reason: &str,
     ) -> RoutingDecision {
         let duration = if request.duration_seconds <= 0.0 {
@@ -557,18 +566,38 @@ impl GenerationRouter {
         } else {
             request.duration_seconds
         };
-        let seg_len = record.max_duration_sec.unwrap_or(6.0).min(6.0);
-        let segment_count = ((duration / seg_len).ceil() as usize).max(1);
 
-        let (inf_cost, confidence) = match (record.pricing_unit, record.pricing_amount) {
-            (PricingUnit::PerSecond, Some(rate)) => {
-                (Some(rate * duration), CostConfidence::Estimated)
+        let res_tier = ResolutionTier::from_dimensions(request.resolution).ok();
+        let (inf_cost, unit_rate, res_tier_str) = if let Some(tier) = res_tier {
+            if let Some(pt) = record
+                .pricing_tiers
+                .iter()
+                .find(|t| t.resolution_tier == tier.as_str())
+            {
+                (
+                    Some(pt.pricing_amount * duration),
+                    Some(pt.pricing_amount),
+                    Some(tier.as_str().to_string()),
+                )
+            } else {
+                (
+                    record.pricing_amount.map(|r| r * duration),
+                    record.pricing_amount,
+                    None,
+                )
             }
-            (PricingUnit::PerPrediction, Some(fee)) => {
-                (Some(fee * segment_count as f64), CostConfidence::Estimated)
-            }
-            (PricingUnit::FreeLocal, Some(0.0)) => (Some(0.0), CostConfidence::Exact),
-            _ => (None, CostConfidence::Unknown),
+        } else {
+            (
+                record.pricing_amount.map(|r| r * duration),
+                record.pricing_amount,
+                None,
+            )
+        };
+
+        let confidence = if inf_cost.is_some() {
+            CostConfidence::Estimated
+        } else {
+            CostConfidence::Unknown
         };
 
         let breakdown = CostBreakdown {
@@ -576,7 +605,10 @@ impl GenerationRouter {
             model_id: record.model_id.clone(),
             billable_duration_sec: duration,
             resolution: request.resolution,
-            segment_count,
+            resolution_tier: res_tier_str.clone(),
+            unit_rate_usd: unit_rate,
+            pricing_observed_at: Some(record.observed_at.clone()),
+            segment_count: 1,
             overlap_duration_sec: 0.0,
             retry_allowance_usd: 0.0,
             inference_cost_usd: inf_cost,
@@ -585,35 +617,15 @@ impl GenerationRouter {
             confidence,
             currency: record.currency.clone(),
             breakdown: format!(
-                "Provider: {} | Rate: {:?} ${:?} | Dur: {:.1}s ({} segs)",
+                "Cloud Provider: {} ({}) | Rate: {:?} ${:?}/s | Dur: {:.1}s | Est: ${:.3}",
                 record.provider_id,
-                record.pricing_unit,
-                record.pricing_amount,
+                record.model_id,
+                res_tier_str.unwrap_or_else(|| "default".to_string()),
+                unit_rate,
                 duration,
-                segment_count
+                inf_cost.unwrap_or(0.0)
             ),
         };
-
-        if !is_cloud_auth_configured {
-            return RoutingDecision {
-                target: RoutingTarget::Unavailable,
-                execution_class: record.execution_class,
-                provider_id: record.provider_id.clone(),
-                model_id: record.model_id.clone(),
-                task,
-                mode,
-                reason: format!(
-                    "CLOUD provider {} selected but credentials (e.g. REPLICATE_API_TOKEN) are unconfigured",
-                    record.provider_id
-                ),
-                estimated_cost: breakdown.to_estimate(),
-                cost_breakdown: breakdown,
-                fallback_available: mode != RoutingPreference::CloudOnly,
-                auto_submit_allowed: false,
-            };
-        }
-
-        let auto_submit = confidence != CostConfidence::Unknown && inf_cost.is_some();
 
         RoutingDecision {
             target: RoutingTarget::Cloud,
@@ -625,8 +637,8 @@ impl GenerationRouter {
             reason: reason.to_string(),
             estimated_cost: breakdown.to_estimate(),
             cost_breakdown: breakdown,
-            fallback_available: mode != RoutingPreference::CloudOnly,
-            auto_submit_allowed: auto_submit,
+            fallback_available: true,
+            auto_submit_allowed: true,
         }
     }
 }

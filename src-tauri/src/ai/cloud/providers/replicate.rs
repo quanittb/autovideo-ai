@@ -50,6 +50,14 @@ impl CloudVideoProvider for ReplicateProvider {
         "replicate"
     }
 
+    fn model_id(&self) -> &str {
+        &self.model_version
+    }
+
+    fn model_version_hint(&self) -> Option<&str> {
+        Some(&self.model_version)
+    }
+
     fn provider_name(&self) -> &str {
         "Replicate Cloud Engine"
     }
@@ -80,7 +88,7 @@ impl CloudVideoProvider for ReplicateProvider {
             req.duration_seconds
         };
 
-        if let Some(record) = registry.find_by_id(self.provider_id()) {
+        if let Some(record) = registry.find(self.provider_id(), self.model_id()) {
             let seg_len = record.max_duration_sec.unwrap_or(6.0).min(6.0);
             let segment_count = ((dur / seg_len).ceil() as usize).max(1);
             let (inf_cost, confidence) = match (record.pricing_unit, record.pricing_amount) {
@@ -210,7 +218,8 @@ impl CloudVideoProvider for ReplicateProvider {
                 job_id,
                 remote_id,
                 provider_id: "replicate".to_string(),
-                model,
+                model: model.clone(),
+                model_version: Some(model),
             })
         })
     }

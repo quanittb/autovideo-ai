@@ -24,6 +24,12 @@ pub struct CostBreakdown {
     pub model_id: String,
     pub billable_duration_sec: f64,
     pub resolution: (u32, u32),
+    #[serde(default)]
+    pub resolution_tier: Option<String>,
+    #[serde(default)]
+    pub unit_rate_usd: Option<f64>,
+    #[serde(default)]
+    pub pricing_observed_at: Option<String>,
     pub segment_count: usize,
     pub overlap_duration_sec: f64,
     pub retry_allowance_usd: f64,
@@ -42,6 +48,9 @@ impl Default for CostBreakdown {
             model_id: "ffmpeg_native".to_string(),
             billable_duration_sec: 0.0,
             resolution: (720, 1280),
+            resolution_tier: None,
+            unit_rate_usd: Some(0.0),
+            pricing_observed_at: Some("2026-08-19".to_string()),
             segment_count: 1,
             overlap_duration_sec: 0.0,
             retry_allowance_usd: 0.0,
