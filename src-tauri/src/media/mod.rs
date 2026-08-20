@@ -13,7 +13,7 @@ use crate::events::parse_ffmpeg_progress_line;
 use crate::projects::SourceMedia;
 
 pub const MAX_FILE_SIZE_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["mp4", "mov", "avi", "mkv"];
+pub const SUPPORTED_EXTENSIONS: &[&str] = &["mp4", "mov", "avi", "mkv", "partial"];
 pub const CACHE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -970,7 +970,7 @@ impl MediaService {
         })
     }
 
-    fn probe_with_ffprobe(
+    pub fn probe_with_ffprobe(
         &self,
         path: &Path,
         file_name: &str,

@@ -35,7 +35,7 @@ pub fn validate_and_prepare_cloud_submission(
     // 3. Obtain routing decision through single GenerationRouter & ProviderRegistry
     let decision = GenerationRouter::route_with_registry(
         task_class,
-        RoutingPreference::CostSaving,
+        RoutingPreference::Quality,
         request,
         cloud_provider,
         None,

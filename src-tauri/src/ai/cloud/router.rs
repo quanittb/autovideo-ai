@@ -50,24 +50,51 @@ pub enum TaskClass {
 }
 
 impl TaskClass {
+    pub fn execution_class(&self) -> ExecutionClass {
+        match self {
+            TaskClass::StyleFilter
+            | TaskClass::BackgroundComposite
+            | TaskClass::AudioTransformation => ExecutionClass::LocalDeterministic,
+            TaskClass::CharacterReplacement | TaskClass::ActionRegeneration => {
+                ExecutionClass::SpecializedVideoTransformation
+            }
+            TaskClass::BackgroundRemoval => ExecutionClass::UtilityCloud,
+            TaskClass::FullGenerativeTransformation => ExecutionClass::GenerativeFallback,
+        }
+    }
+
     pub fn from_str_or_default(s: &str) -> Self {
         let normalized = s.trim().to_uppercase().replace('-', "_");
         match normalized.as_str() {
-            "CHARACTER_REPLACEMENT" | "CHARACTER" => TaskClass::CharacterReplacement,
-            "BACKGROUND_REMOVAL" | "REMOVE_BG" | "REMOVE_BACKGROUND" => {
-                TaskClass::BackgroundRemoval
+            "CHARACTER_REPLACEMENT" | "CHARACTERREPLACEMENT" | "CHARACTER" => {
+                TaskClass::CharacterReplacement
             }
-            "BACKGROUND_COMPOSITE" | "BACKGROUND_REPLACEMENT" | "BACKGROUND" => {
-                TaskClass::BackgroundComposite
+            "BACKGROUND_REMOVAL" | "BACKGROUNDREMOVAL" | "REMOVE_BG" | "REMOVEBG"
+            | "REMOVE_BACKGROUND" | "REMOVEBACKGROUND" => TaskClass::BackgroundRemoval,
+            "BACKGROUND_COMPOSITE"
+            | "BACKGROUNDCOMPOSITE"
+            | "BACKGROUND_REPLACEMENT"
+            | "BACKGROUNDREPLACEMENT"
+            | "BACKGROUND" => TaskClass::BackgroundComposite,
+            "STYLE_FILTER"
+            | "STYLEFILTER"
+            | "STYLE_TRANSFORMATION"
+            | "STYLETRANSFORMATION"
+            | "STYLE" => TaskClass::StyleFilter,
+            "AUDIO_TRANSFORMATION" | "AUDIOTRANSFORMATION" | "AUDIO_MUX" | "AUDIOMUX" | "AUDIO" => {
+                TaskClass::AudioTransformation
             }
-            "STYLE_FILTER" | "STYLE_TRANSFORMATION" | "STYLE" => TaskClass::StyleFilter,
-            "AUDIO_TRANSFORMATION" | "AUDIO_MUX" | "AUDIO" => TaskClass::AudioTransformation,
-            "ACTION_REGENERATION" | "ACTION_TRANSFORMATION" | "ACTION" => {
-                TaskClass::ActionRegeneration
-            }
-            "FULL_GENERATIVE_TRANSFORMATION" | "FULL_TRANSFORMATION" | "FULL" | "GENERATIVE" => {
-                TaskClass::FullGenerativeTransformation
-            }
+            "ACTION_REGENERATION"
+            | "ACTIONREGENERATION"
+            | "ACTION_TRANSFORMATION"
+            | "ACTIONTRANSFORMATION"
+            | "ACTION" => TaskClass::ActionRegeneration,
+            "FULL_GENERATIVE_TRANSFORMATION"
+            | "FULLGENERATIVETRANSFORMATION"
+            | "FULL_TRANSFORMATION"
+            | "FULLTRANSFORMATION"
+            | "FULL"
+            | "GENERATIVE" => TaskClass::FullGenerativeTransformation,
             _ => TaskClass::CharacterReplacement,
         }
     }
@@ -389,6 +416,25 @@ impl GenerationRouter {
                     is_cloud_auth_configured,
                     "Specialized video transformation provider selected",
                 );
+            }
+        }
+
+        // 5.5 Full Generative Transformation / Text-to-Video Cloud Selection
+        if task == TaskClass::FullGenerativeTransformation && mode != RoutingPreference::CostSaving
+        {
+            if let Some(record) =
+                registry.find_by_execution_class(ExecutionClass::SpecializedVideoTransformation)
+            {
+                if record.capabilities.supports_text_to_video {
+                    return Self::build_cloud_decision(
+                        task,
+                        mode,
+                        record,
+                        request,
+                        is_cloud_auth_configured,
+                        "Generative video provider selected for full transformation",
+                    );
+                }
             }
         }
 

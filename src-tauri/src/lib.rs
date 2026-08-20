@@ -13,16 +13,24 @@ pub mod system;
 
 use commands::*;
 use jobs::JobEngine;
+use std::sync::Arc;
 use system::StoragePaths;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Perform startup recovery on interrupted jobs
     let storage_paths = StoragePaths::default_paths();
-    let engine = JobEngine::new(storage_paths);
+    let engine = JobEngine::new(storage_paths.clone());
     let _ = engine.recover_interrupted_jobs();
 
+    // Perform startup recovery on non-terminal cloud jobs
+    let cloud_lifecycle = Arc::new(crate::ai::cloud::CloudJobLifecycleService::with_defaults(
+        storage_paths.clone(),
+    ));
+    let _ = cloud_lifecycle.recover_startup_jobs();
+
     tauri::Builder::default()
+        .manage(cloud_lifecycle)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![

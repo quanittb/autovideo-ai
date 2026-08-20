@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
+use std::sync::Arc;
 use tauri::{command, AppHandle, Emitter};
 
 use crate::ai::cloud::CloudVideoProvider;
@@ -1663,95 +1664,90 @@ pub fn get_generation_route(
 pub async fn start_cloud_generation(
     request: crate::ai::cloud::CloudJobRequest,
     max_cost: Option<f64>,
+    lifecycle: tauri::State<'_, Arc<crate::ai::cloud::CloudJobLifecycleService>>,
 ) -> Result<crate::ai::cloud::CloudJobStatus, String> {
-    let provider = crate::ai::cloud::ReplicateProvider::new();
-    let registry = crate::ai::cloud::ProviderRegistry::new();
+    let service = lifecycle.inner().clone();
 
-    // Single authoritative production submission guard
-    let plan = crate::ai::cloud::validate_and_prepare_cloud_submission(
-        &request, max_cost, &provider, &registry,
-    )
-    .map_err(|e| format!("{}", e))?;
-
-    // Submit to selected provider
-    let handle = provider
-        .submit_job(&request)
+    let job = service
+        .start_cloud_generation(request, max_cost)
         .await
         .map_err(|e| format!("{}", e))?;
 
-    Ok(crate::ai::cloud::CloudJobStatus {
-        job_id: request.job_id.clone(),
-        state: crate::ai::cloud::CloudJobState::Processing,
-        progress_pct: 10.0,
-        remote_id: Some(handle.remote_id),
-        remote_status: Some("processing".to_string()),
-        error_message: None,
-        output_url: None,
-        elapsed_seconds: 0.5,
-        cost_estimate: Some(plan.routing_decision.estimated_cost),
-        actual_cost: None,
-    })
+    Ok(job.to_legacy_status())
 }
 
 #[command]
 pub async fn get_cloud_job_status(
     job_id: String,
+    project_id: Option<String>,
     remote_id: Option<String>,
+    lifecycle: tauri::State<'_, Arc<crate::ai::cloud::CloudJobLifecycleService>>,
 ) -> Result<crate::ai::cloud::CloudJobStatus, String> {
-    let provider = crate::ai::cloud::ReplicateProvider::new();
-    if let Some(r_id) = remote_id {
-        let resp = provider
-            .poll_status(&r_id)
-            .await
+    let service = lifecycle.inner().clone();
+
+    if let Some(pid) = &project_id {
+        let job = service
+            .get_job_status(pid, &job_id)
             .map_err(|e| format!("{}", e))?;
-
-        let state = match resp.status {
-            crate::ai::cloud::RemoteStatus::Starting
-            | crate::ai::cloud::RemoteStatus::Processing => {
-                crate::ai::cloud::CloudJobState::Processing
-            }
-            crate::ai::cloud::RemoteStatus::Succeeded => crate::ai::cloud::CloudJobState::Completed,
-            crate::ai::cloud::RemoteStatus::Failed => crate::ai::cloud::CloudJobState::Failed,
-            crate::ai::cloud::RemoteStatus::Canceled => crate::ai::cloud::CloudJobState::Cancelled,
-        };
-
-        Ok(crate::ai::cloud::CloudJobStatus {
-            job_id,
-            state,
-            progress_pct: if state == crate::ai::cloud::CloudJobState::Completed {
-                100.0
-            } else {
-                50.0
-            },
-            remote_id: Some(r_id),
-            remote_status: Some(format!("{:?}", resp.status)),
-            error_message: resp.error,
-            output_url: resp.output_url,
-            elapsed_seconds: 1.0,
-            cost_estimate: None,
-            actual_cost: None,
-        })
-    } else {
-        Ok(crate::ai::cloud::CloudJobStatus {
-            job_id,
-            state: crate::ai::cloud::CloudJobState::Queued,
-            progress_pct: 0.0,
-            remote_id: None,
-            remote_status: Some("queued".to_string()),
-            error_message: None,
-            output_url: None,
-            elapsed_seconds: 0.0,
-            cost_estimate: None,
-            actual_cost: None,
-        })
+        return Ok(job.to_legacy_status());
     }
+
+    // Search active jobs in store if project_id was not explicitly specified
+    let active = service
+        .store()
+        .list_all_active_jobs()
+        .map_err(|e| format!("{}", e))?;
+    if let Some(found) = active.into_iter().find(|j| {
+        j.job_id == job_id
+            || j.internal_job_id == job_id
+            || (remote_id.is_some() && j.remote_job_id == remote_id)
+    }) {
+        return Ok(found.to_legacy_status());
+    }
+
+    Err(format!(
+        "JOB_NOT_FOUND: Job {} could not be found in persistent storage",
+        job_id
+    ))
 }
 
 #[command]
-pub async fn cancel_cloud_generation(remote_id: String) -> Result<(), String> {
-    let provider = crate::ai::cloud::ReplicateProvider::new();
-    provider
-        .cancel_job(&remote_id)
-        .await
-        .map_err(|e| format!("{}", e))
+pub async fn cancel_cloud_generation(
+    job_id: Option<String>,
+    project_id: Option<String>,
+    remote_id: Option<String>,
+    lifecycle: tauri::State<'_, Arc<crate::ai::cloud::CloudJobLifecycleService>>,
+) -> Result<(), String> {
+    let service = lifecycle.inner().clone();
+
+    if let (Some(pid), Some(jid)) = (&project_id, &job_id) {
+        service
+            .cancel_cloud_generation(pid, jid)
+            .await
+            .map_err(|e| format!("{}", e))?;
+        return Ok(());
+    }
+
+    // Look up job in active store if project_id was omitted
+    let active = service
+        .store()
+        .list_all_active_jobs()
+        .map_err(|e| format!("{}", e))?;
+    let target_job = active.into_iter().find(|j| {
+        (job_id.as_deref().is_some()
+            && (j.job_id == *job_id.as_deref().unwrap()
+                || j.internal_job_id == *job_id.as_deref().unwrap()))
+            || (remote_id.as_deref().is_some()
+                && j.remote_job_id.as_deref() == remote_id.as_deref())
+    });
+
+    if let Some(job) = target_job {
+        service
+            .cancel_cloud_generation(&job.project_id, &job.internal_job_id)
+            .await
+            .map_err(|e| format!("{}", e))?;
+        return Ok(());
+    }
+
+    Err("JOB_NOT_FOUND: Cannot cancel unknown cloud job".to_string())
 }

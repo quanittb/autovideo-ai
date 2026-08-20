@@ -597,8 +597,46 @@ export interface CostBreakdown {
   breakdown: string;
 }
 
+export type CloudJobState =
+  | 'CREATED'
+  | 'VALIDATING'
+  | 'COST_APPROVAL_REQUIRED'
+  | 'UPLOADING'
+  | 'SUBMITTED'
+  | 'PROCESSING'
+  | 'DOWNLOADING'
+  | 'VALIDATING_OUTPUT'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'BLOCKED'
+  | 'Created'
+  | 'Validating'
+  | 'Submitted'
+  | 'Processing'
+  | 'Downloading'
+  | 'Completed'
+  | 'Failed'
+  | 'Cancelled'
+  | 'Blocked'
+  | 'Queued';
+
+export type SubmissionState = 'NEVER_ATTEMPTED' | 'IN_FLIGHT' | 'ACKNOWLEDGED' | 'AMBIGUOUS';
+
+export interface RetryCounters {
+  submitAttempts: number;
+  pollAttempts: number;
+  downloadAttempts: number;
+}
+
+export interface JobErrorRecord {
+  code: string;
+  sanitizedMessage: string;
+}
+
 export interface CloudJobRequest {
   jobId: string;
+  projectId?: string;
   prompt: string;
   negativePrompt?: string;
   sourceVideo?: string;
@@ -623,7 +661,7 @@ export interface CostEstimate {
 
 export interface CloudJobStatus {
   jobId: string;
-  state: 'Queued' | 'Submitting' | 'Processing' | 'Downloading' | 'Validating' | 'Completed' | 'Failed' | 'Cancelled';
+  state: CloudJobState;
   progressPct: number;
   remoteId?: string;
   remoteStatus?: string;
@@ -632,6 +670,32 @@ export interface CloudJobStatus {
   elapsedSeconds: number;
   costEstimate?: CostEstimate;
   actualCost?: number;
+}
+
+export interface CloudJobEventPayload {
+  jobId: string;
+  internalJobId: string;
+  projectId: string;
+  providerId: string;
+  modelId: string;
+  taskType: string;
+  executionClass: ExecutionClass;
+  state: CloudJobState;
+  submissionState: SubmissionState;
+  remoteJobId?: string;
+  costEstimate?: CostEstimate;
+  actualCost?: number;
+  budgetLimit: number;
+  outputPath?: string;
+  retryCounters: RetryCounters;
+  error?: JobErrorRecord;
+  createdAt: string;
+  updatedAt: string;
+  submittedAt?: string;
+  completedAt?: string;
+  cancellationRequested: boolean;
+  progressPct?: number;
+  remoteStatus?: string;
 }
 
 export interface RoutingDecision {
@@ -661,12 +725,12 @@ export const cloudApi = {
     return await invoke('start_cloud_generation', { request, maxCost });
   },
 
-  getCloudJobStatus: async (jobId: string, remoteId?: string): Promise<CloudJobStatus> => {
-    return await invoke('get_cloud_job_status', { jobId, remoteId });
+  getCloudJobStatus: async (jobId: string, projectId?: string, remoteId?: string): Promise<CloudJobStatus> => {
+    return await invoke('get_cloud_job_status', { jobId, projectId, remoteId });
   },
 
-  cancelCloudGeneration: async (remoteId: string): Promise<void> => {
-    return await invoke('cancel_cloud_generation', { remoteId });
+  cancelCloudGeneration: async (jobId?: string, projectId?: string, remoteId?: string): Promise<void> => {
+    return await invoke('cancel_cloud_generation', { jobId, projectId, remoteId });
   },
 };
 

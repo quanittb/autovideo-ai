@@ -11,6 +11,7 @@ mod tests {
     fn make_test_request(duration: f64, task: &str) -> CloudJobRequest {
         CloudJobRequest {
             job_id: "test_job_1".to_string(),
+            project_id: Some("default_project".to_string()),
             prompt: "A cinematic transformation in dramatic lighting".to_string(),
             negative_prompt: Some("blurry, low quality".to_string()),
             source_video: Some(PathBuf::from(
@@ -126,7 +127,7 @@ mod tests {
 
         manager.register_job("job_101", &req, None);
         let s0 = manager.get_status("job_101").unwrap();
-        assert_eq!(s0.state, CloudJobState::Queued);
+        assert_eq!(s0.state, CloudJobState::Created);
 
         manager.update_state("job_101", CloudJobState::Processing, 25.0);
         manager.set_remote_info("job_101", "rem_xyz", "processing", None);
