@@ -23,6 +23,18 @@ impl ProviderKey {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResolutionPolicy {
+    ExplicitTiered {
+        supported_tiers: Vec<ResolutionTier>,
+    },
+    PreserveSource {
+        max_width: Option<u32>,
+        max_height: Option<u32>,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ResolutionTier {

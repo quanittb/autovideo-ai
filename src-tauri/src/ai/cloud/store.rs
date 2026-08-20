@@ -1,5 +1,5 @@
 use super::error::CloudProviderError;
-use super::job::PersistentCloudJob;
+use super::job::{ArtifactContainer, PersistentCloudJob};
 use crate::system::StoragePaths;
 use std::fs::{self, File};
 use std::io::Write;
@@ -136,9 +136,30 @@ impl PersistentCloudJobStore {
         project_id: &str,
         internal_job_id: &str,
     ) -> Result<PathBuf, CloudProviderError> {
+        self.artifact_final_path_for_container(project_id, internal_job_id, ArtifactContainer::Mp4)
+    }
+
+    pub fn artifact_final_path_for_container(
+        &self,
+        project_id: &str,
+        internal_job_id: &str,
+        container: ArtifactContainer,
+    ) -> Result<PathBuf, CloudProviderError> {
         validate_identifier(internal_job_id, "internalJobId")?;
         let artifacts_dir = self.project_artifacts_dir(project_id)?;
-        Ok(artifacts_dir.join(format!("{}.mp4", internal_job_id)))
+        Ok(artifacts_dir.join(format!("{}.{}", internal_job_id, container.extension())))
+    }
+
+    pub fn artifact_final_path_for_job(
+        &self,
+        job: &PersistentCloudJob,
+    ) -> Result<PathBuf, CloudProviderError> {
+        let container = job
+            .artifact_descriptor
+            .as_ref()
+            .map(|d| d.container)
+            .unwrap_or(ArtifactContainer::Mp4);
+        self.artifact_final_path_for_container(&job.project_id, &job.internal_job_id, container)
     }
 
     pub fn artifact_partial_path(
@@ -294,7 +315,7 @@ impl PersistentCloudJobStore {
             Err("Temp file missing".to_string())
         };
 
-        match (primary_res, tmp_res) {
+        let mut job = match (primary_res, tmp_res) {
             // Case 1: Both primary and temp are valid -> Compare state_revision!
             (Ok(primary_job), Ok(tmp_job)) => {
                 if tmp_job.state_revision > primary_job.state_revision {
@@ -305,11 +326,11 @@ impl PersistentCloudJobStore {
                             e
                         ))
                     })?;
-                    Ok(tmp_job)
+                    tmp_job
                 } else {
                     // Primary is same or newer -> clean up stale temp
                     let _ = fs::remove_file(&tmp_path);
-                    Ok(primary_job)
+                    primary_job
                 }
             }
 
@@ -318,7 +339,7 @@ impl PersistentCloudJobStore {
                 if tmp_path.exists() {
                     let _ = fs::remove_file(&tmp_path);
                 }
-                Ok(primary_job)
+                primary_job
             }
 
             // Case 3: Primary missing, temp valid -> promote temp
@@ -329,7 +350,7 @@ impl PersistentCloudJobStore {
                         e
                     ))
                 })?;
-                Ok(tmp_job)
+                tmp_job
             }
 
             // Case 4: Primary corrupt, temp valid -> backup corrupt primary and promote temp
@@ -342,15 +363,20 @@ impl PersistentCloudJobStore {
                         e
                     ))
                 })?;
-                Ok(tmp_job)
+                tmp_job
             }
 
             // Case 5: Both missing or corrupt -> recovery failure (Fail-Closed)
-            (Err(e1), Err(e2)) => Err(CloudProviderError::ProviderUnavailable(format!(
-                "RECOVERY_FAILED: Primary corrupt/missing ({}) and temp corrupt/missing ({}) for job {}",
-                e1, e2, internal_job_id
-            ))),
-        }
+            (Err(e1), Err(e2)) => {
+                return Err(CloudProviderError::ProviderUnavailable(format!(
+                    "RECOVERY_FAILED: Primary corrupt/missing ({}) and temp corrupt/missing ({}) for job {}",
+                    e1, e2, internal_job_id
+                )));
+            }
+        };
+
+        job.normalize_in_memory();
+        Ok(job)
     }
 
     // -------------------------------------------------------------------------

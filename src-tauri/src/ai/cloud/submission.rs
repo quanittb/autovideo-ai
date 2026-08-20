@@ -6,6 +6,7 @@ use super::registry::ProviderRegistry;
 use super::router::{
     GenerationRouter, RoutingDecision, RoutingPreference, RoutingTarget, TaskClass,
 };
+use super::spec::SourceMediaProbe;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -60,11 +61,38 @@ pub fn validate_and_prepare_cloud_submission(
     // 2. Determine real TaskClass using STRICT parsing (reject unknown tasks)
     let task_class = TaskClass::from_str_strict(&request.task_type)?;
 
-    // 3. Obtain routing decision through single GenerationRouter & ProviderRegistry with COST_SAVING policy
-    let decision = GenerationRouter::route_with_registry(
+    // 3. Probing source media facts (if source_video is provided or required)
+    let source_facts = if let Some(ref source_path) = request.source_video {
+        Some(SourceMediaProbe::probe_file(source_path)?)
+    } else if task_class == TaskClass::BackgroundRemoval {
+        return Err(CloudProviderError::RequestInvalid(
+            "SOURCE_VIDEO_REQUIRED: Source video is required for background removal".to_string(),
+        ));
+    } else {
+        None
+    };
+
+    // 4. Background removal strictly forbids reference images
+    if task_class == TaskClass::BackgroundRemoval {
+        let has_references = request
+            .reference_images
+            .as_ref()
+            .map(|r| !r.is_empty())
+            .unwrap_or(false)
+            || request.reference_image.is_some();
+        if has_references {
+            return Err(CloudProviderError::RequestInvalid(
+                "UNEXPECTED_REFERENCE_INPUTS_FOR_BACKGROUND_REMOVAL: Background removal requires 0 reference images".to_string(),
+            ));
+        }
+    }
+
+    // 5. Obtain routing decision through single GenerationRouter & ProviderRegistry with COST_SAVING policy
+    let decision = GenerationRouter::route_with_facts(
         task_class,
         RoutingPreference::CostSaving,
         request,
+        source_facts.as_ref(),
         None,
         registry,
     );

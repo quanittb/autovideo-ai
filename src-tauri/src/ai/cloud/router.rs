@@ -1,8 +1,9 @@
 use super::cost::{CostBreakdown, CostConfidence, CostEstimate};
 use super::error::CloudProviderError;
 use super::job::CloudJobRequest;
-use super::provider::ResolutionTier;
+use super::provider::{ResolutionPolicy, ResolutionTier};
 use super::registry::{ExecutionClass, PricingUnit, ProviderRecord, ProviderRegistry};
+use super::spec::SourceMediaFacts;
 use crate::ai::generative::hardware::{CapabilityReport, CapabilityTier};
 use serde::{Deserialize, Serialize};
 
@@ -131,12 +132,11 @@ impl Default for RoutingPreference {
 
 pub type UserExecutionMode = RoutingPreference;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RoutingTarget {
     Local,
-    Cloud,
     Hybrid,
+    Cloud,
     Unavailable,
 }
 
@@ -166,7 +166,7 @@ impl GenerationRouter {
         hardware: Option<&CapabilityReport>,
     ) -> RoutingDecision {
         let registry = ProviderRegistry::new();
-        Self::route_with_registry(task, mode, request, hardware, &registry)
+        Self::route_with_facts(task, mode, request, None, hardware, &registry)
     }
 
     pub fn route_with_registry(
@@ -176,12 +176,29 @@ impl GenerationRouter {
         hardware: Option<&CapabilityReport>,
         registry: &ProviderRegistry,
     ) -> RoutingDecision {
-        let target_res = request.resolution;
-        let target_fps = request.fps;
-        let duration = if request.duration_seconds <= 0.0 {
-            6.0
+        Self::route_with_facts(task, mode, request, None, hardware, registry)
+    }
+
+    pub fn route_with_facts(
+        task: TaskClass,
+        mode: RoutingPreference,
+        request: &CloudJobRequest,
+        source_facts: Option<&SourceMediaFacts>,
+        hardware: Option<&CapabilityReport>,
+        registry: &ProviderRegistry,
+    ) -> RoutingDecision {
+        let (target_res, target_fps, duration) = if let Some(facts) = source_facts {
+            ((facts.width, facts.height), facts.fps, facts.duration_sec)
         } else {
-            request.duration_seconds
+            (
+                request.resolution,
+                request.fps,
+                if request.duration_seconds <= 0.0 {
+                    6.0
+                } else {
+                    request.duration_seconds
+                },
+            )
         };
 
         // 1. Explicit LocalOnly Mode
@@ -190,7 +207,8 @@ impl GenerationRouter {
                 task,
                 mode,
                 "User explicitly selected LOCAL_ONLY mode",
-                request,
+                target_res,
+                duration,
                 registry,
             );
         }
@@ -208,7 +226,8 @@ impl GenerationRouter {
                 task,
                 mode,
                 "Local deterministic processing preferred for style, composite, and audio tasks ($0.00)",
-                request,
+                target_res,
+                duration,
                 registry,
             );
         }
@@ -290,12 +309,89 @@ impl GenerationRouter {
 
         // 5. Utility Cloud Tasks (Background Removal)
         if task == TaskClass::BackgroundRemoval {
-            let has_adapter =
-                registry.has_executable_adapter("replicate_utility", "lucataco/remove-bg");
-            if !has_adapter {
+            let candidates = registry.find_candidates_for_task(TaskClass::BackgroundRemoval);
+            let mut valid_candidates: Vec<(&ProviderRecord, f64)> = Vec::new();
+
+            for record in candidates {
+                if let Some(max_d) = record.max_duration_sec {
+                    if duration > max_d {
+                        let breakdown = CostBreakdown {
+                            provider_id: record.provider_id.clone(),
+                            model_id: record.model_id.clone(),
+                            billable_duration_sec: duration,
+                            resolution: target_res,
+                            resolution_tier: None,
+                            unit_rate_usd: record.pricing_amount,
+                            pricing_observed_at: Some(record.observed_at.clone()),
+                            segment_count: 1,
+                            overlap_duration_sec: 0.0,
+                            retry_allowance_usd: 0.0,
+                            inference_cost_usd: None,
+                            transfer_storage_cost_usd: None,
+                            total_usd: None,
+                            confidence: CostConfidence::Unknown,
+                            currency: record.currency.clone(),
+                            breakdown: format!(
+                                "PROVIDER_DURATION_LIMIT: Duration {:.2}s exceeds provider limit {:.2}s",
+                                duration, max_d
+                            ),
+                        };
+
+                        return RoutingDecision {
+                            target: RoutingTarget::Unavailable,
+                            execution_class: record.execution_class,
+                            provider_id: record.provider_id.clone(),
+                            model_id: record.model_id.clone(),
+                            task,
+                            mode,
+                            reason: format!(
+                                "PROVIDER_DURATION_LIMIT: Duration {:.2}s exceeds provider limit {:.2}s",
+                                duration, max_d
+                            ),
+                            estimated_cost: breakdown.to_estimate(),
+                            cost_breakdown: breakdown,
+                            fallback_available: false,
+                            auto_submit_allowed: false,
+                        };
+                    }
+                }
+
+                if !Self::check_resolution_supported(record, target_res) {
+                    continue;
+                }
+                if !Self::check_fps_supported(record, target_fps) {
+                    continue;
+                }
+
+                let rate = match record.pricing_amount {
+                    Some(r) => r,
+                    None => continue,
+                };
+                let cost = duration * rate;
+                valid_candidates.push((record, cost));
+            }
+
+            // Deterministic candidate sort: (cost, provider_id, model_id)
+            valid_candidates.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.provider_id.cmp(&b.0.provider_id))
+                    .then_with(|| a.0.model_id.cmp(&b.0.model_id))
+            });
+
+            if let Some((record, _cost)) = valid_candidates.first() {
+                return Self::build_cloud_decision(
+                    task,
+                    mode,
+                    record,
+                    target_res,
+                    duration,
+                    "Utility background removal provider selected",
+                );
+            } else {
                 let breakdown = CostBreakdown {
-                    provider_id: "replicate_utility".to_string(),
-                    model_id: "lucataco/remove-bg".to_string(),
+                    provider_id: "none".to_string(),
+                    model_id: "none".to_string(),
                     billable_duration_sec: duration,
                     resolution: target_res,
                     resolution_tier: None,
@@ -309,19 +405,23 @@ impl GenerationRouter {
                     total_usd: None,
                     confidence: CostConfidence::Unknown,
                     currency: "USD".to_string(),
-                    breakdown:
-                        "Utility background-removal provider adapter not implemented (deferred to Phase 17)"
-                            .to_string(),
+                    breakdown: format!(
+                        "No background removal provider supports requested resolution {:?} / fps {:.1}",
+                        target_res, target_fps
+                    ),
                 };
 
                 return RoutingDecision {
                     target: RoutingTarget::Unavailable,
                     execution_class: ExecutionClass::UtilityCloud,
-                    provider_id: "replicate_utility".to_string(),
-                    model_id: "lucataco/remove-bg".to_string(),
+                    provider_id: "none".to_string(),
+                    model_id: "none".to_string(),
                     task,
                     mode,
-                    reason: "Utility background-removal provider adapter not implemented (deferred to Phase 17)".to_string(),
+                    reason: format!(
+                        "No background removal provider supports requested resolution {:?} / fps {:.1}",
+                        target_res, target_fps
+                    ),
                     estimated_cost: breakdown.to_estimate(),
                     cost_breakdown: breakdown,
                     fallback_available: false,
@@ -380,7 +480,8 @@ impl GenerationRouter {
                     task,
                     mode,
                     record,
-                    request,
+                    target_res,
+                    duration,
                     "Specialized character replacement provider selected",
                 );
             } else {
@@ -436,7 +537,8 @@ impl GenerationRouter {
                     task,
                     mode,
                     record,
-                    request,
+                    target_res,
+                    duration,
                     "Generative video provider selected for full transformation",
                 );
             }
@@ -456,18 +558,44 @@ impl GenerationRouter {
             task,
             mode,
             &format!("Fallback to local {:?} execution", target),
-            request,
+            target_res,
+            duration,
             registry,
         )
     }
 
     fn check_resolution_supported(record: &ProviderRecord, res: (u32, u32)) -> bool {
-        if record.supported_resolutions.is_empty() {
-            return true;
+        match &record.resolution_policy {
+            ResolutionPolicy::ExplicitTiered { supported_tiers } => {
+                if let Ok(tier) = ResolutionTier::from_dimensions(res) {
+                    if supported_tiers.contains(&tier) {
+                        return true;
+                    }
+                }
+                record.supported_resolutions.contains(&res)
+                    || record.supported_resolutions.contains(&(res.1, res.0))
+            }
+            ResolutionPolicy::PreserveSource {
+                max_width,
+                max_height,
+            } => {
+                let (w, h) = res;
+                if w == 0 || h == 0 {
+                    return false;
+                }
+                if let Some(max_w) = max_width {
+                    if w > *max_w {
+                        return false;
+                    }
+                }
+                if let Some(max_h) = max_height {
+                    if h > *max_h {
+                        return false;
+                    }
+                }
+                true
+            }
         }
-        record.supported_resolutions.contains(&res)
-            || record.supported_resolutions.contains(&(res.1, res.0))
-            || (!record.resolution_tiers.is_empty() && ResolutionTier::from_dimensions(res).is_ok())
     }
 
     fn check_fps_supported(record: &ProviderRecord, fps: f64) -> bool {
@@ -484,7 +612,8 @@ impl GenerationRouter {
         task: TaskClass,
         mode: RoutingPreference,
         reason: &str,
-        request: &CloudJobRequest,
+        resolution: (u32, u32),
+        duration: f64,
         registry: &ProviderRegistry,
     ) -> RoutingDecision {
         let record = registry
@@ -510,6 +639,11 @@ impl GenerationRouter {
                 supported_resolutions: vec![],
                 supported_fps: vec![],
                 supports_original_fps: true,
+                supports_video_background_removal: false,
+                resolution_policy: ResolutionPolicy::PreserveSource {
+                    max_width: None,
+                    max_height: None,
+                },
                 pricing_unit: PricingUnit::FreeLocal,
                 pricing_amount: Some(0.0),
                 pricing_tiers: vec![],
@@ -519,16 +653,11 @@ impl GenerationRouter {
                 observed_at: "2026-08-19".to_string(),
             });
 
-        let duration = if request.duration_seconds <= 0.0 {
-            6.0
-        } else {
-            request.duration_seconds
-        };
         let breakdown = CostBreakdown {
             provider_id: record.provider_id.clone(),
             model_id: record.model_id.clone(),
             billable_duration_sec: duration,
-            resolution: request.resolution,
+            resolution,
             resolution_tier: None,
             unit_rate_usd: Some(0.0),
             pricing_observed_at: Some(record.observed_at.clone()),
@@ -562,16 +691,11 @@ impl GenerationRouter {
         task: TaskClass,
         mode: RoutingPreference,
         record: &ProviderRecord,
-        request: &CloudJobRequest,
+        resolution: (u32, u32),
+        duration: f64,
         reason: &str,
     ) -> RoutingDecision {
-        let duration = if request.duration_seconds <= 0.0 {
-            6.0
-        } else {
-            request.duration_seconds
-        };
-
-        let res_tier = ResolutionTier::from_dimensions(request.resolution).ok();
+        let res_tier = ResolutionTier::from_dimensions(resolution).ok();
         let (inf_cost, unit_rate, res_tier_str) = if let Some(tier) = res_tier {
             if let Some(pt) = record
                 .pricing_tiers
@@ -608,7 +732,7 @@ impl GenerationRouter {
             provider_id: record.provider_id.clone(),
             model_id: record.model_id.clone(),
             billable_duration_sec: duration,
-            resolution: request.resolution,
+            resolution,
             resolution_tier: res_tier_str.clone(),
             unit_rate_usd: unit_rate,
             pricing_observed_at: Some(record.observed_at.clone()),

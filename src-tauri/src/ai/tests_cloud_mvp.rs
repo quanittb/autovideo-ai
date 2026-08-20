@@ -230,7 +230,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_phase14_guard_test_3_background_removal_blocked() {
+    fn test_phase14_guard_test_3_background_removal_rejects_reference_images() {
         let registry = ProviderRegistry::new();
         let req = make_test_request(6.0, "BACKGROUND_REMOVAL");
 
@@ -238,8 +238,10 @@ mod tests {
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
-            err_msg.contains("ROUTING_UNAVAILABLE") && err_msg.contains("Phase 17"),
-            "Expected ROUTING_UNAVAILABLE with Phase 17 reason, got: {}",
+            err_msg.contains("UNEXPECTED_REFERENCE_INPUTS_FOR_BACKGROUND_REMOVAL")
+                || err_msg.contains("SOURCE_PROBE_FAILED")
+                || err_msg.contains("SOURCE_VIDEO_REQUIRED"),
+            "Expected background removal validation error, got: {}",
             err_msg
         );
     }

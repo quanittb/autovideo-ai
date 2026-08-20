@@ -13,7 +13,7 @@ use crate::events::parse_ffmpeg_progress_line;
 use crate::projects::SourceMedia;
 
 pub const MAX_FILE_SIZE_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["mp4", "mov", "avi", "mkv", "partial"];
+pub const SUPPORTED_EXTENSIONS: &[&str] = &["mp4", "mov", "avi", "mkv", "webm", "partial"];
 pub const CACHE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1077,7 +1077,16 @@ impl MediaService {
             height,
             fps,
             file_size_bytes: size_bytes,
-            container: container.to_string(),
+            container: if container == "partial" {
+                parsed
+                    .get("format")
+                    .and_then(|f| f.get("format_name"))
+                    .and_then(|f| f.as_str())
+                    .unwrap_or("mp4")
+                    .to_string()
+            } else {
+                container.to_string()
+            },
             video_codec,
             audio_codec,
             has_audio,

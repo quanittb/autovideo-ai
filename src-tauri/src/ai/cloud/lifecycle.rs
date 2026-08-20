@@ -1,13 +1,17 @@
 use super::error::CloudProviderError;
 use super::job::{
-    CloudJobEventPayload, CloudJobRequest, CloudJobState, CostRecord, InputAssets, JobErrorRecord,
-    JobTimestamps, OutputArtifactRecord, PersistentCloudJob, RetryCounters, SubmissionState,
-    ValidationPolicy, CURRENT_CLOUD_JOB_SCHEMA_VERSION,
+    ArtifactContainer, ArtifactDescriptor, ArtifactVideoCodec, CloudJobEventPayload,
+    CloudJobRequest, CloudJobState, CostRecord, InputAssets, JobErrorRecord, JobTimestamps,
+    OutputArtifactRecord, PersistentCloudJob, RetryCounters, SubmissionState, ValidationPolicy,
+    CURRENT_CLOUD_JOB_SCHEMA_VERSION,
 };
 use super::provider::RemoteStatus;
 use super::registry::ProviderRegistry;
 use super::resolver::CloudProviderResolver;
-use super::spec::{PreparedProviderSubmission, ProviderSubmissionSpec};
+use super::spec::{
+    PreparedBackgroundRemoval, PreparedCharacterReplacement, PreparedProviderSubmission,
+    ProviderTaskSpec,
+};
 use super::store::PersistentCloudJobStore;
 use super::submission::CloudSubmissionGate;
 use super::validator::CloudOutputValidator;
@@ -128,7 +132,7 @@ impl LifecycleTimingConfig {
 pub struct CloudJobLifecycleService {
     store: PersistentCloudJobStore,
     project_manager: ProjectManager,
-    provider_resolver: Arc<dyn CloudProviderResolver>,
+    resolver: Arc<dyn CloudProviderResolver>,
     event_sink: Arc<dyn EventSink>,
     submission_gate: Arc<dyn CloudSubmissionGate>,
     timing_config: LifecycleTimingConfig,
@@ -140,7 +144,7 @@ pub struct CloudJobLifecycleService {
 impl CloudJobLifecycleService {
     pub fn new(
         storage_paths: StoragePaths,
-        provider_resolver: Arc<dyn CloudProviderResolver>,
+        resolver: Arc<dyn CloudProviderResolver>,
         event_sink: Arc<dyn EventSink>,
         submission_gate: Arc<dyn CloudSubmissionGate>,
         timing_config: LifecycleTimingConfig,
@@ -150,7 +154,7 @@ impl CloudJobLifecycleService {
         Self {
             store,
             project_manager,
-            provider_resolver,
+            resolver,
             event_sink,
             submission_gate,
             timing_config,
@@ -166,6 +170,18 @@ impl CloudJobLifecycleService {
 
     pub fn project_manager(&self) -> &ProjectManager {
         &self.project_manager
+    }
+
+    pub fn resolver(&self) -> &Arc<dyn CloudProviderResolver> {
+        &self.resolver
+    }
+
+    pub fn submission_gate(&self) -> &Arc<dyn CloudSubmissionGate> {
+        &self.submission_gate
+    }
+
+    pub fn event_sink(&self) -> &Arc<dyn EventSink> {
+        &self.event_sink
     }
 
     pub fn timing_config(&self) -> &LifecycleTimingConfig {
@@ -218,6 +234,7 @@ impl CloudJobLifecycleService {
 
     fn compute_inputs(
         request: &CloudJobRequest,
+        preserve_audio: bool,
     ) -> Result<(InputAssets, String), CloudProviderError> {
         let mut assets = InputAssets::default();
         let mut hasher = Sha256::new();
@@ -231,6 +248,7 @@ impl CloudJobLifecycleService {
         hasher.update(&request.fps.to_le_bytes());
         hasher.update(&request.resolution.0.to_le_bytes());
         hasher.update(&request.resolution.1.to_le_bytes());
+        hasher.update(&[if preserve_audio { 1u8 } else { 0u8 }]);
 
         if let Some(ref p) = request.source_video {
             assets.source_video_path = Some(p.clone());
@@ -306,11 +324,11 @@ impl CloudJobLifecycleService {
 
         // 3. Resolve runtime & check live execution / credentials
         let runtime = self
-            .provider_resolver
+            .resolver
             .resolve_runtime(&plan.provider_key.provider_id, &plan.provider_key.model_id)?;
 
-        // 4. Build trusted normalized ProviderSubmissionSpec
-        let spec = ProviderSubmissionSpec::build(&request, &project, &plan)?;
+        // 4. Build trusted normalized ProviderTaskSpec
+        let task_spec = ProviderTaskSpec::build(&request, &project, &plan)?;
 
         // 5. Acquire request lock to prevent duplicate concurrent client submissions
         let req_lock = self.get_request_lock(&project_id, &client_req_id);
@@ -343,17 +361,52 @@ impl CloudJobLifecycleService {
                 SubmissionState::NeverAttempted => existing,
             },
             None => {
-                let require_audio = spec.save_audio;
-                let validation_policy = ValidationPolicy {
-                    expected_duration_sec: if request.duration_seconds > 0.0 {
-                        Some(request.duration_seconds)
-                    } else {
-                        None
-                    },
-                    require_audio,
+                let (descriptor, validation_policy, preserve_audio) = match &task_spec {
+                    ProviderTaskSpec::CharacterReplacement(spec) => {
+                        let desc = ArtifactDescriptor {
+                            container: ArtifactContainer::Mp4,
+                            video_codec: ArtifactVideoCodec::H264,
+                            require_alpha: false,
+                            require_audio: spec.save_audio,
+                        };
+                        let val = ValidationPolicy {
+                            expected_duration_sec: if request.duration_seconds > 0.0 {
+                                Some(request.duration_seconds)
+                            } else {
+                                None
+                            },
+                            expected_width: None,
+                            expected_height: None,
+                            expected_fps: None,
+                            require_audio: spec.save_audio,
+                            require_alpha: false,
+                            expected_container: Some("mp4".to_string()),
+                            expected_video_codec: Some("h264".to_string()),
+                        };
+                        (desc, val, spec.save_audio)
+                    }
+                    ProviderTaskSpec::BackgroundRemoval(spec) => {
+                        let desc = ArtifactDescriptor {
+                            container: ArtifactContainer::Webm,
+                            video_codec: ArtifactVideoCodec::Vp9,
+                            require_alpha: true,
+                            require_audio: spec.preserve_audio,
+                        };
+                        let val = ValidationPolicy {
+                            expected_duration_sec: Some(spec.source_facts.duration_sec),
+                            expected_width: Some(spec.source_facts.width),
+                            expected_height: Some(spec.source_facts.height),
+                            expected_fps: Some(spec.source_facts.fps),
+                            require_audio: spec.preserve_audio,
+                            require_alpha: true,
+                            expected_container: Some("webm".to_string()),
+                            expected_video_codec: Some("vp9".to_string()),
+                        };
+                        (desc, val, spec.preserve_audio)
+                    }
                 };
 
-                let (input_assets, config_hash) = Self::compute_inputs(&request)?;
+                let (input_assets, config_hash) = Self::compute_inputs(&request, preserve_audio)?;
                 let internal_job_id = format!("cjob-{}", Uuid::new_v4());
 
                 let new_job = PersistentCloudJob {
@@ -388,6 +441,7 @@ impl CloudJobLifecycleService {
                     remote_status: None,
                     output_url: None,
                     validation_policy,
+                    artifact_descriptor: Some(descriptor),
                 };
 
                 // Persist Created state first -> then emit
@@ -414,68 +468,122 @@ impl CloudJobLifecycleService {
             job = current;
         }
 
-        // 8. Execute File Uploads (Outside Lock)
-        let source_upload_res = runtime
-            .uploader
-            .upload_file(&spec.source_video, "video/mp4")
-            .await;
+        // 8. Execute File Uploads (Outside Lock) & Build PreparedProviderSubmission
+        let prepared = match task_spec {
+            ProviderTaskSpec::CharacterReplacement(spec) => {
+                let source_upload_res = runtime
+                    .uploader
+                    .upload_file(&spec.source_video, "video/mp4")
+                    .await;
 
-        let uploaded_source = match source_upload_res {
-            Ok(asset) => asset,
-            Err(e) => {
-                let lock = self.get_job_lock(&job.internal_job_id);
-                let _guard = lock.lock().await;
+                let uploaded_source = match source_upload_res {
+                    Ok(asset) => asset,
+                    Err(e) => {
+                        let lock = self.get_job_lock(&job.internal_job_id);
+                        let _guard = lock.lock().await;
 
-                let mut current = self.store.load_job(&job.project_id, &job.internal_job_id)?;
-                if current.cancellation_requested {
-                    drop(_guard);
-                    self.reconcile_cancellation(&mut current).await?;
-                    return Ok(current);
+                        let mut current =
+                            self.store.load_job(&job.project_id, &job.internal_job_id)?;
+                        if current.cancellation_requested {
+                            drop(_guard);
+                            self.reconcile_cancellation(&mut current).await?;
+                            return Ok(current);
+                        }
+                        current.state = CloudJobState::Failed;
+                        current.submission_state = SubmissionState::NeverAttempted;
+                        current.error = Some(JobErrorRecord {
+                            code: "UPLOAD_FAILED".to_string(),
+                            sanitized_message: format!("Failed to upload source video: {}", e),
+                        });
+                        current.increment_revision();
+                        self.store.save_job_atomic(&current)?;
+                        let _ = self
+                            .event_sink
+                            .emit_job_updated(&current.to_event_payload());
+                        return Err(e);
+                    }
+                };
+
+                let mut uploaded_references = Vec::new();
+                for ref_path in &spec.reference_images {
+                    match runtime.uploader.upload_file(ref_path, "image/jpeg").await {
+                        Ok(asset) => uploaded_references.push(asset),
+                        Err(e) => {
+                            let lock = self.get_job_lock(&job.internal_job_id);
+                            let _guard = lock.lock().await;
+
+                            let mut current =
+                                self.store.load_job(&job.project_id, &job.internal_job_id)?;
+                            if current.cancellation_requested {
+                                drop(_guard);
+                                self.reconcile_cancellation(&mut current).await?;
+                                return Ok(current);
+                            }
+                            current.state = CloudJobState::Failed;
+                            current.submission_state = SubmissionState::NeverAttempted;
+                            current.error = Some(JobErrorRecord {
+                                code: "UPLOAD_FAILED".to_string(),
+                                sanitized_message: format!(
+                                    "Failed to upload reference image: {}",
+                                    e
+                                ),
+                            });
+                            current.increment_revision();
+                            self.store.save_job_atomic(&current)?;
+                            let _ = self
+                                .event_sink
+                                .emit_job_updated(&current.to_event_payload());
+                            return Err(e);
+                        }
+                    }
                 }
-                current.state = CloudJobState::Failed;
-                current.submission_state = SubmissionState::NeverAttempted; // NEVER AmbiguousSubmission
-                current.error = Some(JobErrorRecord {
-                    code: "UPLOAD_FAILED".to_string(),
-                    sanitized_message: format!("Failed to upload source video: {}", e),
-                });
-                current.increment_revision();
-                self.store.save_job_atomic(&current)?;
-                let _ = self
-                    .event_sink
-                    .emit_job_updated(&current.to_event_payload());
-                return Err(e);
+
+                PreparedProviderSubmission::CharacterReplacement(PreparedCharacterReplacement {
+                    spec,
+                    uploaded_source,
+                    uploaded_references,
+                })
+            }
+            ProviderTaskSpec::BackgroundRemoval(spec) => {
+                let source_upload_res = runtime
+                    .uploader
+                    .upload_file(&spec.source_video, "video/mp4")
+                    .await;
+
+                let uploaded_source = match source_upload_res {
+                    Ok(asset) => asset,
+                    Err(e) => {
+                        let lock = self.get_job_lock(&job.internal_job_id);
+                        let _guard = lock.lock().await;
+
+                        let mut current =
+                            self.store.load_job(&job.project_id, &job.internal_job_id)?;
+                        if current.cancellation_requested {
+                            drop(_guard);
+                            self.reconcile_cancellation(&mut current).await?;
+                            return Ok(current);
+                        }
+                        current.state = CloudJobState::Failed;
+                        current.submission_state = SubmissionState::NeverAttempted;
+                        current.error = Some(JobErrorRecord {
+                            code: "UPLOAD_FAILED".to_string(),
+                            sanitized_message: format!("Failed to upload source video: {}", e),
+                        });
+                        current.increment_revision();
+                        self.store.save_job_atomic(&current)?;
+                        let _ = self
+                            .event_sink
+                            .emit_job_updated(&current.to_event_payload());
+                        return Err(e);
+                    }
+                };
+
+                PreparedProviderSubmission::BackgroundRemoval(PreparedBackgroundRemoval {
+                    spec,
+                    uploaded_source,
+                })
             }
         };
-
-        let mut uploaded_references = Vec::new();
-        for ref_path in &spec.reference_images {
-            match runtime.uploader.upload_file(ref_path, "image/jpeg").await {
-                Ok(asset) => uploaded_references.push(asset),
-                Err(e) => {
-                    let lock = self.get_job_lock(&job.internal_job_id);
-                    let _guard = lock.lock().await;
-
-                    let mut current = self.store.load_job(&job.project_id, &job.internal_job_id)?;
-                    if current.cancellation_requested {
-                        drop(_guard);
-                        self.reconcile_cancellation(&mut current).await?;
-                        return Ok(current);
-                    }
-                    current.state = CloudJobState::Failed;
-                    current.submission_state = SubmissionState::NeverAttempted;
-                    current.error = Some(JobErrorRecord {
-                        code: "UPLOAD_FAILED".to_string(),
-                        sanitized_message: format!("Failed to upload reference image: {}", e),
-                    });
-                    current.increment_revision();
-                    self.store.save_job_atomic(&current)?;
-                    let _ = self
-                        .event_sink
-                        .emit_job_updated(&current.to_event_payload());
-                    return Err(e);
-                }
-            }
-        }
 
         // 9. Re-acquire lock, reload authoritative state, verify !cancellation_requested before IN_FLIGHT
         {
@@ -501,13 +609,6 @@ impl CloudJobLifecycleService {
                 .emit_job_updated(&current.to_event_payload());
             job = current;
         }
-
-        // 10. Build PreparedProviderSubmission & Submit Prediction (Covered by Ambiguous Submission Protection)
-        let prepared = PreparedProviderSubmission {
-            spec,
-            uploaded_source,
-            uploaded_references,
-        };
 
         let submit_res = runtime.provider.create_prediction(&prepared).await;
 
@@ -685,7 +786,7 @@ impl CloudJobLifecycleService {
 
         if let Some(ref remote_id) = remote_id_opt {
             match self
-                .provider_resolver
+                .resolver
                 .resolve_provider(&job.provider_id, &job.model_id)
             {
                 Ok(provider) => match provider.cancel_job(remote_id).await {
@@ -790,7 +891,7 @@ impl CloudJobLifecycleService {
         }
 
         let _provider = self
-            .provider_resolver
+            .resolver
             .resolve_provider(&job.provider_id, &job.model_id)?;
 
         if job.remote_job_id.is_some() {
@@ -863,7 +964,7 @@ impl CloudJobLifecycleService {
                 CloudJobState::Submitted | CloudJobState::Processing => {
                     if job.remote_job_id.is_some() {
                         match self
-                            .provider_resolver
+                            .resolver
                             .resolve_provider(&job.provider_id, &job.model_id)
                         {
                             Ok(_) => {
@@ -943,20 +1044,15 @@ impl CloudJobLifecycleService {
                     let partial_path = self
                         .store
                         .artifact_partial_path(&job.project_id, &job.internal_job_id);
-                    let final_path = self
-                        .store
-                        .artifact_final_path(&job.project_id, &job.internal_job_id);
+                    let final_path = self.store.artifact_final_path_for_job(&job);
 
                     if let (Ok(partial), Ok(final_p)) = (partial_path, final_path) {
                         let validator = CloudOutputValidator::new();
 
                         // Case 1: Final artifact was already promoted before crash!
                         if final_p.is_file() {
-                            let meta_res = validator.validate_artifact(
-                                &final_p,
-                                job.validation_policy.expected_duration_sec,
-                                job.validation_policy.require_audio,
-                            );
+                            let meta_res = validator
+                                .validate_artifact_with_policy(&final_p, &job.validation_policy);
 
                             let lock = self.get_job_lock(&job.internal_job_id);
                             let _guard = lock.lock().await;
@@ -1007,11 +1103,8 @@ impl CloudJobLifecycleService {
 
                         // Case 2: Partial artifact exists
                         if partial.is_file() {
-                            let meta_res = validator.validate_artifact(
-                                &partial,
-                                job.validation_policy.expected_duration_sec,
-                                job.validation_policy.require_audio,
-                            );
+                            let meta_res = validator
+                                .validate_artifact_with_policy(&partial, &job.validation_policy);
 
                             let lock = self.get_job_lock(&job.internal_job_id);
                             let _guard = lock.lock().await;
@@ -1089,7 +1182,7 @@ impl CloudJobLifecycleService {
 
     fn spawn_polling_task(&self, initial_job: PersistentCloudJob) {
         let store = self.store.clone();
-        let provider_resolver = self.provider_resolver.clone();
+        let provider_resolver = self.resolver.clone();
         let event_sink = self.event_sink.clone();
         let timing = self.timing_config;
         let job_locks = self.job_locks.clone();
@@ -1447,22 +1540,13 @@ impl CloudJobLifecycleService {
             }
 
             // 3. Validation Phase
-            let final_path = match store.artifact_final_path(&project_id, &internal_job_id) {
-                Ok(p) => p,
-                Err(_) => {
-                    let _ = std::fs::remove_file(&partial_path);
-                    cleanup_sender();
-                    return;
-                }
-            };
-
             if *cancel_rx.borrow() {
                 let _ = std::fs::remove_file(&partial_path);
                 cleanup_sender();
                 return;
             }
 
-            let policy = {
+            let (final_path, policy) = {
                 let lock = get_lock();
                 let _guard = lock.lock().await;
                 match store.load_job(&project_id, &internal_job_id) {
@@ -1472,7 +1556,15 @@ impl CloudJobLifecycleService {
                             cleanup_sender();
                             return;
                         }
-                        c.validation_policy
+                        let fp = match store.artifact_final_path_for_job(&c) {
+                            Ok(p) => p,
+                            Err(_) => {
+                                let _ = std::fs::remove_file(&partial_path);
+                                cleanup_sender();
+                                return;
+                            }
+                        };
+                        (fp, c.validation_policy)
                     }
                     Err(_) => {
                         let _ = std::fs::remove_file(&partial_path);
@@ -1483,11 +1575,7 @@ impl CloudJobLifecycleService {
             };
 
             let validator = CloudOutputValidator::new();
-            let validation_result = validator.validate_artifact(
-                &partial_path,
-                policy.expected_duration_sec,
-                policy.require_audio,
-            );
+            let validation_result = validator.validate_artifact_with_policy(&partial_path, &policy);
 
             // 4. Critical Decision: Atomic Promotion & Completion
             let lock = get_lock();

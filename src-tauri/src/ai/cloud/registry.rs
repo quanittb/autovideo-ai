@@ -1,4 +1,4 @@
-use super::provider::ProviderCapabilities;
+use super::provider::{ProviderCapabilities, ResolutionPolicy, ResolutionTier};
 use super::router::TaskClass;
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +43,10 @@ pub struct ProviderRecord {
     pub supported_fps: Vec<f64>,
     #[serde(default = "default_supports_original_fps")]
     pub supports_original_fps: bool,
+    #[serde(default)]
+    pub supports_video_background_removal: bool,
+    #[serde(default = "default_resolution_policy")]
+    pub resolution_policy: ResolutionPolicy,
     pub pricing_unit: PricingUnit,
     pub pricing_amount: Option<f64>,
     #[serde(default)]
@@ -56,6 +60,12 @@ pub struct ProviderRecord {
 
 fn default_supports_original_fps() -> bool {
     true
+}
+
+fn default_resolution_policy() -> ResolutionPolicy {
+    ResolutionPolicy::ExplicitTiered {
+        supported_tiers: vec![ResolutionTier::P720, ResolutionTier::P1080],
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +126,11 @@ impl ProviderRegistry {
             ],
             supported_fps: vec![23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0],
             supports_original_fps: true,
+            supports_video_background_removal: false,
+            resolution_policy: ResolutionPolicy::PreserveSource {
+                max_width: None,
+                max_height: None,
+            },
             pricing_unit: PricingUnit::FreeLocal,
             pricing_amount: Some(0.0),
             pricing_tiers: vec![],
@@ -146,6 +161,10 @@ impl ProviderRegistry {
             supported_resolutions: vec![(512, 512), (576, 1024), (720, 1280), (1080, 1920)],
             supported_fps: vec![24.0, 25.0, 30.0],
             supports_original_fps: false,
+            supports_video_background_removal: false,
+            resolution_policy: ResolutionPolicy::ExplicitTiered {
+                supported_tiers: vec![ResolutionTier::P720, ResolutionTier::P1080],
+            },
             pricing_unit: PricingUnit::PerPrediction,
             pricing_amount: Some(0.50),
             pricing_tiers: vec![],
@@ -190,6 +209,10 @@ impl ProviderRegistry {
             ],
             supported_fps: vec![24.0, 48.0],
             supports_original_fps: true,
+            supports_video_background_removal: false,
+            resolution_policy: ResolutionPolicy::ExplicitTiered {
+                supported_tiers: vec![ResolutionTier::P720, ResolutionTier::P1080],
+            },
             pricing_unit: PricingUnit::PerSecond,
             pricing_amount: Some(0.03),
             pricing_tiers: vec![
@@ -210,7 +233,42 @@ impl ProviderRegistry {
             observed_at: "2026-08-20".to_string(),
         });
 
-        // 4. Utility Cloud (Low-Cost Background Removal)
+        // 4. Official Replicate BRIA Video Background Removal (bria/video-remove-background)
+        self.records.push(ProviderRecord {
+            provider_id: "replicate".to_string(),
+            model_id: "bria/video-remove-background".to_string(),
+            model_version: "official-current".to_string(),
+            execution_class: ExecutionClass::UtilityCloud,
+            capabilities: ProviderCapabilities {
+                supports_text_to_video: false,
+                supports_image_to_video: false,
+                supports_video_to_video: true,
+                supports_reference_image: false,
+                supports_character_reference: false,
+                supports_audio: true,
+                max_duration_sec: Some(60.0),
+                supported_resolutions: vec![],
+                estimated_cost_per_second: Some(0.0042),
+            },
+            max_duration_sec: Some(60.0),
+            supported_resolutions: vec![],
+            supported_fps: vec![],
+            supports_original_fps: true,
+            supports_video_background_removal: true,
+            resolution_policy: ResolutionPolicy::PreserveSource {
+                max_width: Some(16000),
+                max_height: Some(16000),
+            },
+            pricing_unit: PricingUnit::PerSecond,
+            pricing_amount: Some(0.0042),
+            pricing_tiers: vec![],
+            resolution_tiers: vec![],
+            currency: "USD".to_string(),
+            source_url: "https://replicate.com/bria/video-remove-background".to_string(),
+            observed_at: "2026-08-20".to_string(),
+        });
+
+        // 5. Utility Cloud (Low-Cost Image Background Removal - Image Only)
         self.records.push(ProviderRecord {
             provider_id: "replicate_utility".to_string(),
             model_id: "lucataco/remove-bg".to_string(),
@@ -232,6 +290,8 @@ impl ProviderRegistry {
             supported_resolutions: vec![(512, 512), (720, 1280), (1080, 1920), (1920, 1080)],
             supported_fps: vec![24.0, 30.0, 60.0],
             supports_original_fps: true,
+            supports_video_background_removal: false,
+            resolution_policy: default_resolution_policy(),
             pricing_unit: PricingUnit::PerPrediction,
             pricing_amount: Some(0.005),
             pricing_tiers: vec![],
@@ -241,7 +301,7 @@ impl ProviderRegistry {
             observed_at: "2026-08-19".to_string(),
         });
 
-        // 5. Local Generative Fallback (SD1.5 + AnimateDiff)
+        // 6. Local Generative Fallback (SD1.5 + AnimateDiff)
         self.records.push(ProviderRecord {
             provider_id: "local_diffusers".to_string(),
             model_id: "sd15-animatediff-v3".to_string(),
@@ -262,6 +322,10 @@ impl ProviderRegistry {
             supported_resolutions: vec![(288, 512), (512, 512), (512, 768)],
             supported_fps: vec![8.0, 12.0, 16.0, 24.0, 30.0],
             supports_original_fps: false,
+            supports_video_background_removal: false,
+            resolution_policy: ResolutionPolicy::ExplicitTiered {
+                supported_tiers: vec![],
+            },
             pricing_unit: PricingUnit::FreeLocal,
             pricing_amount: Some(0.0),
             pricing_tiers: vec![],
@@ -305,7 +369,9 @@ impl ProviderRegistry {
                         && r.capabilities.supports_character_reference
                 }
                 TaskClass::FullGenerativeTransformation => r.capabilities.supports_text_to_video,
-                TaskClass::BackgroundRemoval => r.execution_class == ExecutionClass::UtilityCloud,
+                TaskClass::BackgroundRemoval => {
+                    r.supports_video_background_removal && r.capabilities.supports_video_to_video
+                }
                 TaskClass::StyleFilter
                 | TaskClass::BackgroundComposite
                 | TaskClass::AudioTransformation => {
@@ -320,6 +386,7 @@ impl ProviderRegistry {
         match (provider_id, model_id) {
             ("local_ffmpeg", "ffmpeg_native") => true,
             ("replicate", "prunaai/p-video-replace") => true,
+            ("replicate", "bria/video-remove-background") => true,
             ("replicate", "minimax/video-01") => true,
             ("local_diffusers", "sd15-animatediff-v3") => true,
             _ => false,

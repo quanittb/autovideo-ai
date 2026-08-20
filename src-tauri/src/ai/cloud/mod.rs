@@ -21,10 +21,10 @@ pub use cost::{
 };
 pub use error::CloudProviderError;
 pub use job::{
-    CloudJobEventPayload, CloudJobRequest, CloudJobResult, CloudJobState, CloudJobStatus,
-    CostRecord, InputAssets, JobErrorRecord, JobTimestamps, OutputArtifactRecord,
-    PersistentCloudJob, RetryCounters, SubmissionState, ValidationPolicy,
-    CURRENT_CLOUD_JOB_SCHEMA_VERSION,
+    ArtifactContainer, ArtifactDescriptor, ArtifactVideoCodec, CloudJobEventPayload,
+    CloudJobRequest, CloudJobResult, CloudJobState, CloudJobStatus, CostRecord, InputAssets,
+    JobErrorRecord, JobTimestamps, OutputArtifactRecord, PersistentCloudJob, RetryCounters,
+    SubmissionState, ValidationPolicy, CURRENT_CLOUD_JOB_SCHEMA_VERSION,
 };
 pub use lifecycle::{
     CloudJobLifecycleService, EventSink, LifecycleTimingConfig, NoopEventSink, TauriEventSink,
@@ -37,7 +37,9 @@ pub use provider::{
     CloudJobHandle, CloudVideoProvider, ProviderCapabilities, ProviderKey, RemotePollResponse,
     RemoteStatus, ResolutionTier, TargetFps,
 };
-pub use providers::{PrunaPVideoReplaceProvider, ReplicateProvider};
+pub use providers::{
+    PrunaPVideoReplaceProvider, ReplicateBriaBgRemovalProvider, ReplicateProvider,
+};
 pub use registry::{ExecutionClass, PricingTier, PricingUnit, ProviderRecord, ProviderRegistry};
 pub use resolver::{CloudProviderResolver, DefaultCloudProviderResolver, ResolvedProviderRuntime};
 pub use router::{
@@ -45,7 +47,11 @@ pub use router::{
     UserExecutionMode,
 };
 pub use segment::{SegmentPlanner, VideoSegment};
-pub use spec::{PreparedProviderSubmission, ProviderSubmissionSpec};
+pub use spec::{
+    BackgroundRemovalSpec, PreparedBackgroundRemoval, PreparedCharacterReplacement,
+    PreparedProviderSubmission, ProviderSubmissionSpec, ProviderTaskSpec, SourceMediaFacts,
+    SourceMediaProbe,
+};
 pub use store::{atomic_replace, validate_identifier, PersistentCloudJobStore};
 pub use submission::{
     validate_and_prepare_cloud_submission, CloudSubmissionGate, DefaultCloudSubmissionGate,

@@ -7,7 +7,56 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::RwLock;
 
-pub const CURRENT_CLOUD_JOB_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_CLOUD_JOB_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactContainer {
+    Mp4,
+    Webm,
+}
+
+impl ArtifactContainer {
+    pub fn extension(&self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Webm => "webm",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactVideoCodec {
+    H264,
+    Vp9,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactDescriptor {
+    pub container: ArtifactContainer,
+    pub video_codec: ArtifactVideoCodec,
+    pub require_alpha: bool,
+    pub require_audio: bool,
+}
+
+impl ArtifactDescriptor {
+    pub fn extension(&self) -> &'static str {
+        self.container.extension()
+    }
+}
+
+impl Default for ArtifactDescriptor {
+    fn default() -> Self {
+        Self {
+            container: ArtifactContainer::Mp4,
+            video_codec: ArtifactVideoCodec::H264,
+            require_alpha: false,
+            require_audio: false,
+        }
+    }
+}
 
 // -----------------------------------------------------------------------------
 // 1. Canonical State & Validated Transitions
@@ -268,7 +317,19 @@ pub struct ValidationPolicy {
     #[serde(default)]
     pub expected_duration_sec: Option<f64>,
     #[serde(default)]
+    pub expected_width: Option<u32>,
+    #[serde(default)]
+    pub expected_height: Option<u32>,
+    #[serde(default)]
+    pub expected_fps: Option<f64>,
+    #[serde(default)]
     pub require_audio: bool,
+    #[serde(default)]
+    pub require_alpha: bool,
+    #[serde(default)]
+    pub expected_container: Option<String>,
+    #[serde(default)]
+    pub expected_video_codec: Option<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -322,6 +383,8 @@ pub struct PersistentCloudJob {
 
     #[serde(default)]
     pub validation_policy: ValidationPolicy,
+    #[serde(default)]
+    pub artifact_descriptor: Option<ArtifactDescriptor>,
 }
 
 fn default_schema_version() -> u32 {
@@ -368,15 +431,27 @@ impl PersistentCloudJob {
             error: None,
             timestamps: JobTimestamps::default(),
             cancellation_requested: false,
-            progress_pct: None,
-            remote_status: None,
+            progress_pct: Some(0.0),
+            remote_status: Some("created".to_string()),
             output_url: None,
             validation_policy: ValidationPolicy::default(),
+            artifact_descriptor: None,
+        }
+    }
+
+    pub fn normalize_in_memory(&mut self) {
+        if self.artifact_descriptor.is_none() {
+            self.artifact_descriptor = Some(ArtifactDescriptor {
+                container: ArtifactContainer::Mp4,
+                video_codec: ArtifactVideoCodec::H264,
+                require_alpha: false,
+                require_audio: self.validation_policy.require_audio,
+            });
         }
     }
 
     pub fn increment_revision(&mut self) {
-        self.state_revision = self.state_revision.saturating_add(1);
+        self.state_revision += 1;
         self.timestamps.updated_at = Utc::now().to_rfc3339();
     }
 
@@ -533,8 +608,13 @@ pub struct CloudJobResult {
     pub job_id: String,
     pub provider: String,
     pub model: String,
-    #[serde(alias = "output_mp4_path")]
-    pub output_mp4_path: PathBuf,
+    #[serde(
+        alias = "outputMp4Path",
+        alias = "output_mp4_path",
+        alias = "outputPath",
+        alias = "output_path"
+    )]
+    pub output_path: PathBuf,
     #[serde(alias = "duration_sec")]
     pub duration_sec: f64,
     pub width: u32,
@@ -545,6 +625,12 @@ pub struct CloudJobResult {
     pub latency: LatencyTelemetry,
     #[serde(alias = "metadata_json_path")]
     pub metadata_json_path: PathBuf,
+}
+
+impl CloudJobResult {
+    pub fn output_mp4_path(&self) -> &PathBuf {
+        &self.output_path
+    }
 }
 
 #[deprecated(note = "Superseded by PersistentCloudJobStore and CloudJobLifecycleService")]

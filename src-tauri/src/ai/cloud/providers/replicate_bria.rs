@@ -4,7 +4,6 @@ use crate::ai::cloud::job::CloudJobRequest;
 use crate::ai::cloud::live_execution_guard::{EnvLiveExecutionPolicy, LiveExecutionPolicy};
 use crate::ai::cloud::provider::{
     CloudJobHandle, CloudVideoProvider, ProviderCapabilities, RemotePollResponse, RemoteStatus,
-    ResolutionTier,
 };
 use crate::ai::cloud::spec::PreparedProviderSubmission;
 use serde_json::json;
@@ -13,13 +12,13 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
-pub struct PrunaPVideoReplaceProvider {
+pub struct ReplicateBriaBgRemovalProvider {
     client: reqwest::Client,
     api_token: Option<String>,
     live_policy: Arc<dyn LiveExecutionPolicy>,
 }
 
-impl PrunaPVideoReplaceProvider {
+impl ReplicateBriaBgRemovalProvider {
     pub fn new() -> Self {
         let token = std::env::var("REPLICATE_API_TOKEN")
             .ok()
@@ -27,7 +26,7 @@ impl PrunaPVideoReplaceProvider {
         Self {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
-                .redirect(reqwest::redirect::Policy::none()) // We validate redirects explicitly
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             api_token: token,
@@ -68,7 +67,6 @@ impl PrunaPVideoReplaceProvider {
 
         let host_lower = host_str.to_lowercase();
 
-        // Strictly allow only replicate.delivery and its subdomains (*.replicate.delivery)
         let is_allowed_delivery_host = host_lower == "replicate.delivery"
             || (host_lower.ends_with(".replicate.delivery") && !host_lower.starts_with('.'));
 
@@ -79,7 +77,6 @@ impl PrunaPVideoReplaceProvider {
             )));
         }
 
-        // Additional safeguard: verify host is not an IP address (especially private/loopback)
         if host_lower == "localhost"
             || host_lower.starts_with("127.")
             || host_lower.starts_with("10.")
@@ -98,19 +95,19 @@ impl PrunaPVideoReplaceProvider {
     }
 }
 
-impl Default for PrunaPVideoReplaceProvider {
+impl Default for ReplicateBriaBgRemovalProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl CloudVideoProvider for PrunaPVideoReplaceProvider {
+impl CloudVideoProvider for ReplicateBriaBgRemovalProvider {
     fn provider_id(&self) -> &str {
         "replicate"
     }
 
     fn model_id(&self) -> &str {
-        "prunaai/p-video-replace"
+        "bria/video-remove-background"
     }
 
     fn model_version_hint(&self) -> Option<&str> {
@@ -118,7 +115,7 @@ impl CloudVideoProvider for PrunaPVideoReplaceProvider {
     }
 
     fn provider_name(&self) -> &str {
-        "Replicate Pruna Video Replace"
+        "Replicate BRIA Video Background Removal"
     }
 
     fn is_configured(&self) -> bool {
@@ -130,19 +127,12 @@ impl CloudVideoProvider for PrunaPVideoReplaceProvider {
             supports_text_to_video: false,
             supports_image_to_video: false,
             supports_video_to_video: true,
-            supports_reference_image: true,
-            supports_character_reference: true,
+            supports_reference_image: false,
+            supports_character_reference: false,
             supports_audio: true,
-            max_duration_sec: None,
-            supported_resolutions: vec![
-                (576, 1024),
-                (720, 1280),
-                (1080, 1920),
-                (1280, 720),
-                (1920, 1080),
-                (512, 512),
-            ],
-            estimated_cost_per_second: Some(0.03),
+            max_duration_sec: Some(60.0),
+            supported_resolutions: vec![],
+            estimated_cost_per_second: Some(0.0042),
         }
     }
 
@@ -154,45 +144,25 @@ impl CloudVideoProvider for PrunaPVideoReplaceProvider {
             req.duration_seconds
         };
 
-        if let Some(record) = registry.find(self.provider_id(), self.model_id()) {
-            let res_tier = ResolutionTier::from_dimensions(req.resolution).ok();
-            let (rate, res_tier_str) = if let Some(tier) = res_tier {
-                if let Some(pt) = record
-                    .pricing_tiers
-                    .iter()
-                    .find(|t| t.resolution_tier == tier.as_str())
-                {
-                    (pt.pricing_amount, tier.as_str().to_string())
-                } else {
-                    (record.pricing_amount.unwrap_or(0.03), "720p".to_string())
-                }
-            } else {
-                (record.pricing_amount.unwrap_or(0.03), "720p".to_string())
-            };
+        let rate = registry
+            .find(self.provider_id(), self.model_id())
+            .and_then(|r| r.pricing_amount)
+            .unwrap_or(0.0042);
+        let estimated_total = dur * rate;
 
-            let inf_cost = rate * dur;
-            let confidence = if self.is_configured() {
-                CostConfidence::Estimated
-            } else {
-                CostConfidence::Unknown
-            };
-
-            CostEstimate {
-                provider: self.provider_id().to_string(),
-                model: self.model_id().to_string(),
-                estimated_usd: Some(inf_cost),
-                min_usd: Some(inf_cost * 0.95),
-                max_usd: Some(inf_cost * 1.05),
-                confidence: if self.is_configured() { 0.95 } else { 0.0 },
-                currency: record.currency.clone(),
-                status: confidence,
-                breakdown: format!(
-                    "Provider: {} ({}) | Rate: ${:.3}/s ({}) | Dur: {:.1}s",
-                    record.provider_id, record.model_id, rate, res_tier_str, dur
-                ),
-            }
-        } else {
-            CostEstimate::default()
+        CostEstimate {
+            provider: self.provider_id().to_string(),
+            model: self.model_id().to_string(),
+            estimated_usd: Some(estimated_total),
+            min_usd: Some(estimated_total * 0.9),
+            max_usd: Some(estimated_total * 1.2),
+            confidence: 0.85,
+            currency: "USD".to_string(),
+            status: CostConfidence::Estimated,
+            breakdown: format!(
+                "Replicate BRIA background removal estimated inference: ${:.4}/s * {:.1}s = ${:.4}",
+                rate, dur, estimated_total
+            ),
         }
     }
 
@@ -201,7 +171,7 @@ impl CloudVideoProvider for PrunaPVideoReplaceProvider {
         _request: &CloudJobRequest,
     ) -> Pin<Box<dyn Future<Output = Result<CloudJobHandle, CloudProviderError>> + Send + '_>> {
         let err = CloudProviderError::OperationUnsupported(
-            "RAW_SUBMISSION_UNSUPPORTED: Pruna provider requires PreparedProviderSubmission via create_prediction".to_string(),
+            "RAW_SUBMISSION_UNSUPPORTED: BRIA provider requires PreparedProviderSubmission via create_prediction".to_string(),
         );
         Box::pin(async move { Err(err) })
     }
@@ -222,16 +192,15 @@ impl CloudVideoProvider for PrunaPVideoReplaceProvider {
         };
 
         let prep = match prepared {
-            PreparedProviderSubmission::CharacterReplacement(c) => c.clone(),
+            PreparedProviderSubmission::BackgroundRemoval(b) => b.clone(),
             _ => {
                 let err = CloudProviderError::RequestInvalid(
-                    "TASK_SUBMISSION_MISMATCH: Pruna provider only accepts CharacterReplacement prepared submissions".to_string(),
+                    "TASK_SUBMISSION_MISMATCH: BRIA provider only accepts BackgroundRemoval prepared submissions".to_string(),
                 );
                 return Box::pin(async move { Err(err) });
             }
         };
 
-        // Live execution policy check before billable prediction create
         let live_policy = self.live_policy.clone();
         let client = self.client.clone();
         let model_id_str = self.model_id().to_string();
@@ -242,21 +211,16 @@ impl CloudVideoProvider for PrunaPVideoReplaceProvider {
 
             let input_body = json!({
                 "input": {
-                    "video": prep.uploaded_source.input_uri,
-                    "images": prep.uploaded_references.iter().map(|a| a.input_uri.clone()).collect::<Vec<_>>(),
-                    "instruction_prompt": prep.spec.instruction_prompt,
-                    "resolution": prep.spec.resolution_tier.as_str(),
-                    "target_fps": prep.spec.target_fps.as_str(),
-                    "save_audio": prep.spec.save_audio,
-                    "ignore_audio": prep.spec.ignore_audio,
-                    "turbo": prep.spec.turbo,
-                    "disable_safety_checker": false
+                    "video_url": prep.uploaded_source.input_uri,
+                    "background_color": "Transparent",
+                    "output_container_and_codec": "webm_vp9",
+                    "preserve_audio": prep.spec.preserve_audio
                 }
             });
 
-            // Official Replicate Model Endpoint: POST /v1/models/prunaai/p-video-replace/predictions
+            // Official Replicate Model Endpoint: POST /v1/models/bria/video-remove-background/predictions
             let endpoint =
-                "https://api.replicate.com/v1/models/prunaai/p-video-replace/predictions";
+                "https://api.replicate.com/v1/models/bria/video-remove-background/predictions";
             let response = client
                 .post(endpoint)
                 .header("Authorization", format!("Bearer {}", token))
@@ -459,7 +423,6 @@ impl CloudVideoProvider for PrunaPVideoReplaceProvider {
                 )));
             }
 
-            // Check if response contains immediate terminal status
             if let Ok(resp_json) = response.json::<serde_json::Value>().await {
                 if let Some(status_str) = resp_json["status"].as_str() {
                     if status_str == "canceled" || status_str == "failed" {
@@ -468,7 +431,6 @@ impl CloudVideoProvider for PrunaPVideoReplaceProvider {
                 }
             }
 
-            // Perform bounded poll if cancellation was accepted but not yet confirmed terminal
             for _ in 0..5 {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 let poll_url = format!("https://api.replicate.com/v1/predictions/{}", r_id);
@@ -502,59 +464,49 @@ impl CloudVideoProvider for PrunaPVideoReplaceProvider {
         let dest = target_path.to_path_buf();
 
         Box::pin(async move {
-            // 1. Authoritative SSRF Validation on initial URL
             let mut current_url = Self::validate_ssrf_url(&url_str)?;
-
-            // 2. Bounded Redirect Following with SSRF Validation on Every Hop
             let mut redirect_count = 0;
-            let max_redirects = 5;
 
-            let response = loop {
-                let resp = client.get(current_url.as_str()).send().await.map_err(|e| {
-                    CloudProviderError::DownloadFailed(format!(
-                        "Network error downloading result: {}",
-                        e
-                    ))
-                })?;
+            let final_resp = loop {
+                let resp = client
+                    .get(current_url.as_str())
+                    .send()
+                    .await
+                    .map_err(|e| CloudProviderError::NetworkError(e.to_string()))?;
 
                 let status = resp.status();
                 if status.is_redirection() {
                     redirect_count += 1;
-                    if redirect_count > max_redirects {
-                        return Err(CloudProviderError::SecurityViolation(
-                            "Too many redirects during artifact download".to_string(),
+                    if redirect_count > 5 {
+                        return Err(CloudProviderError::NetworkError(
+                            "Too many redirects while downloading artifact".to_string(),
                         ));
                     }
 
-                    let loc = resp
+                    let location_header = resp
                         .headers()
                         .get(reqwest::header::LOCATION)
                         .ok_or_else(|| {
-                            CloudProviderError::DownloadFailed(
+                            CloudProviderError::NetworkError(
                                 "Redirect response missing Location header".to_string(),
                             )
                         })?
                         .to_str()
-                        .map_err(|_| {
-                            CloudProviderError::SecurityViolation(
-                                "Invalid Location header characters".to_string(),
-                            )
-                        })?;
+                        .map_err(|e| CloudProviderError::NetworkError(e.to_string()))?;
 
-                    let next_url = current_url.join(loc).map_err(|e| {
+                    let next_url = current_url.join(location_header).map_err(|e| {
                         CloudProviderError::SecurityViolation(format!(
                             "Invalid redirect URL: {}",
                             e
                         ))
                     })?;
 
-                    // Authoritative SSRF Validation on Redirect Hop
                     current_url = Self::validate_ssrf_url(next_url.as_str())?;
                     continue;
                 }
 
                 if !status.is_success() {
-                    return Err(CloudProviderError::DownloadFailed(format!(
+                    return Err(CloudProviderError::NetworkError(format!(
                         "Download failed with HTTP {}",
                         status
                     )));
@@ -563,26 +515,28 @@ impl CloudVideoProvider for PrunaPVideoReplaceProvider {
                 break resp;
             };
 
-            let bytes = response
+            let bytes = final_resp
                 .bytes()
                 .await
-                .map_err(|e| CloudProviderError::DownloadFailed(e.to_string()))?;
+                .map_err(|e| CloudProviderError::NetworkError(e.to_string()))?;
 
             if bytes.is_empty() {
                 return Err(CloudProviderError::OutputInvalid(
-                    "Downloaded 0 bytes from output URL".to_string(),
+                    "Downloaded artifact is empty (0 bytes)".to_string(),
                 ));
             }
 
             if let Some(parent) = dest.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| CloudProviderError::DownloadFailed(e.to_string()))?;
+                let _ = std::fs::create_dir_all(parent);
             }
 
-            tokio::fs::write(&dest, bytes)
-                .await
-                .map_err(|e| CloudProviderError::DownloadFailed(e.to_string()))?;
+            std::fs::write(&dest, &bytes).map_err(|e| {
+                CloudProviderError::ProviderUnavailable(format!(
+                    "Failed to save downloaded artifact to {}: {}",
+                    dest.display(),
+                    e
+                ))
+            })?;
 
             Ok(dest)
         })

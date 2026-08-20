@@ -22,7 +22,9 @@ mod tests {
     use crate::ai::cloud::router::{
         GenerationRouter, RoutingDecision, RoutingPreference, RoutingTarget, TaskClass,
     };
-    use crate::ai::cloud::spec::{PreparedProviderSubmission, ProviderSubmissionSpec};
+    use crate::ai::cloud::spec::{
+        PreparedCharacterReplacement, PreparedProviderSubmission, ProviderSubmissionSpec,
+    };
     use crate::ai::cloud::submission::{DefaultCloudSubmissionGate, ValidatedSubmissionPlan};
     use crate::ai::cloud::uploader::{MockAssetUploader, ProviderAssetUploader, UploadedAsset};
     use crate::ai::cloud::validator::CloudOutputValidator;
@@ -549,9 +551,16 @@ mod tests {
             progress_pct: None,
             remote_status: Some("processing".to_string()),
             output_url: None,
+            artifact_descriptor: None,
             validation_policy: ValidationPolicy {
                 expected_duration_sec: Some(1.0),
                 require_audio: true,
+                expected_width: None,
+                expected_height: None,
+                expected_fps: None,
+                require_alpha: false,
+                expected_container: None,
+                expected_video_codec: None,
             },
         };
 
@@ -910,7 +919,7 @@ mod tests {
             seed: None,
         };
 
-        let prepared = PreparedProviderSubmission {
+        let prepared = PreparedCharacterReplacement {
             spec,
             uploaded_source: UploadedAsset {
                 provider_file_id: Some("file_123".to_string()),
@@ -1148,9 +1157,16 @@ mod tests {
             progress_pct: None,
             remote_status: Some("succeeded".to_string()),
             output_url: Some("https://replicate.delivery/out.mp4".to_string()),
+            artifact_descriptor: None,
             validation_policy: ValidationPolicy {
                 expected_duration_sec: Some(1.0),
                 require_audio: true,
+                expected_width: None,
+                expected_height: None,
+                expected_fps: None,
+                require_alpha: false,
+                expected_container: None,
+                expected_video_codec: None,
             },
         };
 
@@ -1248,9 +1264,16 @@ mod tests {
             progress_pct: None,
             remote_status: None,
             output_url: None,
+            artifact_descriptor: None,
             validation_policy: ValidationPolicy {
                 expected_duration_sec: None,
                 require_audio: false,
+                expected_width: None,
+                expected_height: None,
+                expected_fps: None,
+                require_alpha: false,
+                expected_container: None,
+                expected_video_codec: None,
             },
         };
 
@@ -1341,7 +1364,7 @@ mod tests {
             seed: Some(42),
         };
 
-        let prepared = PreparedProviderSubmission {
+        let prepared = PreparedCharacterReplacement {
             spec,
             uploaded_source: UploadedAsset {
                 provider_file_id: Some("f1".to_string()),
@@ -1453,9 +1476,16 @@ mod tests {
             progress_pct: None,
             remote_status: None,
             output_url: None,
+            artifact_descriptor: None,
             validation_policy: ValidationPolicy {
                 expected_duration_sec: Some(1.0),
                 require_audio: true,
+                expected_width: None,
+                expected_height: None,
+                expected_fps: None,
+                require_alpha: false,
+                expected_container: None,
+                expected_video_codec: None,
             },
         };
 
@@ -1763,33 +1793,34 @@ mod tests {
     #[tokio::test]
     async fn test_phase16_36_generic_create_prediction_fails_closed_zero_fabrication() {
         let provider = MinimalGenericProvider;
-        let prepared = PreparedProviderSubmission {
-            spec: ProviderSubmissionSpec {
-                provider_key: ProviderKey::new("generic", "generic_model"),
-                source_video: PathBuf::from("dummy.mp4"),
-                reference_images: vec![PathBuf::from("ref.jpg")],
-                instruction_prompt: None,
-                resolution_tier: ResolutionTier::P720,
-                target_fps: TargetFps::Original,
-                save_audio: true,
-                ignore_audio: false,
-                turbo: false,
-                disable_safety_checker: false,
-                seed: None,
-            },
-            uploaded_source: UploadedAsset {
-                provider_file_id: None,
-                input_uri: "https://replicate.delivery/source.mp4".to_string(),
-                expires_at: None,
-                checksum: None,
-            },
-            uploaded_references: vec![UploadedAsset {
-                provider_file_id: None,
-                input_uri: "https://replicate.delivery/ref.jpg".to_string(),
-                expires_at: None,
-                checksum: None,
-            }],
-        };
+        let prepared =
+            PreparedProviderSubmission::CharacterReplacement(PreparedCharacterReplacement {
+                spec: ProviderSubmissionSpec {
+                    provider_key: ProviderKey::new("generic", "generic_model"),
+                    source_video: PathBuf::from("dummy.mp4"),
+                    reference_images: vec![PathBuf::from("ref.jpg")],
+                    instruction_prompt: None,
+                    resolution_tier: ResolutionTier::P720,
+                    target_fps: TargetFps::Original,
+                    save_audio: true,
+                    ignore_audio: false,
+                    turbo: false,
+                    disable_safety_checker: false,
+                    seed: None,
+                },
+                uploaded_source: UploadedAsset {
+                    provider_file_id: None,
+                    input_uri: "https://replicate.delivery/source.mp4".to_string(),
+                    expires_at: None,
+                    checksum: None,
+                },
+                uploaded_references: vec![UploadedAsset {
+                    provider_file_id: None,
+                    input_uri: "https://replicate.delivery/ref.jpg".to_string(),
+                    expires_at: None,
+                    checksum: None,
+                }],
+            });
 
         let res = provider.create_prediction(&prepared).await;
         assert!(res.is_err());

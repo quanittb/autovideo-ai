@@ -1,6 +1,8 @@
 use super::error::CloudProviderError;
 use super::provider::CloudVideoProvider;
-use super::providers::{PrunaPVideoReplaceProvider, ReplicateProvider};
+use super::providers::{
+    PrunaPVideoReplaceProvider, ReplicateBriaBgRemovalProvider, ReplicateProvider,
+};
 use super::uploader::{ProviderAssetUploader, ReplicateAssetUploader};
 use std::sync::Arc;
 
@@ -50,6 +52,15 @@ impl CloudProviderResolver for DefaultCloudProviderResolver {
         match (provider_id, model_id) {
             ("replicate", "prunaai/p-video-replace") => {
                 let provider = PrunaPVideoReplaceProvider::new();
+                if !provider.is_configured() {
+                    return Err(CloudProviderError::ProviderUnavailable(
+                        "MISSING_PROVIDER_CREDENTIALS: REPLICATE_API_TOKEN environment variable is not configured".to_string(),
+                    ));
+                }
+                Ok(Arc::new(provider))
+            }
+            ("replicate", "bria/video-remove-background") => {
+                let provider = ReplicateBriaBgRemovalProvider::new();
                 if !provider.is_configured() {
                     return Err(CloudProviderError::ProviderUnavailable(
                         "MISSING_PROVIDER_CREDENTIALS: REPLICATE_API_TOKEN environment variable is not configured".to_string(),
