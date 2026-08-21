@@ -16,6 +16,7 @@ import {
   type AuthorizedAssetPreview,
   type CloudJobEventPayload,
 } from '../../lib/ipc';
+import { getCloudJobVisualState } from '../../stores/cloudJobHelpers';
 
 interface RealTransformPreviewProps {
   projectId: string;
@@ -110,15 +111,13 @@ export const RealTransformPreview: React.FC<RealTransformPreviewProps> = ({
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  const stateUpper = selectedJob ? (selectedJob.state as string).toUpperCase() : '';
-  const isJobCompleted = stateUpper === 'COMPLETED';
-  const isJobRunning =
-    Boolean(selectedJob) &&
-    ['QUEUED', 'SUBMITTING', 'SUBMITTED', 'POLLING', 'PROCESSING', 'DOWNLOADING', 'DOWNLOADING_OUTPUT', 'VALIDATING_OUTPUT', 'UPLOADING'].includes(
-      stateUpper
-    );
-  const isJobFailed =
-    Boolean(selectedJob) && ['FAILED', 'BLOCKED', 'CANCELLED'].includes(stateUpper);
+  const visualCategory = getCloudJobVisualState(selectedJob?.state);
+  const isJobCompleted = visualCategory === 'success';
+  const isJobRunning = visualCategory === 'running';
+  const isJobFailed = visualCategory === 'failed';
+  const isJobCancelled = visualCategory === 'cancelled';
+  const isJobBlocked = visualCategory === 'blocked';
+  const isJobApprovalRequired = visualCategory === 'approval_required';
 
   const sourceSrc = authorizedSource ? convertFileSrc(authorizedSource.localPath) : null;
   const artifactSrc = authorizedArtifact ? convertFileSrc(authorizedArtifact.localPath) : null;
@@ -136,7 +135,15 @@ export const RealTransformPreview: React.FC<RealTransformPreviewProps> = ({
                   ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-700/60'
                   : isJobRunning
                   ? 'bg-indigo-950/80 text-indigo-300 border border-indigo-700/60 animate-pulse'
-                  : 'bg-rose-950/80 text-rose-300 border border-rose-700/60'
+                  : isJobFailed
+                  ? 'bg-rose-950/80 text-rose-300 border border-rose-700/60'
+                  : isJobCancelled
+                  ? 'bg-amber-950/80 text-amber-300 border border-amber-700/60'
+                  : isJobBlocked
+                  ? 'bg-purple-950/80 text-purple-300 border border-purple-700/60'
+                  : isJobApprovalRequired
+                  ? 'bg-amber-950/80 text-amber-300 border border-amber-700/60'
+                  : 'bg-slate-900 text-slate-400 border border-slate-700'
               }`}
             >
               {selectedJob.state}

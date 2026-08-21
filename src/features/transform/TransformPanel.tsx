@@ -12,6 +12,7 @@ import {
 import { ReferenceUploader } from '../../components/ui/ReferenceUploader';
 import { useProjectStore } from '../../stores/projectStore';
 import { useCloudJobStore } from '../../stores/cloudJobStore';
+import { getCloudJobVisualState } from '../../stores/cloudJobHelpers';
 import type { CloudJobRequest } from '../../lib/ipc';
 
 interface TransformPanelProps {
@@ -94,11 +95,7 @@ export const TransformPanel: React.FC<TransformPanelProps> = ({ className = '' }
     await cancelJob(activeProject.id, selectedJob.internalJobId);
   };
 
-  const isJobRunning =
-    selectedJob &&
-    ['queued', 'submitting', 'polling', 'downloading_output', 'validating_output'].includes(
-      selectedJob.state
-    );
+  const isJobRunning = getCloudJobVisualState(selectedJob?.state) === 'running';
 
   const canGenerate =
     !isSubmitting &&

@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { mergeCloudJobSnapshot, isNewerRevision } from '../cloudJobHelpers';
+import {
+  mergeCloudJobSnapshot,
+  isNewerRevision,
+  getCloudJobVisualState,
+} from '../cloudJobHelpers';
 import type { CloudJobEventPayload } from '../../lib/ipc';
 
 function makeMockPayload(overrides: Partial<CloudJobEventPayload> = {}): CloudJobEventPayload {
@@ -99,5 +103,50 @@ describe('Phase 18: Identity & Preview Authorization Invariants', () => {
     expect(bgPayload.artifactDescriptor?.container).toBe('webm');
     expect(bgPayload.artifactDescriptor?.videoCodec).toBe('vp9');
     expect(bgPayload.artifactDescriptor?.requireAlpha).toBe(true);
+  });
+});
+
+describe('Phase 18: Cloud State Visual Classification', () => {
+  it('truthfully maps all canonical running states to running category', () => {
+    const runningStates = [
+      'CREATED',
+      'VALIDATING',
+      'UPLOADING',
+      'SUBMITTED',
+      'PROCESSING',
+      'DOWNLOADING',
+      'VALIDATING_OUTPUT',
+      'QUEUED',
+      'POLLING',
+      'SUBMITTING',
+      'DOWNLOADING_OUTPUT',
+    ];
+    for (const st of runningStates) {
+      expect(getCloudJobVisualState(st)).toBe('running');
+      expect(getCloudJobVisualState(st.toLowerCase())).toBe('running');
+    }
+  });
+
+  it('truthfully maps COST_APPROVAL_REQUIRED to approval_required', () => {
+    expect(getCloudJobVisualState('COST_APPROVAL_REQUIRED')).toBe('approval_required');
+    expect(getCloudJobVisualState('cost_approval_required')).toBe('approval_required');
+  });
+
+  it('truthfully maps COMPLETED to success', () => {
+    expect(getCloudJobVisualState('COMPLETED')).toBe('success');
+    expect(getCloudJobVisualState('Completed')).toBe('success');
+  });
+
+  it('truthfully maps terminal failure states', () => {
+    expect(getCloudJobVisualState('FAILED')).toBe('failed');
+    expect(getCloudJobVisualState('CANCELLED')).toBe('cancelled');
+    expect(getCloudJobVisualState('BLOCKED')).toBe('blocked');
+  });
+
+  it('maps unknown or null states to unknown without auto-failing', () => {
+    expect(getCloudJobVisualState(null)).toBe('unknown');
+    expect(getCloudJobVisualState(undefined)).toBe('unknown');
+    expect(getCloudJobVisualState('')).toBe('unknown');
+    expect(getCloudJobVisualState('SOME_FUTURE_STATE')).toBe('unknown');
   });
 });

@@ -35,7 +35,7 @@ fn test_phase18_01_preflight_uses_authoritative_source_facts_over_request_durati
     let mut req = make_test_request("CHARACTER_REPLACEMENT", 5.0, None);
     req.reference_images = Some(vec![PathBuf::from("ref1.png")]);
 
-    // 1. Direct router test: 30s source facts override fake 5s request duration
+    // 1. Direct router test: 30s 1080p source facts override fake 5s request duration
     let facts = SourceMediaFacts {
         duration_sec: 30.0,
         width: 1920,
@@ -51,11 +51,12 @@ fn test_phase18_01_preflight_uses_authoritative_source_facts_over_request_durati
         None,
         &registry,
     );
-    // Pruna cost for 30s at $0.015/s = $0.45 (not 5s * $0.015 = $0.075)
+    // Pruna cost for 30s @ 1080p ($0.06/s) = $1.80 (authoritative from registry facts, not fake 5s request)
+    let estimated = decision.estimated_cost.estimated_usd.unwrap();
     assert!(
-        decision.estimated_cost.estimated_usd.unwrap() >= 0.40,
-        "Expected >= $0.40 for 30s facts, got {:?}",
-        decision.estimated_cost.estimated_usd
+        (estimated - 1.80).abs() < 0.001,
+        "Expected deterministic $1.80 for 30s 1080p facts, got {}",
+        estimated
     );
 
     // 2. Preflight evaluation for character replacement without source video
@@ -116,7 +117,7 @@ fn test_phase18_04_preflight_budget_exceeded_marks_submittable_false() {
     let mut req = make_test_request("CHARACTER_REPLACEMENT", 30.0, None);
     req.reference_images = Some(vec![PathBuf::from("ref1.png")]);
 
-    // Set budget to $0.01 (valid budget, but 30s CharacterReplacement costs ~$0.45)
+    // Set budget to $0.01 (valid budget, but 30s 1080p CharacterReplacement costs $1.80)
     let eval = evaluate_cloud_submission_preflight(&req, Some(0.01), &registry).unwrap();
     assert!(!eval.submittable);
     assert!(!eval.budget_approved);
@@ -293,4 +294,271 @@ fn test_phase18_09_non_completed_job_cannot_be_authorized_for_preview() {
     // Verify loaded job state
     let loaded = store.load_job(project_id, "internal_2").unwrap();
     assert_ne!(loaded.state, CloudJobState::Completed);
+}
+
+#[test]
+fn test_phase18_10_deterministic_registry_pricing_tiers() {
+    let registry = ProviderRegistry::new();
+    let req = make_test_request("CHARACTER_REPLACEMENT", 10.0, None);
+
+    // 720p tier: 10s @ 1280x720 -> 10.0 * 0.03 = 0.30 USD
+    let facts_720p = SourceMediaFacts {
+        duration_sec: 10.0,
+        width: 1280,
+        height: 720,
+        fps: 24.0,
+        has_audio: true,
+    };
+    let decision_720p = crate::ai::cloud::router::GenerationRouter::route_with_facts(
+        TaskClass::CharacterReplacement,
+        RoutingPreference::CostSaving,
+        &req,
+        Some(&facts_720p),
+        None,
+        &registry,
+    );
+    let cost_720p = decision_720p.estimated_cost.estimated_usd.unwrap();
+    assert!(
+        (cost_720p - 0.30).abs() < 0.001,
+        "Expected $0.30 for 10s 720p tier, got {}",
+        cost_720p
+    );
+
+    // 1080p tier: 10s @ 1920x1080 -> 10.0 * 0.06 = 0.60 USD
+    let facts_1080p = SourceMediaFacts {
+        duration_sec: 10.0,
+        width: 1920,
+        height: 1080,
+        fps: 24.0,
+        has_audio: true,
+    };
+    let decision_1080p = crate::ai::cloud::router::GenerationRouter::route_with_facts(
+        TaskClass::CharacterReplacement,
+        RoutingPreference::CostSaving,
+        &req,
+        Some(&facts_1080p),
+        None,
+        &registry,
+    );
+    let cost_1080p = decision_1080p.estimated_cost.estimated_usd.unwrap();
+    assert!(
+        (cost_1080p - 0.60).abs() < 0.001,
+        "Expected $0.60 for 10s 1080p tier, got {}",
+        cost_1080p
+    );
+}
+
+#[test]
+fn test_phase18_11_project_source_preview_path_security_roots() {
+    use crate::commands::resolve_project_source_preview_path;
+    use crate::projects::{ProjectManager, SourceMedia};
+    use crate::system::StoragePaths;
+    use std::fs::{self, File};
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    let temp = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp.path());
+    fs::create_dir_all(&paths.projects_dir).unwrap();
+
+    let pm = ProjectManager::new(paths.clone());
+    let mut proj = pm.create_project("Sec Project").unwrap();
+    let project_dir = paths.projects_dir.join(&proj.id);
+    let media_dir = project_dir.join("media");
+    let cache_dir = project_dir.join("cache");
+    fs::create_dir_all(&media_dir).unwrap();
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    // 1. Valid source media inside <project>/media
+    let valid_file = media_dir.join("source.mp4");
+    File::create(&valid_file)
+        .unwrap()
+        .write_all(b"mp4")
+        .unwrap();
+
+    proj.source_media = Some(SourceMedia {
+        media_id: "sm1".to_string(),
+        original_file_name: "source.mp4".to_string(),
+        source_path: valid_file.clone(),
+        duration_ms: 5000,
+        width: 1920,
+        height: 1080,
+        fps: 30.0,
+        file_size_bytes: 3,
+        container: "mp4".to_string(),
+        video_codec: "h264".to_string(),
+        audio_codec: None,
+        has_audio: false,
+    });
+    pm.update_project(&proj).unwrap();
+
+    let (res_path, _) = resolve_project_source_preview_path(&proj.id, &paths).unwrap();
+    assert!(res_path.starts_with(media_dir.canonicalize().unwrap()));
+
+    // 2. Escape attempt: file in <project>/cache
+    let cache_file = cache_dir.join("cache_data.mp4");
+    File::create(&cache_file)
+        .unwrap()
+        .write_all(b"cache")
+        .unwrap();
+    proj.source_media.as_mut().unwrap().source_path = cache_file;
+    pm.update_project(&proj).unwrap();
+
+    let err = resolve_project_source_preview_path(&proj.id, &paths).unwrap_err();
+    assert!(
+        err.contains("SECURITY_VIOLATION"),
+        "Expected SECURITY_VIOLATION for cache path, got: {}",
+        err
+    );
+
+    // 3. Escape attempt: file in project root outside media
+    let root_file = project_dir.join("outside.mp4");
+    File::create(&root_file)
+        .unwrap()
+        .write_all(b"outside")
+        .unwrap();
+    proj.source_media.as_mut().unwrap().source_path = root_file;
+    pm.update_project(&proj).unwrap();
+
+    let err2 = resolve_project_source_preview_path(&proj.id, &paths).unwrap_err();
+    assert!(
+        err2.contains("SECURITY_VIOLATION"),
+        "Expected SECURITY_VIOLATION for root file outside media, got: {}",
+        err2
+    );
+}
+
+#[test]
+fn test_phase18_12_cloud_artifact_preview_path_security_roots() {
+    use crate::ai::cloud::job::{
+        CostRecord, InputAssets, OutputArtifactRecord, PersistentCloudJob,
+    };
+    use crate::ai::cloud::store::PersistentCloudJobStore;
+    use crate::commands::resolve_cloud_artifact_preview_path;
+    use crate::system::StoragePaths;
+    use std::fs::{self, File};
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    let temp = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp.path());
+    let store = PersistentCloudJobStore::new(paths.clone());
+
+    let project_id = "proj_sec_art";
+    let artifacts_dir = store.project_artifacts_dir(project_id).unwrap();
+    fs::create_dir_all(&artifacts_dir).unwrap();
+
+    let valid_artifact = artifacts_dir.join("artifact_1.mp4");
+    File::create(&valid_artifact)
+        .unwrap()
+        .write_all(b"artifact")
+        .unwrap();
+
+    let mut job = PersistentCloudJob::new(
+        "client_art_1".to_string(),
+        "internal_art_1".to_string(),
+        project_id.to_string(),
+        "pruna".to_string(),
+        "p-video-replace".to_string(),
+        "v1".to_string(),
+        "CHARACTER_REPLACEMENT".to_string(),
+        ExecutionClass::SpecializedVideoTransformation,
+        InputAssets::default(),
+        "hash_art".to_string(),
+        CostRecord::default(),
+    );
+    job.state = CloudJobState::Completed;
+    job.output = OutputArtifactRecord {
+        final_path: Some(valid_artifact.clone()),
+        ..Default::default()
+    };
+    store.save_job_atomic(&job).unwrap();
+
+    // 1. Valid artifact in artifacts/ directory -> Allowed
+    let (res_path, _) =
+        resolve_cloud_artifact_preview_path(project_id, "internal_art_1", &store).unwrap();
+    assert!(res_path.starts_with(artifacts_dir.canonicalize().unwrap()));
+
+    // 2. Corrupted final_path pointing to job manifest in cloud-jobs/
+    let manifest_path = store
+        .project_cloud_jobs_dir(project_id)
+        .unwrap()
+        .join("internal_art_1.json");
+    job.output.final_path = Some(manifest_path);
+    job.state_revision = 2;
+    store.save_job_atomic(&job).unwrap();
+
+    let err =
+        resolve_cloud_artifact_preview_path(project_id, "internal_art_1", &store).unwrap_err();
+    assert!(
+        err.contains("SECURITY_VIOLATION"),
+        "Expected SECURITY_VIOLATION for job manifest path, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_phase18_13_real_authoritative_preflight_fixture_with_ffmpeg() {
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    let fixture_dir = Path::new("target").join("phase18-fixtures");
+    fs::create_dir_all(&fixture_dir).unwrap();
+    let fixture_file = fixture_dir.join("sample_720p_2s.mp4");
+
+    // Generate real 2.0s 1280x720 @ 24fps MP4 with ffmpeg lavfi testsrc
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=duration=2:size=1280x720:rate=24",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-f",
+        "mp4",
+    ]);
+    cmd.arg(fixture_file.to_str().unwrap());
+    let output = cmd.output();
+
+    if let Ok(out) = output {
+        if out.status.success() && fixture_file.is_file() {
+            let registry = ProviderRegistry::new();
+            let mut req =
+                make_test_request("CHARACTER_REPLACEMENT", 99.0, Some(fixture_file.clone()));
+            req.reference_images = Some(vec![PathBuf::from("ref1.png")]);
+            req.resolution = (3840, 2160); // Intentionally false resolution in request
+            req.fps = 60.0; // Intentionally false fps in request
+
+            // Authoritative preflight evaluates real source video on disk via ffprobe
+            let eval = evaluate_cloud_submission_preflight(&req, Some(10.0), &registry).unwrap();
+
+            assert_eq!(eval.task_class, TaskClass::CharacterReplacement);
+            assert!(eval.submittable);
+            assert!(eval.budget_approved);
+
+            let facts = eval
+                .source_facts
+                .expect("Expected probed source facts from real fixture");
+            assert!(
+                facts.duration_sec >= 1.8 && facts.duration_sec <= 2.2,
+                "Expected probed duration ~2.0s, got {}",
+                facts.duration_sec
+            );
+            assert_eq!(facts.width, 1280);
+            assert_eq!(facts.height, 720);
+
+            // Router selects 720p tier ($0.03/s) for 2.0s -> ~ $0.06 (NOT false 99.0s * $0.06 = $5.94)
+            let cost = eval.routing_decision.estimated_cost.estimated_usd.unwrap();
+            assert!(
+                (cost - (facts.duration_sec * 0.03)).abs() < 0.01,
+                "Expected ~0.06 USD for 2s 720p, got {}",
+                cost
+            );
+        }
+    }
 }

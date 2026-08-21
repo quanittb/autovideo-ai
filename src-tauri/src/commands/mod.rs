@@ -1795,6 +1795,112 @@ pub fn list_cloud_jobs(
     Ok(jobs.into_iter().map(|j| j.to_event_payload()).collect())
 }
 
+pub fn resolve_project_source_preview_path(
+    project_id: &str,
+    storage_paths: &StoragePaths,
+) -> Result<(PathBuf, crate::projects::SourceMedia), String> {
+    crate::ai::cloud::validate_identifier(project_id, "projectId").map_err(|e| format!("{}", e))?;
+
+    let manager = ProjectManager::new(storage_paths.clone());
+    let project = manager
+        .get_project(project_id)
+        .map_err(|e| format!("{}", e))?;
+    let source_media = project.source_media.ok_or_else(|| {
+        "PROJECT_HAS_NO_SOURCE_MEDIA: Project does not have imported source media".to_string()
+    })?;
+
+    let raw_path = PathBuf::from(&source_media.source_path);
+    let candidate = if raw_path.is_file() {
+        raw_path
+    } else {
+        let fallback = storage_paths
+            .projects_dir
+            .join(project_id)
+            .join("media")
+            .join(&source_media.original_file_name);
+        if fallback.is_file() {
+            fallback
+        } else {
+            return Err(format!(
+                "SOURCE_FILE_NOT_FOUND: Source media file could not be found at {}",
+                source_media.source_path.display()
+            ));
+        }
+    };
+
+    let canonical_file = candidate
+        .canonicalize()
+        .map_err(|e| format!("CANONICALIZE_FAILED: {}", e))?;
+    let media_root = storage_paths.projects_dir.join(project_id).join("media");
+    let canonical_media_root = media_root
+        .canonicalize()
+        .map_err(|e| format!("PROJECT_MEDIA_DIR_NOT_FOUND: {}", e))?;
+
+    if !canonical_file.starts_with(&canonical_media_root) {
+        return Err(
+            "SECURITY_VIOLATION: Source media file is outside project media directory".to_string(),
+        );
+    }
+    if !canonical_file.is_file() {
+        return Err("INVALID_TARGET: Source media path is not a regular file".to_string());
+    }
+
+    Ok((canonical_file, source_media))
+}
+
+pub fn resolve_cloud_artifact_preview_path(
+    project_id: &str,
+    internal_job_id: &str,
+    store: &crate::ai::cloud::PersistentCloudJobStore,
+) -> Result<(PathBuf, crate::ai::cloud::PersistentCloudJob), String> {
+    crate::ai::cloud::validate_identifier(project_id, "projectId").map_err(|e| format!("{}", e))?;
+    crate::ai::cloud::validate_identifier(internal_job_id, "internalJobId")
+        .map_err(|e| format!("{}", e))?;
+
+    let job = store
+        .load_job(project_id, internal_job_id)
+        .map_err(|e| format!("{}", e))?;
+
+    if job.state != crate::ai::cloud::CloudJobState::Completed {
+        return Err(format!(
+            "PREVIEW_NOT_ELIGIBLE: Cloud job {} is in state {:?}, completed state required for preview",
+            internal_job_id, job.state
+        ));
+    }
+
+    let final_path = job
+        .output
+        .final_path
+        .as_ref()
+        .ok_or_else(|| "NO_FINAL_PATH: Job output has no final artifact path".to_string())?;
+
+    if !final_path.is_file() {
+        return Err(format!(
+            "ARTIFACT_NOT_FOUND: Artifact file does not exist at {}",
+            final_path.display()
+        ));
+    }
+
+    let canonical_file = final_path
+        .canonicalize()
+        .map_err(|e| format!("CANONICALIZE_FAILED: {}", e))?;
+    let artifacts_root = store
+        .project_artifacts_dir(project_id)
+        .map_err(|e| format!("{}", e))?;
+    let canonical_artifacts_root = artifacts_root
+        .canonicalize()
+        .map_err(|e| format!("ARTIFACTS_ROOT_NOT_FOUND: {}", e))?;
+
+    if !canonical_file.starts_with(&canonical_artifacts_root) {
+        return Err(
+            "SECURITY_VIOLATION: Artifact file is outside project cloud artifacts directory"
+                .to_string(),
+        );
+    }
+
+    Ok((canonical_file, job))
+}
+
 #[command]
 pub fn authorize_preview_asset(
     project_id: String,
@@ -1803,56 +1909,10 @@ pub fn authorize_preview_asset(
     app: AppHandle,
     lifecycle: tauri::State<'_, Arc<crate::ai::cloud::CloudJobLifecycleService>>,
 ) -> Result<crate::ai::cloud::AuthorizedAssetPreview, String> {
-    crate::ai::cloud::validate_identifier(&project_id, "projectId")
-        .map_err(|e| format!("{}", e))?;
-
     match asset_kind {
         crate::ai::cloud::PreviewAssetKind::ProjectSource => {
-            let manager = ProjectManager::new(StoragePaths::default_paths());
-            let project = manager
-                .get_project(&project_id)
-                .map_err(|e| format!("{}", e))?;
-            let source_media = project.source_media.ok_or_else(|| {
-                "PROJECT_HAS_NO_SOURCE_MEDIA: Project does not have imported source media"
-                    .to_string()
-            })?;
-
-            let raw_path = PathBuf::from(&source_media.source_path);
-            let candidate = if raw_path.is_file() {
-                raw_path
-            } else {
-                let fallback = StoragePaths::default_paths()
-                    .projects_dir
-                    .join(&project_id)
-                    .join("media")
-                    .join(&source_media.original_file_name);
-                if fallback.is_file() {
-                    fallback
-                } else {
-                    return Err(format!(
-                        "SOURCE_FILE_NOT_FOUND: Source media file could not be found at {}",
-                        source_media.source_path.display()
-                    ));
-                }
-            };
-
-            let canonical_file = candidate
-                .canonicalize()
-                .map_err(|e| format!("CANONICALIZE_FAILED: {}", e))?;
-            let project_dir = StoragePaths::default_paths().projects_dir.join(&project_id);
-            let canonical_project_dir = project_dir
-                .canonicalize()
-                .map_err(|e| format!("PROJECT_DIR_NOT_FOUND: {}", e))?;
-
-            if !canonical_file.starts_with(&canonical_project_dir) {
-                return Err(
-                    "SECURITY_VIOLATION: Source media file is not inside project directory"
-                        .to_string(),
-                );
-            }
-            if !canonical_file.is_file() {
-                return Err("INVALID_TARGET: Source media path is not a regular file".to_string());
-            }
+            let (canonical_file, source_media) =
+                resolve_project_source_preview_path(&project_id, &StoragePaths::default_paths())?;
 
             let _ = app.asset_protocol_scope().allow_file(&canonical_file);
 
@@ -1870,49 +1930,9 @@ pub fn authorize_preview_asset(
                 "INTERNAL_JOB_ID_REQUIRED: internal_job_id is required for CloudArtifact preview"
                     .to_string()
             })?;
-            crate::ai::cloud::validate_identifier(&jid, "internalJobId")
-                .map_err(|e| format!("{}", e))?;
 
-            let job = lifecycle
-                .store()
-                .load_job(&project_id, &jid)
-                .map_err(|e| format!("{}", e))?;
-
-            if job.state != crate::ai::cloud::CloudJobState::Completed {
-                return Err(format!(
-                    "PREVIEW_NOT_ELIGIBLE: Cloud job {} is in state {:?}, completed state required for preview",
-                    jid, job.state
-                ));
-            }
-
-            let final_path = job.output.final_path.ok_or_else(|| {
-                "NO_FINAL_PATH: Job output has no final artifact path".to_string()
-            })?;
-
-            if !final_path.is_file() {
-                return Err(format!(
-                    "ARTIFACT_NOT_FOUND: Artifact file does not exist at {}",
-                    final_path.display()
-                ));
-            }
-
-            let canonical_file = final_path
-                .canonicalize()
-                .map_err(|e| format!("CANONICALIZE_FAILED: {}", e))?;
-            let artifacts_root = lifecycle
-                .store()
-                .project_cloud_jobs_dir(&project_id)
-                .map_err(|e| format!("{}", e))?;
-            let canonical_artifacts_root = artifacts_root
-                .canonicalize()
-                .map_err(|e| format!("ARTIFACTS_ROOT_NOT_FOUND: {}", e))?;
-
-            if !canonical_file.starts_with(&canonical_artifacts_root) {
-                return Err(
-                    "SECURITY_VIOLATION: Artifact file is outside project cloud artifacts directory"
-                        .to_string(),
-                );
-            }
+            let (canonical_file, job) =
+                resolve_cloud_artifact_preview_path(&project_id, &jid, lifecycle.store())?;
 
             let _ = app.asset_protocol_scope().allow_file(&canonical_file);
 
@@ -1949,31 +1969,20 @@ pub fn revoke_preview_asset(
     app: AppHandle,
     lifecycle: tauri::State<'_, Arc<crate::ai::cloud::CloudJobLifecycleService>>,
 ) -> Result<(), String> {
-    crate::ai::cloud::validate_identifier(&project_id, "projectId")
-        .map_err(|e| format!("{}", e))?;
-
     match asset_kind {
         crate::ai::cloud::PreviewAssetKind::ProjectSource => {
-            let manager = ProjectManager::new(StoragePaths::default_paths());
-            if let Ok(project) = manager.get_project(&project_id) {
-                if let Some(source_media) = project.source_media {
-                    let raw_path = PathBuf::from(&source_media.source_path);
-                    if let Ok(canonical) = raw_path.canonicalize() {
-                        let _ = app.asset_protocol_scope().forbid_file(&canonical);
-                    }
-                }
+            if let Ok((canonical_file, _)) =
+                resolve_project_source_preview_path(&project_id, &StoragePaths::default_paths())
+            {
+                let _ = app.asset_protocol_scope().forbid_file(&canonical_file);
             }
         }
         crate::ai::cloud::PreviewAssetKind::CloudArtifact => {
             if let Some(ref jid) = internal_job_id {
-                if crate::ai::cloud::validate_identifier(jid, "internalJobId").is_ok() {
-                    if let Ok(job) = lifecycle.store().load_job(&project_id, jid) {
-                        if let Some(final_path) = job.output.final_path {
-                            if let Ok(canonical) = final_path.canonicalize() {
-                                let _ = app.asset_protocol_scope().forbid_file(&canonical);
-                            }
-                        }
-                    }
+                if let Ok((canonical_file, _)) =
+                    resolve_cloud_artifact_preview_path(&project_id, jid, lifecycle.store())
+                {
+                    let _ = app.asset_protocol_scope().forbid_file(&canonical_file);
                 }
             }
         }
