@@ -9,46 +9,60 @@
 
 ## 1. Mục Tiêu & Phạm Vi Triển Khai (Phase 20A)
 
-Triển khai hoàn chỉnh hệ thống **Google Flow Browser Driver & Gemini Prompt Refinement** theo tiêu chuẩn 19 điểm Behavioral & Acceptance Corrections:
+Triển khai hoàn chỉnh hệ thống **Google Flow Browser Driver & Gemini Prompt Refinement** và gói runtime hotfix:
 
 1. **Wire Rust -> Real Node Playwright Sidecar Process**:
    - Giao thức chuẩn line-delimited JSON-RPC qua `stdin`/`stdout` giữa tiến trình Rust và tiến trình con Node Playwright (`src-tauri/sidecars/flow-playwright/dist/index.js`).
    - Quản lý lifecycle đầy đủ: spawn, call RPC với request ID, timeout, stderr sanitization, graceful close, và process crash detection.
    - Mock mode kích hoạt trình duyệt Chromium thật điều khiển bởi Playwright để tương tác trực tiếp với `MockFlowServer` cục bộ.
 
-2. **Real Mock Playwright Chromium E2E Verification**:
+2. **Persistent Login Browser Session Lifecycle (FlowBrowserSessionManager)**:
+   - `FlowBrowserSessionManager` sở hữu trực tiếp các `PlaywrightSidecarProcess` qua cấu trúc khóa 2 cấp: `Mutex<HashMap<ProfileId, Arc<tokio::sync::Mutex<FlowBrowserSession>>>>`. Outer lock cho map lookup/insert/remove, inner lock cho các thao tác RPC browser bất đồng bộ.
+   - Khi `open_flow_profile_browser()` được gọi: profile lock được xác lập, tiến trình Chromium headed được giữ sống liên tục trong session manager (không bị tự động drop/kill khi hàm trả về).
+   - Nút `[ Close Browser ]` cho phép người dùng chủ động đóng Chromium và giải phóng profile lock.
+   - Phân biệt rõ `isLocked` (profile bị khóa do session login hoặc background generation worker) và `browserSessionOpen` (phiên Chromium login đang mở).
+   - Clean shutdown handler đảm bảo toàn bộ session Chromium đang mở được giải phóng sạch sẽ khi đóng ứng dụng.
+
+3. **Gemini Credential Lifecycle & Granular Diagnostic Engine**:
+   - `GeminiCredentialManager` lưu trữ trạng thái shared state trong ứng dụng, quản lý khóa bảo mật thông qua OS Credential Manager (Windows Credential Manager / macOS Keychain / Linux Secret Service).
+   - Khởi tạo ban đầu: `stored = true/false` và `verification_status = UNVERIFIED`.
+   - Hàm kiểm tra `test_gemini_api_key()` thực hiện probe HTTP thực tế tới `models.get (gemini-2.5-flash-lite)` để cập nhật trạng thái `VALID` hoặc phân tích mã lỗi chi tiết.
+   - Bảng ánh xạ mã lỗi Google Generative AI đầy đủ:
+     - 400 (`API_KEY_INVALID`, `INVALID_ARGUMENT`) -> `INVALID_KEY`
+     - 400 (yêu cầu không hợp lệ khác) -> `BAD_REQUEST`
+     - 401 -> `INVALID_KEY`
+     - 403 (`PERMISSION_DENIED`) -> `FORBIDDEN`
+     - 404 (`NOT_FOUND`) -> `MODEL_UNAVAILABLE`
+     - 429 (`RESOURCE_EXHAUSTED`) -> `RATE_LIMITED`
+     - 5xx (`INTERNAL`, `UNAVAILABLE`) -> `PROVIDER_TEMPORARY_FAILURE`
+     - Timeout -> `TIMEOUT`
+     - Lỗi mạng/kết nối -> `NETWORK_ERROR`
+   - Bảo mật tuyệt đối: toàn bộ chuỗi lỗi và log đều được lọc và che dấu tự động (`[REDACTED_API_KEY]`), không để rò rỉ token API key.
+   - Khi kiểm tra thất bại: khóa đã lưu vẫn được bảo toàn nguyên vẹn trong OS Credential Manager (`stored: true`), không xóa nhầm credential.
+
+4. **Real Mock Playwright Chromium E2E Verification**:
    - Test `test_phase20a_38_real_mock_playwright_chromium_e2e` khởi động `MockFlowServer` cục bộ, tạo profile Chromium tạm thời, spawn Node sidecar, khởi chạy Chromium thật, điều hướng tới Mock Flow, tải tệp MP4 tổng hợp, điền prompt, click Generate thật đúng 1 lần (xác thực qua counter), poll tiến độ, tải video đầu ra và xác thực tệp tải về thành công.
 
-3. **Fail-Closed Flow UI Adapter**:
+5. **Fail-Closed Flow UI Adapter**:
    - Bắt lỗi nghiêm ngặt khi thiếu selector: `FLOW_UI_CHANGED: prompt textarea missing`, `FLOW_UI_CHANGED: file input missing`, `FLOW_UI_CHANGED: generate button missing/disabled`.
    - Lưu trữ bằng chứng sinh video ngữ nghĩa (`localSubmissionAttemptId`, page fingerprint, post-click state transition, `submittedAt`).
    - Loại bỏ cờ stealth `--disable-blink-features=AutomationControlled`.
    - `checkAuthStatus` chỉ trả về `READY`, `LOGIN_REQUIRED`, `UNKNOWN` (UNKNOWN kích hoạt fail-closed).
 
-4. **Crash-Safe Pre-Click State Machine & Ambiguous Recovery**:
+6. **Crash-Safe Pre-Click State Machine & Ambiguous Recovery**:
    - Trước khi thực hiện bất kỳ submit nào: kiểm tra `child.submission_state`.
    - `NEVER_ATTEMPTED`: ghi `ATTEMPT_PERSISTED` xuống đĩa -> thực hiện submit đúng 1 lần.
    - `ATTEMPT_PERSISTED` / `AMBIGUOUS`: **ZERO automatic resubmit**, chuyển trạng thái `GENERATION_AMBIGUOUS` yêu cầu người dùng xác nhận hoặc đối soát UI.
    - `PROVEN_SUBMITTED`: **ZERO resubmit**, tiếp tục poll bằng `submission_evidence` đã lưu.
    - `PROVEN_COMPLETED`: tái sử dụng artifact đã qua validation, **ZERO resubmit**.
-   - Test `test_phase20a_34_restart_recovery_zero_additional_generate_clicks` xác thực số lần click Generate giữ nguyên đúng 0 lần click mới sau sự cố.
 
-5. **Cross-Instance Atomic Profile File Lock**:
+7. **Cross-Instance Atomic Profile File Lock**:
    - Cơ chế khóa file `.session.lock` đa tiến trình/đa instance sử dụng `create_new(true)`.
    - Instance thứ 2 cố truy cập profile đang chạy lập tức nhận lỗi `PROFILE_IN_USE`.
 
-6. **Source Media & Path Confinement**:
+8. **Source Media & Path Confinement**:
    - Backend chuẩn hóa và kiểm tra đường dẫn canonical `candidate.starts_with(canonical_root)`.
    - Lệnh `start_flow_generation` ràng buộc source video từ thư mục media của dự án `<project>/media/`, loại bỏ ô nhập đường dẫn tự do trên giao diện.
-
-7. **Fail-Closed SecretStore & Gemini Header Authentication**:
-   - Lưu trữ Gemini API key vào OS Credential Manager (Windows Credential Manager / macOS Keychain / Linux Secret Service).
-   - Gọi Gemini API qua header `x-goog-api-key` (không đưa key vào URL query parameter).
-   - Sanitize toàn bộ lỗi mạng từ Gemini, không bao giờ serialize authorization header hoặc api key ra log hay UI.
-
-8. **Sanitized Public DTO Snapshots**:
-   - `FlowProfileSnapshot`: `{ profileId, name, status, isLocked, createdAt, updatedAt }` (loại bỏ `profile_dir`).
-   - `FlowJobSnapshot`: `{ ... finalOutputReady: bool ... }` (loại bỏ `final_output_path` đường dẫn thô).
 
 9. **Flow Credit Policy Authority**:
    - `OMNI_EDIT_UPLOADED_VIDEO_CREDITS_PER_GENERATION = 40` (40 credits / segment generation, 0 automatic retries).
@@ -91,55 +105,62 @@ Exit code: 0
 vite v7.3.6 building client environment for production...
 ✓ 1865 modules transformed.
 dist/index.html                   0.49 kB │ gzip:   0.31 kB
-dist/assets/index-C8VDbSTs.css   94.71 kB │ gzip:  13.06 kB
-dist/assets/window-DlQUgftK.js   13.92 kB │ gzip:   3.43 kB
-dist/assets/index-JklCOE5h.js   495.35 kB │ gzip: 124.64 kB
-✓ built in 6.07s
+dist/assets/index-BpOSgi2F.css   95.57 kB │ gzip:  13.14 kB
+dist/assets/window-DX7M3LbO.js   13.92 kB │ gzip:   3.43 kB
+dist/assets/index-B7MLV2YE.js   499.97 kB │ gzip: 125.47 kB
+✓ built in 5.72s
 ```
 **Kết quả**: ✅ **0 lỗi TypeScript, 0 lỗi Vite bundle.**
 
 ### 3.3. Frontend Vitest Tests (`npm test -- --run`)
 ```text
- ✓ src/stores/__tests__/cloudJobStore.test.ts (12 tests) 6ms
- ✓ src/stores/__tests__/segmentedCloudJobStore.test.ts (8 tests) 6ms
- ✓ src/stores/__tests__/flowJobStore.test.ts (4 tests) 5ms
- ✓ src/features/flow/__tests__/flowPromptUx.test.ts (12 tests) 10ms
+ ✓ src/stores/__tests__/cloudJobStore.test.ts (12 tests) 9ms
+ ✓ src/stores/__tests__/segmentedCloudJobStore.test.ts (8 tests) 9ms
+ ✓ src/stores/__tests__/flowJobStore.test.ts (6 tests) 7ms
+ ✓ src/features/flow/__tests__/flowPromptUx.test.ts (12 tests) 12ms
 
  Test Files  4 passed (4)
-      Tests  36 passed (36)
-   Duration  340ms
+      Tests  38 passed (38)
+   Duration  440ms
 ```
-**Kết quả**: ✅ **4 test files, 36/36 tests PASSED (100%).**
+**Kết quả**: ✅ **4 test files, 38/38 tests PASSED (100%).**
 
-### 3.4. Rust Formatting (`cargo fmt -- --check`)
+### 3.4. Rust Formatting (`cargo fmt --check`)
 ```text
-cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo fmt --check
 Exit code: 0
 ```
 **Kết quả**: ✅ **Formatting chuẩn 100%.**
 
-### 3.5. Rust Type Check (`cargo check --all-targets`)
+### 3.5. Rust Type Check (`cargo check`)
 ```text
-cargo check --all-targets --manifest-path src-tauri/Cargo.toml
-Finished `dev` profile in 10.03s
+cargo check
 Exit code: 0
 ```
 **Kết quả**: ✅ **0 compile errors, 0 warnings.**
 
 ### 3.6. Rust Test Regression Suites (Serial Execution)
-- `cargo test --lib -- tests_phase20a`: **44/44 passed (100%)**
-  - Bao gồm `test_phase20a_38_real_mock_playwright_chromium_e2e` với real Chromium execution.
-  - Bao gồm `test_phase20a_34_restart_recovery_zero_additional_generate_clicks` với crash window assertion.
-  - Bao gồm `test_phase20a_28_same_profile_concurrency_lock` cross-instance file lock.
-- `cargo test --lib -- tests_phase19`: **29/29 passed (100%)**
-- `cargo test --lib -- tests_phase18`: **13/13 passed (100%)**
-- `cargo test --lib -- tests_phase17`: **56/56 passed (100%)**
-- `cargo test --lib -- tests_phase16`: **39/39 passed (100%)**
-- `cargo test --lib -- tests_phase15`: **38/38 passed (100%)**
-- `cargo test --lib -- test_phase14`: **10/10 passed (100%)**
-- `cargo test --lib -- test_cloud`: **6/6 passed (100%)**
+- `cargo test --lib -- tests_phase20a --test-threads=1`: **57/57 passed (100%)**
+  - `test_phase20a_01` -> `test_phase20a_12`: Prompt optimization provenance, sanitization, single active request & undo tests.
+  - `test_phase20a_13` -> `test_phase20a_19`: Flow manifest freeze, submitted prompt hash, credit calculation & log secrecy.
+  - `test_phase20a_20` -> `test_phase20a_27`: Legal segmentation, fractional CFR frames, audio mux & corruption rejection.
+  - `test_phase20a_28` -> `test_phase20a_44`: Security mock tests, real Playwright Chromium e2e, crash safety invariant & zero click resubmit.
+  - `test_phase20a_45_browser_session_persistence_and_bounded_alive`: Session sống liên tục qua IPC, không bị drop/kill.
+  - `test_phase20a_46_same_session_auth_refresh`: Refresh auth trên cùng 1 phiên Chromium đang mở.
+  - `test_phase20a_47_browser_already_open_guard`: Ngăn chặn mở trùng phiên trên cùng profile (`BROWSER_ALREADY_OPEN`).
+  - `test_phase20a_48_explicit_browser_close_and_lock_release`: Đóng Chromium và giải phóng `.session.lock`.
+  - `test_phase20a_49_session_manager_shutdown_cleanup`: `close_all()` giải phóng toàn bộ Chromium khi tắt ứng dụng.
+  - `test_phase20a_50_profile_locked_by_worker_not_browser_open`: Phân biệt rõ `isLocked` và `browser_session_open`.
+  - `test_phase20a_51_gemini_unverified_on_store`: Lưu khóa mới có trạng thái ban đầu `UNVERIFIED`.
+  - `test_phase20a_52_gemini_mock_validation_success_valid`: Phản hồi 200 từ Mock Gemini cập nhật `VALID`.
+  - `test_phase20a_53_gemini_mock_validation_error_statuses`: Ánh xạ chính xác các mã lỗi 400/401/403/404/429/500/timeout/network.
+  - `test_phase20a_54_failed_verification_preserves_stored_key`: Lỗi xác thực không làm mất khóa đã lưu.
+  - `test_phase20a_55_get_gemini_status_retains_valid_in_session`: Giữ trạng thái `VALID` trong phiên ứng dụng.
+  - `test_phase20a_56_app_restart_resets_to_unverified`: Khởi động lại ứng dụng đặt lại trạng thái `UNVERIFIED`.
+  - `test_phase20a_57_zero_credential_leakage_in_diagnostics`: Che dấu API key trong toàn bộ chuỗi chẩn đoán.
+- Workspace regression suite (`cargo test --workspace -- --test-threads=1`): **847/847 passed (100%)**
 
-**Tổng cộng Rust tests**: ✅ **235/235 tests PASSED (100%), 0 failures, 0 regressions.**
+**Tổng cộng Rust tests**: ✅ **847/847 tests PASSED (100%), 0 failures, 0 regressions.**
 
 ---
 

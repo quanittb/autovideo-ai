@@ -2268,60 +2268,79 @@ pub fn revoke_segmented_preview_asset(
 #[command]
 pub async fn optimize_prompt(
     request: crate::ai::flow::OptimizePromptRequest,
+    gemini_mgr: tauri::State<'_, Arc<crate::ai::flow::GeminiCredentialManager>>,
 ) -> Result<crate::ai::flow::OptimizePromptResponse, String> {
-    let secret_store = crate::ai::flow::SecretStore::new(
-        crate::system::StoragePaths::default_paths().app_data_dir,
-    );
-    let optimizer = crate::ai::flow::GeminiPromptOptimizer::new(secret_store);
+    let optimizer = crate::ai::flow::GeminiPromptOptimizer::new(gemini_mgr.secret_store().clone());
     optimizer.optimize_prompt(request).await
 }
 
 #[command]
-pub fn get_gemini_status() -> crate::ai::flow::GeminiStatusResponse {
-    let secret_store = crate::ai::flow::SecretStore::new(
-        crate::system::StoragePaths::default_paths().app_data_dir,
-    );
-    let optimizer = crate::ai::flow::GeminiPromptOptimizer::new(secret_store);
-    optimizer.get_status()
+pub fn get_gemini_status(
+    gemini_mgr: tauri::State<'_, Arc<crate::ai::flow::GeminiCredentialManager>>,
+) -> crate::ai::flow::GeminiCredentialStatus {
+    gemini_mgr.get_status()
 }
 
 #[command]
-pub fn set_gemini_api_key(key: String) -> Result<(), String> {
-    let secret_store = crate::ai::flow::SecretStore::new(
-        crate::system::StoragePaths::default_paths().app_data_dir,
-    );
-    secret_store.set_gemini_api_key(&key)
+pub fn set_gemini_api_key(
+    key: String,
+    gemini_mgr: tauri::State<'_, Arc<crate::ai::flow::GeminiCredentialManager>>,
+) -> Result<(), String> {
+    gemini_mgr.set_key(&key)
 }
 
 #[command]
-pub fn clear_gemini_api_key() -> Result<(), String> {
-    let secret_store = crate::ai::flow::SecretStore::new(
-        crate::system::StoragePaths::default_paths().app_data_dir,
-    );
-    secret_store.clear_gemini_api_key()
+pub fn clear_gemini_api_key(
+    gemini_mgr: tauri::State<'_, Arc<crate::ai::flow::GeminiCredentialManager>>,
+) -> Result<(), String> {
+    gemini_mgr.clear_key()
 }
 
 #[command]
-pub fn list_flow_profiles() -> Vec<crate::ai::flow::FlowProfileSnapshot> {
+pub async fn test_gemini_api_key(
+    gemini_mgr: tauri::State<'_, Arc<crate::ai::flow::GeminiCredentialManager>>,
+) -> Result<crate::ai::flow::GeminiCredentialStatus, String> {
+    gemini_mgr.test_api_key().await
+}
+
+#[command]
+pub fn list_flow_profiles(
+    session_mgr: tauri::State<'_, Arc<crate::ai::flow::FlowBrowserSessionManager>>,
+) -> Vec<crate::ai::flow::FlowProfileSnapshot> {
     let manager = crate::ai::flow::FlowProfileManager::new(
         crate::system::StoragePaths::default_paths().app_data_dir,
     );
-    manager.list_profiles()
+    let mut profiles = manager.list_profiles();
+    for p in &mut profiles {
+        p.browser_session_open = session_mgr.is_session_open(&p.profile_id);
+    }
+    profiles
 }
 
 #[command]
 pub fn create_flow_profile(
     profile_id: String,
     name: String,
+    session_mgr: tauri::State<'_, Arc<crate::ai::flow::FlowBrowserSessionManager>>,
 ) -> Result<crate::ai::flow::FlowProfileSnapshot, String> {
     let manager = crate::ai::flow::FlowProfileManager::new(
         crate::system::StoragePaths::default_paths().app_data_dir,
     );
-    manager.create_profile(&profile_id, &name)
+    let mut snapshot = manager.create_profile(&profile_id, &name)?;
+    snapshot.browser_session_open = session_mgr.is_session_open(&profile_id);
+    Ok(snapshot)
 }
 
 #[command]
-pub fn delete_flow_profile(profile_id: String) -> Result<(), String> {
+pub fn delete_flow_profile(
+    profile_id: String,
+    session_mgr: tauri::State<'_, Arc<crate::ai::flow::FlowBrowserSessionManager>>,
+) -> Result<(), String> {
+    if session_mgr.is_session_open(&profile_id) {
+        return Err(
+            "PROFILE_LOCKED: Cannot delete profile while browser session is active".to_string(),
+        );
+    }
     let manager = crate::ai::flow::FlowProfileManager::new(
         crate::system::StoragePaths::default_paths().app_data_dir,
     );
@@ -2329,26 +2348,37 @@ pub fn delete_flow_profile(profile_id: String) -> Result<(), String> {
 }
 
 #[command]
-pub async fn open_flow_profile_browser(profile_id: String) -> Result<String, String> {
+pub async fn open_flow_profile_browser(
+    profile_id: String,
+    session_mgr: tauri::State<'_, Arc<crate::ai::flow::FlowBrowserSessionManager>>,
+) -> Result<String, String> {
     let paths = crate::system::StoragePaths::default_paths();
-    let manager = crate::ai::flow::FlowProfileManager::new(paths.app_data_dir);
+    let manager = crate::ai::flow::FlowProfileManager::new(paths.app_data_dir.clone());
     let profile_dir = manager.get_profile_dir(&profile_id)?;
-    let bridge = crate::ai::flow::PlaywrightBridge::new();
-    bridge.open_headed_browser_for_login(&profile_dir).await
+    session_mgr
+        .open_session(&profile_id, &profile_dir, &paths)
+        .await
 }
 
 #[command]
-pub async fn refresh_flow_profile_status(profile_id: String) -> Result<String, String> {
+pub async fn close_flow_profile_browser(
+    profile_id: String,
+    session_mgr: tauri::State<'_, Arc<crate::ai::flow::FlowBrowserSessionManager>>,
+) -> Result<(), String> {
+    session_mgr.close_session(&profile_id).await
+}
+
+#[command]
+pub async fn refresh_flow_profile_status(
+    profile_id: String,
+    session_mgr: tauri::State<'_, Arc<crate::ai::flow::FlowBrowserSessionManager>>,
+) -> Result<String, String> {
     let paths = crate::system::StoragePaths::default_paths();
-    let manager = crate::ai::flow::FlowProfileManager::new(paths.app_data_dir);
+    let manager = crate::ai::flow::FlowProfileManager::new(paths.app_data_dir.clone());
     let profile_dir = manager.get_profile_dir(&profile_id)?;
-    let bridge = crate::ai::flow::PlaywrightBridge::new();
-    let is_auth = bridge.check_auth_status(&profile_dir).await?;
-    if is_auth {
-        Ok("READY".to_string())
-    } else {
-        Ok("LOGIN_REQUIRED".to_string())
-    }
+    session_mgr
+        .check_or_refresh_auth(&profile_id, &profile_dir, &paths)
+        .await
 }
 
 #[command]

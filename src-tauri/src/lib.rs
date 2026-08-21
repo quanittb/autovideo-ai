@@ -45,14 +45,22 @@ pub fn run() {
             let orchestrator = Arc::new(crate::ai::cloud::SegmentedCloudJobOrchestrator::new(
                 lifecycle.clone(),
                 (*seg_store).clone(),
-                storage_paths,
+                storage_paths.clone(),
                 registry,
                 Some(app.handle().clone()),
             ));
 
+            let secret_store =
+                crate::ai::flow::SecretStore::new(storage_paths.app_data_dir.clone());
+            let gemini_manager =
+                Arc::new(crate::ai::flow::GeminiCredentialManager::new(secret_store));
+            let session_manager = Arc::new(crate::ai::flow::FlowBrowserSessionManager::new());
+
             app.manage(lifecycle.clone());
             app.manage(seg_store.clone());
             app.manage(orchestrator.clone());
+            app.manage(gemini_manager);
+            app.manage(session_manager.clone());
 
             let orchestrator_clone = orchestrator.clone();
             tauri::async_runtime::spawn(async move {
@@ -164,10 +172,12 @@ pub fn run() {
             get_gemini_status,
             set_gemini_api_key,
             clear_gemini_api_key,
+            test_gemini_api_key,
             list_flow_profiles,
             create_flow_profile,
             delete_flow_profile,
             open_flow_profile_browser,
+            close_flow_profile_browser,
             refresh_flow_profile_status,
             start_flow_generation,
             get_flow_job_status,

@@ -11,6 +11,7 @@ pub struct FlowProfileSnapshot {
     pub name: String,
     pub status: String, // "READY" | "LOGIN_REQUIRED" | "UNKNOWN"
     pub is_locked: bool,
+    pub browser_session_open: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -22,6 +23,7 @@ pub struct FlowProfileInfo {
     pub name: String,
     pub profile_dir: PathBuf,
     pub is_locked: bool,
+    #[serde(default)]
     pub is_authenticated: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -32,12 +34,9 @@ impl FlowProfileInfo {
         FlowProfileSnapshot {
             profile_id: self.profile_id.clone(),
             name: self.name.clone(),
-            status: if self.is_authenticated {
-                "READY".to_string()
-            } else {
-                "LOGIN_REQUIRED".to_string()
-            },
+            status: "UNKNOWN".to_string(),
             is_locked: self.is_locked,
+            browser_session_open: false,
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
         }

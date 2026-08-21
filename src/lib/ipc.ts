@@ -1026,16 +1026,35 @@ export interface OptimizePromptResponse {
   promptHash: string;
 }
 
-export interface GeminiStatusResponse {
-  isConfigured: boolean;
+export type GeminiVerificationStatus =
+  | 'UNVERIFIED'
+  | 'VALID'
+  | 'INVALID_KEY'
+  | 'FORBIDDEN'
+  | 'BAD_REQUEST'
+  | 'RATE_LIMITED'
+  | 'MODEL_UNAVAILABLE'
+  | 'PROVIDER_TEMPORARY_FAILURE'
+  | 'NETWORK_ERROR'
+  | 'TIMEOUT'
+  | 'UNKNOWN';
+
+export interface GeminiCredentialStatus {
+  stored: boolean;
+  verificationStatus: GeminiVerificationStatus;
   model: string;
+  lastVerifiedAt?: string | null;
+  sanitizedMessage?: string | null;
 }
+
+export type GeminiStatusResponse = GeminiCredentialStatus;
 
 export interface FlowProfileSnapshot {
   profileId: string;
   name: string;
   status: string; // "READY" | "LOGIN_REQUIRED" | "UNKNOWN"
   isLocked: boolean;
+  browserSessionOpen: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -1070,7 +1089,7 @@ export const flowApi = {
   optimizePrompt: (request: OptimizePromptRequest): Promise<OptimizePromptResponse> =>
     invoke('optimize_prompt', { request }),
 
-  getGeminiStatus: (): Promise<GeminiStatusResponse> =>
+  getGeminiStatus: (): Promise<GeminiCredentialStatus> =>
     invoke('get_gemini_status'),
 
   setGeminiApiKey: (key: string): Promise<void> =>
@@ -1078,6 +1097,9 @@ export const flowApi = {
 
   clearGeminiApiKey: (): Promise<void> =>
     invoke('clear_gemini_api_key'),
+
+  testGeminiApiKey: (): Promise<GeminiCredentialStatus> =>
+    invoke('test_gemini_api_key'),
 
   listProfiles: (): Promise<FlowProfileSnapshot[]> =>
     invoke('list_flow_profiles'),
@@ -1090,6 +1112,9 @@ export const flowApi = {
 
   openProfileBrowser: (profileId: string): Promise<string> =>
     invoke('open_flow_profile_browser', { profileId }),
+
+  closeProfileBrowser: (profileId: string): Promise<void> =>
+    invoke('close_flow_profile_browser', { profileId }),
 
   refreshProfileStatus: (profileId: string): Promise<string> =>
     invoke('refresh_flow_profile_status', { profileId }),

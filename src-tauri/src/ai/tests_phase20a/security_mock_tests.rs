@@ -441,3 +441,180 @@ fn test_phase20a_44_zero_fake_policy_mock_acceptance_metrics() {
     assert_eq!(replicate_predictions, 0);
     assert_eq!(paid_cost_usd, 0.00);
 }
+
+#[test]
+fn test_phase20a_45_browser_session_persistence_and_bounded_alive() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let profile_mgr = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_mgr
+        .create_profile("prof_persist_test", "Persist Test")
+        .unwrap();
+    let profile_dir = profile_mgr.get_profile_dir("prof_persist_test").unwrap();
+
+    let server_handle = rt
+        .block_on(MockFlowServer::start(MockScenario::Ready))
+        .unwrap();
+
+    let session_mgr = FlowBrowserSessionManager::with_mock_url(server_handle.base_url.clone());
+
+    // 1. Open session -> IPC returns -> managed session is alive
+    let open_res = rt.block_on(session_mgr.open_session("prof_persist_test", &profile_dir, &paths));
+    assert_eq!(open_res.unwrap(), "OPEN");
+    assert!(session_mgr.is_session_open("prof_persist_test"));
+
+    // 2. Bounded wait -> session remains alive
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(session_mgr.is_session_open("prof_persist_test"));
+
+    // 3. Clean up
+    rt.block_on(session_mgr.close_session("prof_persist_test"))
+        .unwrap();
+    assert!(!session_mgr.is_session_open("prof_persist_test"));
+}
+
+#[test]
+fn test_phase20a_46_same_session_auth_refresh() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let profile_mgr = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_mgr
+        .create_profile("prof_refresh_test", "Refresh Test")
+        .unwrap();
+    let profile_dir = profile_mgr.get_profile_dir("prof_refresh_test").unwrap();
+
+    let server_handle = rt
+        .block_on(MockFlowServer::start(MockScenario::Ready))
+        .unwrap();
+
+    let session_mgr = FlowBrowserSessionManager::with_mock_url(server_handle.base_url.clone());
+
+    // Open session
+    let _ = rt
+        .block_on(session_mgr.open_session("prof_refresh_test", &profile_dir, &paths))
+        .unwrap();
+
+    // Refresh auth using SAME live session
+    let auth_status = rt
+        .block_on(session_mgr.check_or_refresh_auth("prof_refresh_test", &profile_dir, &paths))
+        .unwrap();
+    assert_eq!(auth_status, "READY");
+
+    // Close session
+    rt.block_on(session_mgr.close_session("prof_refresh_test"))
+        .unwrap();
+}
+
+#[test]
+fn test_phase20a_47_browser_already_open_guard() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let profile_mgr = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_mgr
+        .create_profile("prof_dup_test", "Dup Test")
+        .unwrap();
+    let profile_dir = profile_mgr.get_profile_dir("prof_dup_test").unwrap();
+
+    let server_handle = rt
+        .block_on(MockFlowServer::start(MockScenario::Ready))
+        .unwrap();
+
+    let session_mgr = FlowBrowserSessionManager::with_mock_url(server_handle.base_url.clone());
+
+    let res1 = rt
+        .block_on(session_mgr.open_session("prof_dup_test", &profile_dir, &paths))
+        .unwrap();
+    assert_eq!(res1, "OPEN");
+
+    // Second open on same profile -> BROWSER_ALREADY_OPEN
+    let res2 = rt
+        .block_on(session_mgr.open_session("prof_dup_test", &profile_dir, &paths))
+        .unwrap();
+    assert_eq!(res2, "BROWSER_ALREADY_OPEN");
+
+    rt.block_on(session_mgr.close_session("prof_dup_test"))
+        .unwrap();
+}
+
+#[test]
+fn test_phase20a_48_explicit_browser_close_and_lock_release() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let profile_mgr = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_mgr
+        .create_profile("prof_close_test", "Close Test")
+        .unwrap();
+    let profile_dir = profile_mgr.get_profile_dir("prof_close_test").unwrap();
+
+    let server_handle = rt
+        .block_on(MockFlowServer::start(MockScenario::Ready))
+        .unwrap();
+
+    let session_mgr = FlowBrowserSessionManager::with_mock_url(server_handle.base_url.clone());
+
+    let _ = rt
+        .block_on(session_mgr.open_session("prof_close_test", &profile_dir, &paths))
+        .unwrap();
+    assert!(profile_dir.join(".session.lock").exists());
+
+    // Explicit close releases lock
+    rt.block_on(session_mgr.close_session("prof_close_test"))
+        .unwrap();
+    assert!(!profile_dir.join(".session.lock").exists());
+    assert!(!session_mgr.is_session_open("prof_close_test"));
+}
+
+#[test]
+fn test_phase20a_49_session_manager_shutdown_cleanup() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let profile_mgr = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_mgr
+        .create_profile("prof_shut_test", "Shutdown Test")
+        .unwrap();
+    let profile_dir = profile_mgr.get_profile_dir("prof_shut_test").unwrap();
+
+    let server_handle = rt
+        .block_on(MockFlowServer::start(MockScenario::Ready))
+        .unwrap();
+
+    let session_mgr = FlowBrowserSessionManager::with_mock_url(server_handle.base_url.clone());
+
+    let _ = rt
+        .block_on(session_mgr.open_session("prof_shut_test", &profile_dir, &paths))
+        .unwrap();
+    assert!(session_mgr.is_session_open("prof_shut_test"));
+
+    // App shutdown -> close_all
+    rt.block_on(session_mgr.close_all());
+    assert!(!session_mgr.is_session_open("prof_shut_test"));
+}
+
+#[test]
+fn test_phase20a_50_profile_locked_by_worker_not_browser_open() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let profile_mgr = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_mgr
+        .create_profile("prof_worker_lock", "Worker Lock")
+        .unwrap();
+    let profile_dir = profile_mgr.get_profile_dir("prof_worker_lock").unwrap();
+
+    let session_mgr = FlowBrowserSessionManager::new();
+
+    // Lock profile directly with FlowProfileGuard (simulating background worker)
+    let guard = profile_mgr
+        .acquire_session_lock("prof_worker_lock")
+        .unwrap();
+    assert!(profile_dir.join(".session.lock").exists());
+
+    // browser_session_open must be false
+    assert!(!session_mgr.is_session_open("prof_worker_lock"));
+
+    drop(guard);
+}

@@ -11,11 +11,12 @@ import {
   Trash2,
   RotateCw,
   Key,
-  ShieldCheck
+  ShieldCheck,
+  AlertCircle
 } from 'lucide-react';
 import { useHardwareProfile } from '../../hooks/useHardwareProfile';
 import { useAppInfo } from '../../hooks/useAppInfo';
-import { api, flowApi, GeminiStatusResponse } from '../../lib/ipc';
+import { api, flowApi, GeminiCredentialStatus } from '../../lib/ipc';
 import { StorageUsageReport } from '../../types/contracts';
 
 export const SettingsView: React.FC = () => {
@@ -28,10 +29,11 @@ export const SettingsView: React.FC = () => {
   const [isCleaningTemp, setIsCleaningTemp] = useState<boolean>(false);
   const [storageActionMessage, setStorageActionMessage] = useState<string | null>(null);
 
-  const [geminiStatus, setGeminiStatus] = useState<GeminiStatusResponse | null>(null);
+  const [geminiStatus, setGeminiStatus] = useState<GeminiCredentialStatus | null>(null);
   const [geminiKeyInput, setGeminiKeyInput] = useState<string>('');
   const [isSavingGeminiKey, setIsSavingGeminiKey] = useState<boolean>(false);
-  const [geminiMessage, setGeminiMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [isTestingGeminiKey, setIsTestingGeminiKey] = useState<boolean>(false);
+  const [geminiMessage, setGeminiMessage] = useState<{ type: 'success' | 'error' | 'warning'; text: string } | null>(null);
 
   const fetchGeminiStatus = async () => {
     try {
@@ -42,19 +44,48 @@ export const SettingsView: React.FC = () => {
     }
   };
 
-  const handleSaveGeminiKey = async () => {
+  const handleSaveAndTestGeminiKey = async () => {
     if (!geminiKeyInput.trim()) return;
     setIsSavingGeminiKey(true);
     setGeminiMessage(null);
     try {
       await flowApi.setGeminiApiKey(geminiKeyInput.trim());
-      setGeminiMessage({ type: 'success', text: 'Gemini API Key securely stored in OS Credential Manager.' });
       setGeminiKeyInput('');
-      await fetchGeminiStatus();
+      const testRes = await flowApi.testGeminiApiKey();
+      setGeminiStatus(testRes);
+      if (testRes.verificationStatus === 'VALID') {
+        setGeminiMessage({ type: 'success', text: 'Gemini API Key securely stored and verified successfully.' });
+      } else {
+        setGeminiMessage({
+          type: 'warning',
+          text: `Stored securely in OS Keychain, but verification status: ${testRes.verificationStatus}${testRes.sanitizedMessage ? ` — ${testRes.sanitizedMessage}` : ''}`,
+        });
+      }
     } catch (err: any) {
       setGeminiMessage({ type: 'error', text: typeof err === 'string' ? err : err?.message || 'Failed to save Gemini key' });
     } finally {
       setIsSavingGeminiKey(false);
+    }
+  };
+
+  const handleTestAgain = async () => {
+    setIsTestingGeminiKey(true);
+    setGeminiMessage(null);
+    try {
+      const testRes = await flowApi.testGeminiApiKey();
+      setGeminiStatus(testRes);
+      if (testRes.verificationStatus === 'VALID') {
+        setGeminiMessage({ type: 'success', text: 'API Access Verified (gemini-2.5-flash-lite).' });
+      } else {
+        setGeminiMessage({
+          type: 'warning',
+          text: `Verification status: ${testRes.verificationStatus}${testRes.sanitizedMessage ? ` — ${testRes.sanitizedMessage}` : ''}`,
+        });
+      }
+    } catch (err: any) {
+      setGeminiMessage({ type: 'error', text: typeof err === 'string' ? err : err?.message || 'Failed to test Gemini key' });
+    } finally {
+      setIsTestingGeminiKey(false);
     }
   };
 
@@ -220,21 +251,36 @@ export const SettingsView: React.FC = () => {
 
               {/* Gemini API Key Configuration Card */}
               <div className="p-5 rounded-2xl bg-slate-950 border border-slate-800 space-y-4">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between flex-wrap gap-2">
                   <div className="flex items-center gap-2">
                     <Key className="w-4 h-4 text-indigo-400" />
                     <h4 className="text-sm font-bold text-slate-200">Google Gemini API Key (Flow Prompt Refinement)</h4>
                   </div>
-                  <span
-                    className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border flex items-center gap-1 ${
-                      geminiStatus?.isConfigured
-                        ? 'bg-emerald-950/80 border-emerald-500/30 text-emerald-400'
-                        : 'bg-slate-900 border-slate-700 text-slate-400'
-                    }`}
-                  >
-                    {geminiStatus?.isConfigured && <ShieldCheck className="w-3 h-3" />}
-                    {geminiStatus?.isConfigured ? 'Configured (Encrypted in OS Keychain)' : 'Not Configured (Optional)'}
-                  </span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span
+                      className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border flex items-center gap-1 ${
+                        geminiStatus?.stored
+                          ? 'bg-emerald-950/80 border-emerald-500/30 text-emerald-400'
+                          : 'bg-slate-900 border-slate-700 text-slate-400'
+                      }`}
+                    >
+                      {geminiStatus?.stored ? <ShieldCheck className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
+                      Storage: {geminiStatus?.stored ? 'Stored in OS Keychain' : 'Not Stored'}
+                    </span>
+                    {geminiStatus?.stored && (
+                      <span
+                        className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border flex items-center gap-1 ${
+                          geminiStatus.verificationStatus === 'VALID'
+                            ? 'bg-emerald-950/80 border-emerald-500/30 text-emerald-400'
+                            : geminiStatus.verificationStatus === 'UNVERIFIED'
+                            ? 'bg-slate-900 border-slate-700 text-slate-400'
+                            : 'bg-rose-950/80 border-rose-500/30 text-rose-400'
+                        }`}
+                      >
+                        API Access: {geminiStatus.verificationStatus}
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 <p className="text-xs text-slate-400 leading-relaxed">
@@ -246,6 +292,8 @@ export const SettingsView: React.FC = () => {
                     className={`p-3 rounded-xl text-xs flex items-center gap-2 ${
                       geminiMessage.type === 'success'
                         ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-300'
+                        : geminiMessage.type === 'warning'
+                        ? 'bg-amber-500/10 border border-amber-500/20 text-amber-300'
                         : 'bg-red-500/10 border border-red-500/20 text-red-300'
                     }`}
                   >
@@ -262,21 +310,31 @@ export const SettingsView: React.FC = () => {
                     placeholder="Enter Gemini API Key (e.g. AIzaSy...)"
                     className="flex-1 px-3 py-2 text-xs font-mono text-slate-100 bg-slate-900 border border-slate-700 rounded-xl focus:outline-none focus:border-indigo-500 transition"
                   />
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <button
                       type="button"
-                      onClick={handleSaveGeminiKey}
-                      disabled={isSavingGeminiKey || !geminiKeyInput.trim()}
+                      onClick={handleSaveAndTestGeminiKey}
+                      disabled={isSavingGeminiKey || isTestingGeminiKey || !geminiKeyInput.trim()}
                       className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl shadow transition cursor-pointer"
                     >
-                      {isSavingGeminiKey ? 'Saving...' : 'Save API Key'}
+                      {isSavingGeminiKey ? 'Saving & Testing...' : 'Save & Test API Key'}
                     </button>
-                    {geminiStatus?.isConfigured && (
+                    {geminiStatus?.stored && (
+                      <button
+                        type="button"
+                        onClick={handleTestAgain}
+                        disabled={isSavingGeminiKey || isTestingGeminiKey}
+                        className="px-3 py-2 text-xs font-semibold text-indigo-300 hover:text-white bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-700/50 rounded-xl transition cursor-pointer disabled:opacity-40"
+                      >
+                        {isTestingGeminiKey ? 'Testing...' : 'Test Again'}
+                      </button>
+                    )}
+                    {geminiStatus?.stored && (
                       <button
                         type="button"
                         onClick={handleClearGeminiKey}
-                        disabled={isSavingGeminiKey}
-                        className="px-3 py-2 text-xs font-semibold text-red-400 hover:text-red-300 bg-red-950/40 hover:bg-red-900/40 border border-red-800/40 rounded-xl transition cursor-pointer"
+                        disabled={isSavingGeminiKey || isTestingGeminiKey}
+                        className="px-3 py-2 text-xs font-semibold text-red-400 hover:text-red-300 bg-red-950/40 hover:bg-red-900/40 border border-red-800/40 rounded-xl transition cursor-pointer disabled:opacity-40"
                       >
                         Remove Key
                       </button>

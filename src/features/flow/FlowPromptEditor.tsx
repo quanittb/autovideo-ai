@@ -103,9 +103,23 @@ export const FlowPromptEditor: React.FC<FlowPromptEditorProps> = ({
       />
 
       {optimizationError && (
-        <div className="flex items-center gap-2 px-3 py-2 text-xs text-rose-300 bg-rose-950/40 border border-rose-800/40 rounded-lg">
-          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-          <span>Prompt optimization error: {optimizationError}. Existing prompt was preserved.</span>
+        <div className="flex flex-col gap-1.5 p-3 text-xs text-rose-300 bg-rose-950/50 border border-rose-800/50 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 font-semibold text-rose-200">
+              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+              <span>Gemini Prompt Optimization Failed</span>
+            </div>
+            <button
+              type="button"
+              onClick={onGenPrompt}
+              className="px-2.5 py-0.5 text-[11px] font-medium text-rose-200 bg-rose-900/60 hover:bg-rose-800/70 border border-rose-700/50 rounded transition cursor-pointer"
+            >
+              Try Again
+            </button>
+          </div>
+          <p className="text-[11px] text-rose-300/90 pl-6 leading-relaxed">
+            {optimizationError}. Current prompt remains preserved.
+          </p>
         </div>
       )}
 

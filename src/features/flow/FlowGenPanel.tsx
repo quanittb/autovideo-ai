@@ -167,7 +167,7 @@ export const FlowGenPanel: React.FC = () => {
         prompt={prompt}
         promptSource={promptSource}
         isOptimizing={isOptimizing}
-        geminiConfigured={geminiStatus?.isConfigured ?? false}
+        geminiConfigured={geminiStatus?.stored ?? false}
         optimizationError={optimizationError}
         canUndo={canUndo}
         disabled={isStarting || (activeJob !== null && activeJob.state !== 'COMPLETED' && activeJob.state !== 'FAILED')}

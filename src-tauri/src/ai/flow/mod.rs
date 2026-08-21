@@ -1,3 +1,4 @@
+pub mod browser_session;
 pub mod capability;
 pub mod manifest;
 pub mod mock_flow_server;
@@ -10,6 +11,7 @@ pub mod segment;
 pub mod stitcher;
 pub mod store;
 
+pub use browser_session::{FlowBrowserSession, FlowBrowserSessionManager};
 pub use capability::{
     FlowCapabilityPolicy, FlowCreditRecord, FlowGenerationMode,
     OMNI_EDIT_UPLOADED_VIDEO_CREDITS_PER_GENERATION, OMNI_VIDEO_GENERATE_CREDITS_PER_GENERATION,
@@ -21,10 +23,11 @@ pub use manifest::{
 pub use mock_flow_server::{MockFlowServer, MockFlowServerHandle, MockScenario};
 pub use orchestrator::FlowOrchestrator;
 pub use output_validator::FlowOutputValidator;
-pub use playwright_bridge::{FlowPollResult, PlaywrightBridge};
+pub use playwright_bridge::{FlowPollResult, PlaywrightBridge, PlaywrightSidecarProcess};
 pub use profile::{FlowProfileGuard, FlowProfileInfo, FlowProfileManager, FlowProfileSnapshot};
 pub use prompt_optimizer::{
-    calculate_prompt_hash, GeminiPromptOptimizer, GeminiStatusResponse, OptimizePromptRequest,
+    calculate_prompt_hash, parse_google_error, GeminiCredentialManager, GeminiCredentialStatus,
+    GeminiPromptOptimizer, GeminiStatusResponse, GeminiVerificationStatus, OptimizePromptRequest,
     OptimizePromptResponse, PromptSource, SecretStore,
 };
 pub use segment::FlowVideoSegmenter;

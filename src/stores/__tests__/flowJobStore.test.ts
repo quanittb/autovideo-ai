@@ -6,7 +6,11 @@ vi.mock('../../lib/ipc', () => ({
   flowApi: {
     listProfiles: vi.fn(),
     createProfile: vi.fn(),
+    openProfileBrowser: vi.fn(),
+    closeProfileBrowser: vi.fn(),
+    refreshProfileStatus: vi.fn(),
     getGeminiStatus: vi.fn(),
+    testGeminiApiKey: vi.fn(),
     startFlowGeneration: vi.fn(),
     getFlowJobStatus: vi.fn(),
   },
@@ -33,6 +37,7 @@ describe('flowJobStore', () => {
         name: 'Profile 1',
         status: 'READY',
         isLocked: false,
+        browserSessionOpen: false,
         createdAt: '2026-08-21T00:00:00Z',
         updatedAt: '2026-08-21T00:00:00Z',
       },
@@ -50,8 +55,9 @@ describe('flowJobStore', () => {
     vi.mocked(flowApi.createProfile).mockResolvedValueOnce({
       profileId: 'prof_new',
       name: 'New Profile',
-      status: 'LOGIN_REQUIRED',
+      status: 'UNKNOWN',
       isLocked: false,
+      browserSessionOpen: false,
       createdAt: '2026-08-21T00:00:00Z',
       updatedAt: '2026-08-21T00:00:00Z',
     });
@@ -61,6 +67,62 @@ describe('flowJobStore', () => {
     const state = useFlowJobStore.getState();
     expect(state.profiles).toHaveLength(1);
     expect(state.selectedProfileId).toBe('prof_new');
+  });
+
+  it('handles openProfileBrowser and closeProfileBrowser state transitions', async () => {
+    useFlowJobStore.setState({
+      profiles: [
+        {
+          profileId: 'prof_1',
+          name: 'Profile 1',
+          status: 'UNKNOWN',
+          isLocked: false,
+          browserSessionOpen: false,
+          createdAt: '2026-08-21T00:00:00Z',
+          updatedAt: '2026-08-21T00:00:00Z',
+        },
+      ],
+      selectedProfileId: 'prof_1',
+    });
+
+    vi.mocked(flowApi.openProfileBrowser).mockResolvedValueOnce('OPEN');
+    await useFlowJobStore.getState().openProfileBrowser('prof_1');
+
+    let state = useFlowJobStore.getState();
+    expect(state.profiles[0].browserSessionOpen).toBe(true);
+    expect(state.profiles[0].isLocked).toBe(true);
+
+    vi.mocked(flowApi.closeProfileBrowser).mockResolvedValueOnce(undefined);
+    vi.mocked(flowApi.listProfiles).mockResolvedValueOnce([
+      {
+        profileId: 'prof_1',
+        name: 'Profile 1',
+        status: 'READY',
+        isLocked: false,
+        browserSessionOpen: false,
+        createdAt: '2026-08-21T00:00:00Z',
+        updatedAt: '2026-08-21T00:00:00Z',
+      },
+    ]);
+
+    await useFlowJobStore.getState().closeProfileBrowser('prof_1');
+    state = useFlowJobStore.getState();
+    expect(state.profiles[0].browserSessionOpen).toBe(false);
+    expect(state.profiles[0].isLocked).toBe(false);
+  });
+
+  it('tests Gemini API key and stores verification status', async () => {
+    vi.mocked(flowApi.testGeminiApiKey).mockResolvedValueOnce({
+      stored: true,
+      verificationStatus: 'VALID',
+      model: 'gemini-2.5-flash-lite',
+      lastVerifiedAt: '2026-08-21T12:00:00Z',
+      sanitizedMessage: null,
+    });
+
+    const res = await useFlowJobStore.getState().testGeminiApiKey();
+    expect(res.verificationStatus).toBe('VALID');
+    expect(useFlowJobStore.getState().geminiStatus?.verificationStatus).toBe('VALID');
   });
 
   it('starts Flow generation job and sets activeJob', async () => {

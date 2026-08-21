@@ -1,5 +1,77 @@
 use crate::ai::flow::*;
 use tempfile::tempdir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+struct MockGeminiServer {
+    pub base_url: String,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl MockGeminiServer {
+    pub async fn start(
+        status_to_return: u16,
+        body_to_return: &'static str,
+    ) -> Result<Self, String> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| e.to_string())?;
+        let addr = listener.local_addr().map_err(|e| e.to_string())?;
+        let base_url = format!("http://127.0.0.1:{}", addr.port());
+
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    accept_res = listener.accept() => {
+                        if let Ok((mut socket, _)) = accept_res {
+                            tokio::spawn(async move {
+                                let mut buf = [0u8; 4096];
+                                if let Ok(n) = socket.read(&mut buf).await {
+                                    let _req_str = String::from_utf8_lossy(&buf[..n]);
+                                    let status_line = match status_to_return {
+                                        200 => "200 OK",
+                                        400 => "400 Bad Request",
+                                        401 => "401 Unauthorized",
+                                        403 => "403 Forbidden",
+                                        404 => "404 Not Found",
+                                        429 => "429 Too Many Requests",
+                                        500 => "500 Internal Server Error",
+                                        503 => "503 Service Unavailable",
+                                        _ => "200 OK",
+                                    };
+                                    let resp = format!(
+                                        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                        status_line,
+                                        body_to_return.len(),
+                                        body_to_return
+                                    );
+                                    let _ = socket.write_all(resp.as_bytes()).await;
+                                }
+                            });
+                        }
+                    }
+                    _ = &mut shutdown_rx => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            base_url,
+            shutdown_tx: Some(shutdown_tx),
+        })
+    }
+}
+
+impl Drop for MockGeminiServer {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
 
 #[test]
 fn test_phase20a_01_empty_and_whitespace_prompt_no_gemini_call() {
@@ -132,6 +204,7 @@ fn test_phase20a_07_manual_edit_after_optimization_transitions_to_edited() {
 fn test_phase20a_08_gemini_failure_leaves_prompt_untouched() {
     let temp_dir = tempdir().unwrap();
     let store = SecretStore::new(temp_dir.path().to_path_buf());
+    let _ = store.clear_gemini_api_key();
     let optimizer = GeminiPromptOptimizer::new(store);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -145,7 +218,7 @@ fn test_phase20a_08_gemini_failure_leaves_prompt_untouched() {
     };
     let res = rt.block_on(optimizer.optimize_prompt(req));
     assert!(res.is_err());
-    assert!(res.unwrap_err().contains("PROMPT_OPTIMIZATION_FAILED"));
+    assert!(res.unwrap_err().contains("GEMINI_API_KEY_NOT_CONFIGURED"));
 }
 
 #[test]
@@ -207,4 +280,248 @@ fn test_phase20a_12_empty_and_oversized_gemini_response_rejected() {
         &oversized_str
     };
     assert_eq!(truncated.len(), 3000);
+}
+
+// -----------------------------------------------------------------------------
+// Gemini Verification & Diagnostic Tests (Phase 20A Hotfix)
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_phase20a_51_gemini_unverified_on_store() {
+    let temp_dir = tempdir().unwrap();
+    let store = SecretStore::new(temp_dir.path().to_path_buf());
+    let manager = GeminiCredentialManager::new(store);
+
+    manager.set_key("AIzaSy_Secret_Key_For_Test").unwrap();
+    let status = manager.get_status();
+    assert!(status.stored);
+    assert_eq!(
+        status.verification_status,
+        GeminiVerificationStatus::Unverified
+    );
+    assert!(status.last_verified_at.is_none());
+}
+
+#[test]
+fn test_phase20a_52_gemini_mock_validation_success_valid() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server = rt
+        .block_on(MockGeminiServer::start(
+            200,
+            r#"{"name":"models/gemini-2.5-flash-lite","displayName":"Gemini 2.5 Flash Lite"}"#,
+        ))
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let store = SecretStore::new(temp_dir.path().to_path_buf());
+    store.set_gemini_api_key("AIzaSy_Mock_Valid_Key").unwrap();
+
+    let manager = GeminiCredentialManager::with_endpoint_and_model(
+        store,
+        Some(server.base_url.clone()),
+        "gemini-2.5-flash-lite".to_string(),
+    );
+
+    let res = rt.block_on(manager.test_api_key()).unwrap();
+    assert!(res.stored);
+    assert_eq!(res.verification_status, GeminiVerificationStatus::Valid);
+    assert!(res.last_verified_at.is_some());
+    assert!(res.sanitized_message.is_none());
+}
+
+#[test]
+fn test_phase20a_53_gemini_mock_validation_error_statuses() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    // 1. 400 with API_KEY_INVALID
+    let s_400 = rt
+        .block_on(MockGeminiServer::start(
+            400,
+            r#"{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}"#,
+        ))
+        .unwrap();
+    let temp_dir = tempdir().unwrap();
+    let store = SecretStore::new(temp_dir.path().to_path_buf());
+    store.set_gemini_api_key("bad_key_400").unwrap();
+    let m_400 = GeminiCredentialManager::with_endpoint_and_model(
+        store,
+        Some(s_400.base_url.clone()),
+        "gemini-2.5-flash-lite".to_string(),
+    );
+    let res_400 = rt.block_on(m_400.test_api_key()).unwrap();
+    assert_eq!(
+        res_400.verification_status,
+        GeminiVerificationStatus::InvalidKey
+    );
+
+    // 2. 403 Forbidden / Permission Denied
+    let s_403 = rt
+        .block_on(MockGeminiServer::start(
+            403,
+            r#"{"error":{"code":403,"message":"Generative Language API has not been used in project before or it is disabled.","status":"PERMISSION_DENIED"}}"#,
+        ))
+        .unwrap();
+    let store_403 = SecretStore::new(temp_dir.path().to_path_buf());
+    store_403.set_gemini_api_key("forbidden_key").unwrap();
+    let m_403 = GeminiCredentialManager::with_endpoint_and_model(
+        store_403,
+        Some(s_403.base_url.clone()),
+        "gemini-2.5-flash-lite".to_string(),
+    );
+    let res_403 = rt.block_on(m_403.test_api_key()).unwrap();
+    assert_eq!(
+        res_403.verification_status,
+        GeminiVerificationStatus::Forbidden
+    );
+
+    // 3. 404 Model Unavailable
+    let s_404 = rt
+        .block_on(MockGeminiServer::start(
+            404,
+            r#"{"error":{"code":404,"message":"models/gemini-2.5-flash-lite is not found for API version v1beta","status":"NOT_FOUND"}}"#,
+        ))
+        .unwrap();
+    let store_404 = SecretStore::new(temp_dir.path().to_path_buf());
+    store_404.set_gemini_api_key("not_found_key").unwrap();
+    let m_404 = GeminiCredentialManager::with_endpoint_and_model(
+        store_404,
+        Some(s_404.base_url.clone()),
+        "gemini-2.5-flash-lite".to_string(),
+    );
+    let res_404 = rt.block_on(m_404.test_api_key()).unwrap();
+    assert_eq!(
+        res_404.verification_status,
+        GeminiVerificationStatus::ModelUnavailable
+    );
+
+    // 4. 429 Rate Limited
+    let s_429 = rt
+        .block_on(MockGeminiServer::start(
+            429,
+            r#"{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}"#,
+        ))
+        .unwrap();
+    let store_429 = SecretStore::new(temp_dir.path().to_path_buf());
+    store_429.set_gemini_api_key("rate_limit_key").unwrap();
+    let m_429 = GeminiCredentialManager::with_endpoint_and_model(
+        store_429,
+        Some(s_429.base_url.clone()),
+        "gemini-2.5-flash-lite".to_string(),
+    );
+    let res_429 = rt.block_on(m_429.test_api_key()).unwrap();
+    assert_eq!(
+        res_429.verification_status,
+        GeminiVerificationStatus::RateLimited
+    );
+
+    // 5. 500 Provider Temporary Failure
+    let s_500 = rt
+        .block_on(MockGeminiServer::start(
+            500,
+            r#"{"error":{"code":500,"message":"Internal server error","status":"INTERNAL"}}"#,
+        ))
+        .unwrap();
+    let store_500 = SecretStore::new(temp_dir.path().to_path_buf());
+    store_500.set_gemini_api_key("server_err_key").unwrap();
+    let m_500 = GeminiCredentialManager::with_endpoint_and_model(
+        store_500,
+        Some(s_500.base_url.clone()),
+        "gemini-2.5-flash-lite".to_string(),
+    );
+    let res_500 = rt.block_on(m_500.test_api_key()).unwrap();
+    assert_eq!(
+        res_500.verification_status,
+        GeminiVerificationStatus::ProviderTemporaryFailure
+    );
+}
+
+#[test]
+fn test_phase20a_54_failed_verification_preserves_stored_key() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server = rt
+        .block_on(MockGeminiServer::start(
+            403,
+            r#"{"error":{"code":403,"message":"Permission denied","status":"PERMISSION_DENIED"}}"#,
+        ))
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let store = SecretStore::new(temp_dir.path().to_path_buf());
+    store.set_gemini_api_key("my_stored_secret_key").unwrap();
+
+    let manager = GeminiCredentialManager::with_endpoint_and_model(
+        store.clone(),
+        Some(server.base_url.clone()),
+        "gemini-2.5-flash-lite".to_string(),
+    );
+
+    let res = rt.block_on(manager.test_api_key()).unwrap();
+    assert_eq!(res.verification_status, GeminiVerificationStatus::Forbidden);
+    assert!(res.stored);
+
+    // Assert key is NOT deleted from SecretStore
+    assert_eq!(
+        store.get_gemini_api_key(),
+        Some("my_stored_secret_key".to_string())
+    );
+}
+
+#[test]
+fn test_phase20a_55_get_gemini_status_retains_valid_in_session() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server = rt
+        .block_on(MockGeminiServer::start(
+            200,
+            r#"{"name":"models/gemini-2.5-flash-lite"}"#,
+        ))
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let store = SecretStore::new(temp_dir.path().to_path_buf());
+    store.set_gemini_api_key("valid_key").unwrap();
+
+    let manager = GeminiCredentialManager::with_endpoint_and_model(
+        store,
+        Some(server.base_url.clone()),
+        "gemini-2.5-flash-lite".to_string(),
+    );
+
+    let _ = rt.block_on(manager.test_api_key()).unwrap();
+
+    // In same session, get_status retains Valid
+    let status = manager.get_status();
+    assert!(status.stored);
+    assert_eq!(status.verification_status, GeminiVerificationStatus::Valid);
+}
+
+#[test]
+fn test_phase20a_56_app_restart_resets_to_unverified() {
+    let temp_dir = tempdir().unwrap();
+    let store = SecretStore::new(temp_dir.path().to_path_buf());
+    store.set_gemini_api_key("valid_persisted_key").unwrap();
+
+    // Simulate new process / app restart creating fresh manager
+    let fresh_manager = GeminiCredentialManager::new(store);
+    let status = fresh_manager.get_status();
+    assert!(status.stored);
+    assert_eq!(
+        status.verification_status,
+        GeminiVerificationStatus::Unverified
+    );
+}
+
+#[test]
+fn test_phase20a_57_zero_credential_leakage_in_diagnostics() {
+    let secret = "AIzaSy_SuperSecret12345_Key";
+    let body = format!(
+        r#"{{"error":{{"code":400,"message":"Invalid key {} provided in request","status":"INVALID_ARGUMENT"}}}}"#,
+        secret
+    );
+
+    let (v_status, code, sanitized) =
+        parse_google_error(reqwest::StatusCode::BAD_REQUEST, &body, Some(secret));
+    assert_eq!(v_status, GeminiVerificationStatus::InvalidKey);
+    assert_eq!(code, "GEMINI_API_KEY_INVALID");
+    assert!(!sanitized.contains(secret));
+    assert!(sanitized.contains("[REDACTED_API_KEY]"));
 }
