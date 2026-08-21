@@ -88,6 +88,10 @@ impl ProviderRegistry {
         registry
     }
 
+    pub fn from_records(records: Vec<ProviderRecord>) -> Self {
+        Self { records }
+    }
+
     fn register_default_providers(&mut self) {
         // 1. Local Deterministic FFmpeg Provider
         self.records.push(ProviderRecord {

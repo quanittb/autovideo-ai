@@ -127,28 +127,39 @@ impl SegmentedCloudJobOrchestrator {
             &self.registry,
         );
 
-        let candidates = self
-            .registry
-            .find_candidates_for_task(TaskClass::BackgroundRemoval);
-        let record = candidates.first().ok_or_else(|| {
+        let record = if !decision.provider_id.is_empty() && !decision.model_id.is_empty() {
+            self.registry
+                .find(&decision.provider_id, &decision.model_id)
+        } else {
+            let candidates = self
+                .registry
+                .find_candidates_for_task(TaskClass::BackgroundRemoval);
+            candidates.into_iter().next()
+        };
+
+        let record = record.ok_or_else(|| {
             CloudProviderError::ProviderUnavailable(
                 "No utility background removal provider registered".to_string(),
             )
         })?;
 
-        let provider_limit_sec = record.max_duration_sec.unwrap_or(60.0);
+        let provider_limit_sec = record.max_duration_sec;
         let unit_rate = record.pricing_amount.ok_or_else(|| {
             CloudProviderError::ProviderUnavailable(
                 "MISSING_PRICING: Provider pricing is not registered in registry".to_string(),
             )
         })?;
 
-        // Segmentation is eligible ONLY when duration limit is the sole blocker
+        // Segmentation is eligible ONLY when duration limit is the sole blocker and provider duration limit is declared
         let is_duration_blocked =
             decision.block_code == Some(RoutingBlockCode::ProviderDurationLimit);
 
-        if !is_duration_blocked {
-            let blocking_str = decision.block_code.map(|b| b.as_str().to_string());
+        if !is_duration_blocked || provider_limit_sec.is_none() {
+            let blocking_str = if provider_limit_sec.is_none() {
+                Some("MISSING_PROVIDER_DURATION_LIMIT".to_string())
+            } else {
+                decision.block_code.map(|b| b.as_str().to_string())
+            };
             let budget_limit = match max_cost {
                 Some(val) => CostGuard::validate_budget(val)?,
                 None => DEFAULT_STANDARD_JOB_BUDGET_USD,
@@ -168,6 +179,8 @@ impl SegmentedCloudJobOrchestrator {
                 model_id: record.model_id.clone(),
             });
         }
+
+        let provider_limit_sec = provider_limit_sec.unwrap();
 
         let plan = SegmentPlanner::plan(&source_facts, &timing_facts, provider_limit_sec)?;
 
@@ -209,11 +222,16 @@ impl SegmentedCloudJobOrchestrator {
         request: CloudJobRequest,
         max_cost: Option<f64>,
     ) -> Result<SegmentedCloudJobSnapshot, CloudProviderError> {
-        let project_id_str = request.project_id.clone().ok_or_else(|| {
-            CloudProviderError::RequestInvalid(
-                "PROJECT_ID_REQUIRED: project_id is required for cloud segmentation".to_string(),
-            )
-        })?;
+        let project_id_str = request
+            .project_id
+            .as_deref()
+            .ok_or_else(|| {
+                CloudProviderError::RequestInvalid(
+                    "PROJECT_ID_REQUIRED: project_id is required for cloud transformation"
+                        .to_string(),
+                )
+            })?
+            .to_string();
 
         let lock_key = format!("{}:{}", project_id_str, request.job_id);
         let request_lock = self.get_parent_request_lock(&lock_key).await;
@@ -235,16 +253,21 @@ impl SegmentedCloudJobOrchestrator {
             .file_name()
             .map(|n| n.to_string_lossy().to_string());
 
-        let candidates = self
+        let record = self
             .registry
-            .find_candidates_for_task(TaskClass::BackgroundRemoval);
-        let record = candidates.first().ok_or_else(|| {
+            .find(&preflight.provider_id, &preflight.model_id)
+            .ok_or_else(|| {
+                CloudProviderError::ProviderUnavailable(format!(
+                    "Provider record not found for {}/{}",
+                    preflight.provider_id, preflight.model_id
+                ))
+            })?;
+
+        let provider_limit_sec = record.max_duration_sec.ok_or_else(|| {
             CloudProviderError::ProviderUnavailable(
-                "No utility background removal provider registered".to_string(),
+                "MISSING_PROVIDER_DURATION_LIMIT: Provider does not declare a max_duration_sec capability".to_string(),
             )
         })?;
-
-        let provider_limit_sec = record.max_duration_sec.unwrap_or(60.0);
         let unit_rate = record.pricing_amount.ok_or_else(|| {
             CloudProviderError::ProviderUnavailable(
                 "MISSING_PRICING: Provider pricing is not registered in registry".to_string(),
@@ -533,10 +556,43 @@ impl SegmentedCloudJobOrchestrator {
             // Check cancellation
             manifest = self.store.load_manifest(&project_id, &parent_id)?;
             if manifest.cancellation_requested {
-                let _ = manifest.transition_to(SegmentedJobState::Cancelled);
-                let _ = self.store.save_manifest_atomic(&manifest);
-                self.emit_manifest_update(&manifest);
-                return Ok(());
+                let active_child_opt = manifest.child_jobs.iter().find(|c| {
+                    if let Some(ref _internal_id) = c.internal_job_id {
+                        c.state.map(|s| !s.is_terminal()).unwrap_or(false)
+                    } else {
+                        false
+                    }
+                });
+
+                if let Some(child) = active_child_opt {
+                    let internal_id = child.internal_job_id.as_ref().unwrap();
+                    let child_status = self.lifecycle.get_job_status(&project_id, internal_id);
+                    match child_status {
+                        Ok(cjob) => {
+                            if cjob.state == CloudJobState::Cancelled
+                                || cjob.state == CloudJobState::Completed
+                            {
+                                let _ = manifest.transition_to(SegmentedJobState::Cancelled);
+                                manifest.recalculate_progress();
+                                let _ = self.store.save_manifest_atomic(&manifest);
+                                self.emit_manifest_update(&manifest);
+                                return Ok(());
+                            } else {
+                                // Child is still active (e.g. Processing). Worker must not mark parent Cancelled!
+                                return Ok(());
+                            }
+                        }
+                        Err(_) => {
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    let _ = manifest.transition_to(SegmentedJobState::Cancelled);
+                    manifest.recalculate_progress();
+                    let _ = self.store.save_manifest_atomic(&manifest);
+                    self.emit_manifest_update(&manifest);
+                    return Ok(());
+                }
             }
 
             let child_record = &manifest.child_jobs[i];
@@ -566,7 +622,29 @@ impl SegmentedCloudJobOrchestrator {
                         (path, cost)
                     } else {
                         // Re-run child if cached artifact is invalid
-                        self.dispatch_and_await_child(
+                        match self
+                            .dispatch_and_await_child(
+                                &project_id,
+                                &parent_id,
+                                i,
+                                &child_client_id,
+                                &input_segment_path,
+                                child_record.duration_sec,
+                                &request,
+                                &manifest,
+                            )
+                            .await
+                        {
+                            Ok(res) => res,
+                            Err(CloudProviderError::CostLimitExceeded { .. }) => {
+                                return Ok(());
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                } else {
+                    match self
+                        .dispatch_and_await_child(
                             &project_id,
                             &parent_id,
                             i,
@@ -576,10 +654,18 @@ impl SegmentedCloudJobOrchestrator {
                             &request,
                             &manifest,
                         )
-                        .await?
+                        .await
+                    {
+                        Ok(res) => res,
+                        Err(CloudProviderError::CostLimitExceeded { .. }) => {
+                            return Ok(());
+                        }
+                        Err(e) => return Err(e),
                     }
-                } else {
-                    self.dispatch_and_await_child(
+                }
+            } else {
+                match self
+                    .dispatch_and_await_child(
                         &project_id,
                         &parent_id,
                         i,
@@ -589,20 +675,14 @@ impl SegmentedCloudJobOrchestrator {
                         &request,
                         &manifest,
                     )
-                    .await?
+                    .await
+                {
+                    Ok(res) => res,
+                    Err(CloudProviderError::CostLimitExceeded { .. }) => {
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
                 }
-            } else {
-                self.dispatch_and_await_child(
-                    &project_id,
-                    &parent_id,
-                    i,
-                    &child_client_id,
-                    &input_segment_path,
-                    child_record.duration_sec,
-                    &request,
-                    &manifest,
-                )
-                .await?
             };
 
             manifest = self.store.load_manifest(&project_id, &parent_id)?;
@@ -747,9 +827,26 @@ impl SegmentedCloudJobOrchestrator {
         let remaining_budget = (approved_budget - committed_cost).max(0.0);
         let child_est_cost = segment_duration_sec * manifest.unit_rate_usd;
 
-        let child_max_cost = remaining_budget
-            .min(child_est_cost * 1.5)
-            .max(child_est_cost);
+        // Invariant: child_max_cost <= remaining_budget ALWAYS.
+        if remaining_budget + 1e-6 < child_est_cost {
+            let mut m = self.store.load_manifest(project_id, parent_id)?;
+            let _ = m.transition_to(SegmentedJobState::CostApprovalRequired);
+            m.error = Some(JobErrorRecord {
+                code: "INSUFFICIENT_REMAINING_BATCH_BUDGET".to_string(),
+                sanitized_message: format!(
+                    "Remaining batch budget ${:.4} is insufficient for next segment cost ${:.4}",
+                    remaining_budget, child_est_cost
+                ),
+            });
+            let _ = self.store.save_manifest_atomic(&m);
+            self.emit_manifest_update(&m);
+            return Err(CloudProviderError::CostLimitExceeded {
+                estimated: child_est_cost,
+                limit: remaining_budget,
+            });
+        }
+
+        let child_max_cost = child_est_cost.min(remaining_budget);
 
         let child_job = self
             .lifecycle

@@ -1504,3 +1504,300 @@ fn test_phase19_26_preview_authorization_security() {
     assert!(res_outside.is_err());
     assert!(res_outside.unwrap_err().contains("SECURITY_VIOLATION"));
 }
+
+// =============================================================================
+// 27. Missing Provider Duration Limit Fails Closed
+// =============================================================================
+
+#[tokio::test]
+async fn test_phase19_27_missing_provider_duration_limit_fails_closed() {
+    let test_dir = get_test_dir("missing_duration_limit");
+    let video_path = test_dir.join("source.mp4");
+    create_synthetic_test_video(&video_path, 80.0, 30, false);
+
+    let storage_paths = StoragePaths::resolve_from_base(&test_dir);
+    let resolver = std::sync::Arc::new(DefaultCloudProviderResolver::new());
+    let event_sink = std::sync::Arc::new(NoopEventSink);
+    let gate = std::sync::Arc::new(DefaultCloudSubmissionGate::new());
+    let lifecycle = std::sync::Arc::new(CloudJobLifecycleService::new(
+        storage_paths.clone(),
+        resolver,
+        event_sink,
+        gate,
+        LifecycleTimingConfig::fast_test(),
+    ));
+
+    let store = SegmentedCloudJobStore::new(storage_paths.clone());
+    let registry = ProviderRegistry::from_records(vec![ProviderRecord {
+        provider_id: "mock_provider".to_string(),
+        model_id: "mock_model".to_string(),
+        model_version: "v1".to_string(),
+        execution_class: ExecutionClass::SpecializedVideoTransformation,
+        capabilities: ProviderCapabilities {
+            supports_text_to_video: false,
+            supports_image_to_video: false,
+            supports_video_to_video: true,
+            supports_reference_image: false,
+            supports_character_reference: false,
+            supports_audio: false,
+            max_duration_sec: None,
+            supported_resolutions: vec![],
+            estimated_cost_per_second: None,
+        },
+        max_duration_sec: None, // Missing duration capability!
+        supported_resolutions: vec![],
+        supported_fps: vec![],
+        supports_original_fps: true,
+        supports_video_background_removal: true,
+        resolution_policy: ResolutionPolicy::PreserveSource {
+            max_width: Some(16000),
+            max_height: Some(16000),
+        },
+        pricing_unit: PricingUnit::PerSecond,
+        pricing_amount: Some(0.0042),
+        pricing_tiers: vec![],
+        resolution_tiers: vec![],
+        currency: "USD".to_string(),
+        source_url: "https://mock".to_string(),
+        observed_at: "2026-08-20".to_string(),
+    }]);
+
+    let orchestrator =
+        SegmentedCloudJobOrchestrator::new(lifecycle, store, storage_paths, registry, None);
+
+    let req = CloudJobRequest {
+        job_id: "test_missing_limit_job".to_string(),
+        project_id: Some("proj_missing_limit".to_string()),
+        prompt: "test".to_string(),
+        negative_prompt: None,
+        source_video: Some(video_path),
+        reference_image: None,
+        reference_images: None,
+        duration_seconds: 80.0,
+        fps: 30.0,
+        resolution: (320, 240),
+        task_type: "BACKGROUND_REMOVAL".to_string(),
+    };
+
+    // Preflight fails closed
+    let preflight = orchestrator
+        .preflight_segmented_transformation(&req, Some(5.0))
+        .expect("preflight call succeeded");
+    assert!(!preflight.segmentable);
+    assert_eq!(
+        preflight.blocking_code,
+        Some("MISSING_PROVIDER_DURATION_LIMIT".to_string())
+    );
+
+    // Start fails closed with NOT_SEGMENTABLE
+    let start_res = orchestrator
+        .start_segmented_transformation(req, Some(5.0))
+        .await;
+    assert!(start_res.is_err());
+    let err_msg = format!("{}", start_res.unwrap_err());
+    assert!(err_msg.contains("NOT_SEGMENTABLE"));
+}
+
+// =============================================================================
+// 28. Child Budget Overrun Invariant & Insufficient Remaining Budget
+// =============================================================================
+
+#[tokio::test]
+async fn test_phase19_28_child_budget_overrun_and_insufficient_remaining_budget() {
+    let test_dir = get_test_dir("child_budget_overrun");
+    let video_path = test_dir.join("source.mp4");
+    create_synthetic_test_video(&video_path, 80.0, 30, false);
+
+    let storage_paths = StoragePaths::resolve_from_base(&test_dir);
+    let child_store = PersistentCloudJobStore::new(storage_paths.clone());
+    let resolver = std::sync::Arc::new(DefaultCloudProviderResolver::new());
+    let event_sink = std::sync::Arc::new(NoopEventSink);
+    let gate = std::sync::Arc::new(DefaultCloudSubmissionGate::new());
+    let lifecycle = std::sync::Arc::new(CloudJobLifecycleService::new(
+        storage_paths.clone(),
+        resolver,
+        event_sink,
+        gate,
+        LifecycleTimingConfig::fast_test(),
+    ));
+
+    let store = SegmentedCloudJobStore::new(storage_paths.clone());
+    let registry = ProviderRegistry::new();
+    let orchestrator =
+        SegmentedCloudJobOrchestrator::new(lifecycle, store, storage_paths, registry, None);
+
+    let req = CloudJobRequest {
+        job_id: "test_insufficient_budget_job".to_string(),
+        project_id: Some("proj_budget_test".to_string()),
+        prompt: "test".to_string(),
+        negative_prompt: None,
+        source_video: Some(video_path),
+        reference_image: None,
+        reference_images: None,
+        duration_seconds: 80.0,
+        fps: 30.0,
+        resolution: (320, 240),
+        task_type: "BACKGROUND_REMOVAL".to_string(),
+    };
+
+    // Preflight with $0.20 (less than 80s * 0.0042 = $0.336)
+    let preflight = orchestrator
+        .preflight_segmented_transformation(&req, Some(0.20))
+        .unwrap();
+    assert!(!preflight.budget_approved);
+    assert_eq!(
+        preflight.blocking_code,
+        Some("COST_BUDGET_EXCEEDED".to_string())
+    );
+
+    // Start with low budget ($0.20) -> pauses at CostApprovalRequired
+    let start_snap = orchestrator
+        .start_segmented_transformation(req, Some(0.20))
+        .await
+        .unwrap();
+    assert_eq!(start_snap.state, SegmentedJobState::CostApprovalRequired);
+
+    // Child store must have 0 jobs submitted (zero provider calls)
+    let child_jobs = child_store
+        .list_jobs_in_project("proj_budget_test")
+        .unwrap();
+    assert_eq!(child_jobs.len(), 0);
+}
+
+// =============================================================================
+// 29. Worker Cancellation Race — No False Cancelled State
+// =============================================================================
+
+#[tokio::test]
+async fn test_phase19_29_worker_cancellation_race_no_false_cancelled() {
+    let test_dir = get_test_dir("worker_cancel_race");
+    let storage_paths = StoragePaths::resolve_from_base(&test_dir);
+    let store = SegmentedCloudJobStore::new(storage_paths.clone());
+    let child_store = PersistentCloudJobStore::new(storage_paths.clone());
+    let project_id = "proj_race";
+    let parent_id = "seg-parent-race";
+
+    let source_facts = SourceMediaFacts {
+        duration_sec: 80.0,
+        width: 320,
+        height: 240,
+        fps: 30.0,
+        has_audio: false,
+        timing: None,
+    };
+    let timing_facts = DetailedTimingFacts {
+        r_frame_rate: Rational { num: 30, den: 1 },
+        avg_frame_rate: Rational { num: 30, den: 1 },
+        time_base: Rational { num: 1, den: 30 },
+        is_vfr: false,
+        nb_frames: Some(2400),
+    };
+    let plan = SegmentPlanner::plan(&source_facts, &timing_facts, 60.0).unwrap();
+
+    let mut manifest = SegmentedCloudJobManifest::new(
+        parent_id.to_string(),
+        "client-req-race".to_string(),
+        project_id.to_string(),
+        "BACKGROUND_REMOVAL".to_string(),
+        "replicate".to_string(),
+        "bria/video-remove-background".to_string(),
+        "hash_race".to_string(),
+        None,
+        "source_hash_race".to_string(),
+        Some("source.mp4".to_string()),
+        FinalAudioPolicy {
+            preserve_original_audio: false,
+            codec: "opus".to_string(),
+        },
+        0.0042,
+        source_facts,
+        timing_facts,
+        plan,
+        Some(5.0),
+        0.336,
+    );
+
+    // Parent is Running
+    manifest.state = SegmentedJobState::Running;
+    manifest.child_jobs[0].internal_job_id = Some("child_job_race_1".to_string());
+    manifest.child_jobs[0].state = Some(CloudJobState::Processing);
+    manifest.cancellation_requested = true; // cancellation flag set
+
+    store.save_manifest_atomic(&manifest).unwrap();
+
+    // Create active child job in Processing state in child_store
+    let mut child_job = PersistentCloudJob::new(
+        manifest.child_jobs[0].client_job_id.clone(),
+        "child_job_race_1".to_string(),
+        project_id.to_string(),
+        "replicate".to_string(),
+        "bria".to_string(),
+        "bria".to_string(),
+        "BACKGROUND_REMOVAL".to_string(),
+        ExecutionClass::SpecializedVideoTransformation,
+        InputAssets::default(),
+        "cfg_hash".to_string(),
+        CostRecord::default(),
+    );
+    child_job.state = CloudJobState::Processing; // Non-terminal!
+    child_store.save_job_atomic(&child_job).unwrap();
+
+    let resolver = std::sync::Arc::new(DefaultCloudProviderResolver::new());
+    let event_sink = std::sync::Arc::new(NoopEventSink);
+    let gate = std::sync::Arc::new(DefaultCloudSubmissionGate::new());
+    let lifecycle = std::sync::Arc::new(CloudJobLifecycleService::new(
+        storage_paths.clone(),
+        resolver,
+        event_sink,
+        gate,
+        LifecycleTimingConfig::fast_test(),
+    ));
+
+    let registry = ProviderRegistry::new();
+    let orchestrator = SegmentedCloudJobOrchestrator::new(
+        lifecycle.clone(),
+        store.clone(),
+        storage_paths,
+        registry,
+        None,
+    );
+
+    let req = CloudJobRequest {
+        job_id: "client-req-race".to_string(),
+        project_id: Some(project_id.to_string()),
+        prompt: String::new(),
+        negative_prompt: None,
+        source_video: None,
+        reference_image: None,
+        reference_images: None,
+        duration_seconds: 80.0,
+        fps: 30.0,
+        resolution: (320, 240),
+        task_type: "BACKGROUND_REMOVAL".to_string(),
+    };
+
+    // Worker runs while child is Processing and cancellation is requested.
+    // Worker MUST NOT prematurely mark parent as Cancelled.
+    let _ = orchestrator
+        .run_segmented_job_worker(project_id.to_string(), parent_id.to_string(), req)
+        .await;
+
+    let reloaded = store.load_manifest(project_id, parent_id).unwrap();
+    assert_ne!(
+        reloaded.state,
+        SegmentedJobState::Cancelled,
+        "Parent must NOT be falsely marked Cancelled while child is active"
+    );
+
+    // Now mark child as Cancelled
+    child_job.state = CloudJobState::Cancelled;
+    child_job.state_revision += 1;
+    child_store.save_job_atomic(&child_job).unwrap();
+
+    // Now when cancel_segmented_transformation is invoked, parent becomes Cancelled truthfully
+    let cancelled_snap = orchestrator
+        .cancel_segmented_transformation(project_id, parent_id)
+        .await
+        .unwrap();
+    assert_eq!(cancelled_snap.state, SegmentedJobState::Cancelled);
+}

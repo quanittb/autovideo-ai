@@ -45,7 +45,7 @@ pub use manifest::{
 pub use orchestrator::{SegmentedCloudJobOrchestrator, SegmentedCloudSubmissionPreflight};
 pub use provider::{
     CloudJobHandle, CloudVideoProvider, ProviderCapabilities, ProviderKey, RemotePollResponse,
-    RemoteStatus, ResolutionTier, TargetFps,
+    RemoteStatus, ResolutionPolicy, ResolutionTier, TargetFps,
 };
 pub use providers::{
     PrunaPVideoReplaceProvider, ReplicateBriaBgRemovalProvider, ReplicateProvider,

@@ -87,8 +87,8 @@ All 26 specialized Phase 19 integration tests, 38 Phase 15 tests, 39 Phase 16 te
 ## 4. Test Execution & Results
 
 ### 4.1 Phase 19 Integration Test Suite
-Command: `cargo test --manifest-path src-tauri/Cargo.toml -- tests_phase19 --test-threads=1`
-Result: **26 passed; 0 failed; 0 ignored**
+Command: `cargo test --manifest-path src-tauri/Cargo.toml --lib -- tests_phase19 --test-threads=1`
+Result: **29 passed; 0 failed; 0 ignored**
 - `test_phase19_01_typed_routing_block_code`: Verified routing block code and 20s/59s/80s eligibility.
 - `test_phase19_02_probe_detailed_timing_facts`: Verified probe of CFR synthetic video.
 - `test_phase19_03_vfr_fail_closed`: Verified VFR video fails closed.
@@ -115,18 +115,21 @@ Result: **26 passed; 0 failed; 0 ignored**
 - `test_phase19_24_final_stitch_duration_and_timestamp_accuracy`: Verified 3-segment stitched duration accuracy.
 - `test_phase19_25_crash_after_final_promotion_recovery`: Verified valid promotion on recovery and rejection of opaque/invalid artifacts.
 - `test_phase19_26_preview_authorization_security`: Verified path traversal and non-completed authorization guards.
+- `test_phase19_27_missing_provider_duration_limit_fails_closed`: Verified missing provider duration capability fails closed (`MISSING_PROVIDER_DURATION_LIMIT`, `segmentable = false`).
+- `test_phase19_28_child_budget_overrun_and_insufficient_remaining_budget`: Verified child budget invariant (`child_max_cost <= remaining_budget`) and zero prediction submission on budget overrun.
+- `test_phase19_29_worker_cancellation_race_no_false_cancelled`: Verified race safety during asynchronous child cancellation; prevents premature or false `Cancelled` state while child remains active.
 
 ### 4.2 Workspace Regression Suites
-- `cargo test --manifest-path src-tauri/Cargo.toml -- tests_phase18 --test-threads=1`: **13 passed; 0 failed**
-- `cargo test --manifest-path src-tauri/Cargo.toml -- tests_phase17 --test-threads=1`: **56 passed; 0 failed**
-- `cargo test --manifest-path src-tauri/Cargo.toml -- tests_phase16 --test-threads=1`: **39 passed; 0 failed**
-- `cargo test --manifest-path src-tauri/Cargo.toml -- tests_phase15 --test-threads=1`: **38 passed; 0 failed**
-- `cargo test --manifest-path src-tauri/Cargo.toml -- test_phase14 --test-threads=1`: **10 passed; 0 failed**
-- `cargo test --manifest-path src-tauri/Cargo.toml -- test_cloud --test-threads=1`: **6 passed; 0 failed**
-- `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1`: **787 passed; 0 failed; 0 ignored**
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib -- tests_phase19 --test-threads=1`: **29 passed; 0 failed**
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib -- tests_phase18 --test-threads=1`: **13 passed; 0 failed**
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib -- tests_phase17 --test-threads=1`: **56 passed; 0 failed**
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib -- tests_phase16 --test-threads=1`: **39 passed; 0 failed**
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib -- tests_phase15 --test-threads=1`: **38 passed; 0 failed**
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib -- test_phase14 test_cloud --test-threads=1`: **16 passed; 0 failed**
 - `npm test -- --run`: **20 passed (2 test files: segmentedCloudJobStore.test.ts, cloudJobStore.test.ts)**
-- `npm run build` (`tsc && vite build`): **0 errors, bundle built cleanly in 7.31s**
+- `npm run build` (`tsc && vite build`): **0 errors, bundle built cleanly in 6.54s**
 - `cargo fmt -- --check`: **Clean, compliant with standard Rust formatting**
+- `cargo check`: **0 errors, finished cleanly**
 
 ---
 
