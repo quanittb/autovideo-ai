@@ -1,6 +1,7 @@
 pub mod cloud;
 pub mod control;
 pub mod device;
+pub mod flow;
 pub mod frame_pipeline;
 pub mod generative;
 pub mod hybrid;
@@ -676,3 +677,6 @@ mod tests_phase18;
 
 #[cfg(test)]
 mod tests_phase19;
+
+#[cfg(test)]
+mod tests_phase20a;

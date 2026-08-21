@@ -1,0 +1,17 @@
+{
+  "name": "flow-playwright-sidecar",
+  "version": "0.1.0",
+  "description": "Playwright sidecar for Google Flow browser automation",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

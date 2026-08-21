@@ -11,6 +11,7 @@ import { ModelsView } from '../features/models/ModelsView';
 import { HistoryView } from '../features/history/HistoryView';
 import { MediaVerificationRunner } from '../features/media/MediaVerificationRunner';
 import { GenerativeStudioView } from '../features/generation/GenerativeStudioView';
+import { FlowGenPanel } from '../features/flow/FlowGenPanel';
 import { useUiStore } from '../stores/uiStore';
 
 export const App: React.FC = () => {
@@ -20,6 +21,8 @@ export const App: React.FC = () => {
     switch (activeTab) {
       case 'home':
         return <HomeView />;
+      case 'flow':
+        return <FlowGenPanel />;
       case 'generation':
         return <GenerativeStudioView />;
       case 'verification':

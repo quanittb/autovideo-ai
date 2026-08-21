@@ -160,6 +160,16 @@ pub fn run() {
             approve_segmented_cloud_budget,
             authorize_segmented_preview_asset,
             revoke_segmented_preview_asset,
+            optimize_prompt,
+            get_gemini_status,
+            set_gemini_api_key,
+            clear_gemini_api_key,
+            list_flow_profiles,
+            create_flow_profile,
+            delete_flow_profile,
+            start_flow_generation,
+            get_flow_job_status,
+            list_flow_jobs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

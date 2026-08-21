@@ -21,6 +21,7 @@ export const Sidebar: React.FC = () => {
 
   const navItems: { id: NavTab; label: string; icon: React.ReactNode }[] = [
     { id: 'home', label: 'Home', icon: <Home className="w-4 h-4" /> },
+    { id: 'flow', label: 'Flow Gen', icon: <Sparkles className="w-4 h-4 text-emerald-400" /> },
     { id: 'generation', label: 'Generative Studio', icon: <Sparkles className="w-4 h-4 text-purple-400" /> },
     { id: 'workspace', label: 'Workspace', icon: <Video className="w-4 h-4" /> },
     { id: 'projects', label: 'Projects', icon: <FolderKanban className="w-4 h-4" /> },

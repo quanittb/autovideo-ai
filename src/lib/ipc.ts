@@ -980,3 +980,131 @@ export interface SegmentedCloudSubmissionPreflight {
   providerId: string;
   modelId: string;
 }
+
+// -----------------------------------------------------------------------------
+// Flow Subsystem Types & API
+// -----------------------------------------------------------------------------
+
+export type PromptSource = 'USER' | 'GEMINI_OPTIMIZED' | 'GEMINI_OPTIMIZED_THEN_EDITED';
+
+export type FlowJobState =
+  | 'PLANNING'
+  | 'SPLITTING'
+  | 'READY'
+  | 'WAITING_FOR_BROWSER'
+  | 'LOGIN_REQUIRED'
+  | 'UPLOADING'
+  | 'READY_TO_SUBMIT'
+  | 'SUBMITTING'
+  | 'GENERATION_AMBIGUOUS'
+  | 'GENERATING'
+  | 'DOWNLOADING'
+  | 'VALIDATING_SEGMENT'
+  | 'STITCHING'
+  | 'VALIDATING_FINAL'
+  | 'COMPLETED'
+  | 'CREDITS_REQUIRED'
+  | 'USER_ACTION_REQUIRED'
+  | 'FLOW_UI_CHANGED'
+  | 'BLOCKED'
+  | 'FAILED'
+  | 'CANCELLED';
+
+export interface OptimizePromptRequest {
+  prompt: string;
+  sourcePromptHash?: string;
+  taskType?: string;
+  videoDurationSec?: number;
+  fps?: number;
+  resolution?: [number, number];
+}
+
+export interface OptimizePromptResponse {
+  optimizedPrompt: string;
+  model: string;
+  promptSource: PromptSource;
+  promptHash: string;
+}
+
+export interface GeminiStatusResponse {
+  isConfigured: boolean;
+  model: string;
+}
+
+export interface FlowProfileInfo {
+  profileId: string;
+  name: string;
+  profileDir: string;
+  isLocked: boolean;
+  isAuthenticated: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FlowJobSnapshot {
+  parentId: string;
+  projectId: string;
+  profileId: string;
+  submittedPrompt: string;
+  promptHash: string;
+  promptSource: PromptSource;
+  state: FlowJobState;
+  stateRevision: number;
+  activeSegmentIndex: number;
+  totalSegments: number;
+  estimatedCredits: number;
+  observedCreditBalance?: number;
+  completedGenerations: number;
+  finalOutputPath?: string;
+  errorMessage?: string;
+  timestamps: {
+    createdAt: string;
+    updatedAt: string;
+    submittedAt?: string | null;
+    completedAt?: string | null;
+  };
+}
+
+export const flowApi = {
+  optimizePrompt: (request: OptimizePromptRequest): Promise<OptimizePromptResponse> =>
+    invoke('optimize_prompt', { request }),
+
+  getGeminiStatus: (): Promise<GeminiStatusResponse> =>
+    invoke('get_gemini_status'),
+
+  setGeminiApiKey: (key: string): Promise<void> =>
+    invoke('set_gemini_api_key', { key }),
+
+  clearGeminiApiKey: (): Promise<void> =>
+    invoke('clear_gemini_api_key'),
+
+  listProfiles: (): Promise<FlowProfileInfo[]> =>
+    invoke('list_flow_profiles'),
+
+  createProfile: (profileId: string, name: string): Promise<FlowProfileInfo> =>
+    invoke('create_flow_profile', { profileId, name }),
+
+  deleteProfile: (profileId: string): Promise<void> =>
+    invoke('delete_flow_profile', { profileId }),
+
+  startFlowGeneration: (
+    projectId: string,
+    profileId: string,
+    prompt: string,
+    promptSource?: PromptSource,
+    sourceVideoPath?: string
+  ): Promise<FlowJobSnapshot> =>
+    invoke('start_flow_generation', {
+      projectId,
+      profileId,
+      prompt,
+      promptSource,
+      sourceVideoPath,
+    }),
+
+  getFlowJobStatus: (projectId: string, parentId: string): Promise<FlowJobSnapshot> =>
+    invoke('get_flow_job_status', { projectId, parentId }),
+
+  listFlowJobs: (projectId: string): Promise<FlowJobSnapshot[]> =>
+    invoke('list_flow_jobs', { projectId }),
+};

@@ -2260,3 +2260,110 @@ pub fn revoke_segmented_preview_asset(
     }
     Ok(())
 }
+
+// -----------------------------------------------------------------------------
+// Flow Subsystem IPC Commands
+// -----------------------------------------------------------------------------
+
+#[command]
+pub async fn optimize_prompt(
+    request: crate::ai::flow::OptimizePromptRequest,
+) -> Result<crate::ai::flow::OptimizePromptResponse, String> {
+    let secret_store = crate::ai::flow::SecretStore::new(
+        crate::system::StoragePaths::default_paths().app_data_dir,
+    );
+    let optimizer = crate::ai::flow::GeminiPromptOptimizer::new(secret_store);
+    optimizer.optimize_prompt(request).await
+}
+
+#[command]
+pub fn get_gemini_status() -> crate::ai::flow::GeminiStatusResponse {
+    let secret_store = crate::ai::flow::SecretStore::new(
+        crate::system::StoragePaths::default_paths().app_data_dir,
+    );
+    let optimizer = crate::ai::flow::GeminiPromptOptimizer::new(secret_store);
+    optimizer.get_status()
+}
+
+#[command]
+pub fn set_gemini_api_key(key: String) -> Result<(), String> {
+    let secret_store = crate::ai::flow::SecretStore::new(
+        crate::system::StoragePaths::default_paths().app_data_dir,
+    );
+    secret_store.set_gemini_api_key(&key)
+}
+
+#[command]
+pub fn clear_gemini_api_key() -> Result<(), String> {
+    let secret_store = crate::ai::flow::SecretStore::new(
+        crate::system::StoragePaths::default_paths().app_data_dir,
+    );
+    secret_store.clear_gemini_api_key()
+}
+
+#[command]
+pub fn list_flow_profiles() -> Vec<crate::ai::flow::FlowProfileInfo> {
+    let manager = crate::ai::flow::FlowProfileManager::new(
+        crate::system::StoragePaths::default_paths().app_data_dir,
+    );
+    manager.list_profiles()
+}
+
+#[command]
+pub fn create_flow_profile(
+    profile_id: String,
+    name: String,
+) -> Result<crate::ai::flow::FlowProfileInfo, String> {
+    let manager = crate::ai::flow::FlowProfileManager::new(
+        crate::system::StoragePaths::default_paths().app_data_dir,
+    );
+    manager.create_profile(&profile_id, &name)
+}
+
+#[command]
+pub fn delete_flow_profile(profile_id: String) -> Result<(), String> {
+    let manager = crate::ai::flow::FlowProfileManager::new(
+        crate::system::StoragePaths::default_paths().app_data_dir,
+    );
+    manager.delete_profile(&profile_id, false)
+}
+
+#[command]
+pub async fn start_flow_generation(
+    project_id: String,
+    profile_id: String,
+    prompt: String,
+    prompt_source: Option<crate::ai::flow::PromptSource>,
+    source_video_path: String,
+) -> Result<crate::ai::flow::FlowJobSnapshot, String> {
+    let paths = crate::system::StoragePaths::default_paths();
+    let orchestrator = crate::ai::flow::FlowOrchestrator::new(paths);
+    orchestrator
+        .start_flow_generation(
+            project_id,
+            profile_id,
+            prompt,
+            prompt_source,
+            PathBuf::from(source_video_path),
+        )
+        .await
+}
+
+#[command]
+pub fn get_flow_job_status(
+    project_id: String,
+    parent_id: String,
+) -> Result<crate::ai::flow::FlowJobSnapshot, String> {
+    let paths = crate::system::StoragePaths::default_paths();
+    let store = crate::ai::flow::FlowJobStore::new(paths);
+    let manifest = store.load_manifest(&project_id, &parent_id)?;
+    Ok(manifest.to_snapshot())
+}
+
+#[command]
+pub fn list_flow_jobs(project_id: String) -> Result<Vec<crate::ai::flow::FlowJobSnapshot>, String> {
+    let paths = crate::system::StoragePaths::default_paths();
+    let store = crate::ai::flow::FlowJobStore::new(paths);
+    let manifests = store.list_all_flow_jobs(&project_id)?;
+    Ok(manifests.into_iter().map(|m| m.to_snapshot()).collect())
+}
