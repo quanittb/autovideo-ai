@@ -5,10 +5,12 @@ In Phase 18, we replaced the prototype mock transformation preview UX with a pro
 - Real project source media probed via ffprobe facts (`SourceMediaFacts`).
 - Authoritative backend preflight (`evaluate_cloud_submission_preflight` & `preflight_cloud_transformation`), ensuring 100% cost and routing parity between preflight and submission gates.
 - Phase 15 persistent cloud lifecycle service, with canonical `internalJobId` state keying and monotonic revision merges (`mergeCloudJobSnapshot`).
-- Exact-file runtime asset protocol authorization (`authorize_preview_asset` & `revoke_preview_asset`) using Tauri v2 `protocol-asset` and tight production CSP (`media-src 'self' asset: http://asset.localhost`).
+- Strict narrowed asset protocol authorization (`resolve_project_source_preview_path` scoped to `<project>/media` and `resolve_cloud_artifact_preview_path` scoped to `<project>/cloud-jobs/artifacts`), shared between `authorize_preview_asset` and `revoke_preview_asset` using Tauri v2 `protocol-asset` and tight production CSP.
 - Format-aware, synchronized dual-player UI (`RealTransformPreview`), with transparent alpha checkerboard for WebM VP9 Alpha artifacts and truthful fallback openers (`open_cloud_artifact` & `open_cloud_artifact_folder`).
+- Full visual state classification helper (`getCloudJobVisualState`) covering all canonical backend states (`CREATED`, `VALIDATING`, `COST_APPROVAL_REQUIRED`, `UPLOADING`, `SUBMITTED`, `PROCESSING`, `DOWNLOADING`, `VALIDATING_OUTPUT`, `COMPLETED`, `FAILED`, `CANCELLED`, `BLOCKED`, `unknown`).
 
 - **Starting Base HEAD**: `334862136631007e3ec4b54a4a66b20057305a92`
+- **Initial Phase 18 HEAD**: `93987d49c53f1dee4d1d6c66c88d9c683f15961e`
 - **Zero-Live-Cost Policy**: Fully observed ($0.00 live cost, 0 real predictions, 0 real uploads)
 - **Live Quality Verification**: `LIVE PROVIDER QUALITY VERIFIED: NO` (Provider quality evaluation rubric is deferred to Phase 20)
 - **Interactive Runtime Verification**: `PREVIEW_RUNTIME_VERIFIED: NO` (Headless CI environment; manual verification steps documented in acceptance report)
@@ -43,7 +45,7 @@ In Phase 18, we replaced the prototype mock transformation preview UX with a pro
 - Displays Cost         - Typed Error Banner
 ```
 
-### Dynamic Asset Authorization & Scoping
+### Dynamic Asset Authorization & Strict Scoping
 ```
 [React Video Preview Mounts]
        │
@@ -51,12 +53,16 @@ In Phase 18, we replaced the prototype mock transformation preview UX with a pro
   authorize_preview_asset(projectId, assetKind, internalJobId?)
        │
        ▼
-  Rust Security Enforcement:
-  ├── Validate project_id & internal_job_id syntax
-  ├── Canonicalize candidate file & canonicalize trusted root dir
-  ├── Verify candidate starts_with trusted project directory
-  ├── Verify job state == COMPLETED (for CloudArtifact)
-  └── app.asset_protocol_scope().allow_file(canonical_file)
+  Shared Semantic Path Resolvers:
+  ├── ProjectSource: resolve_project_source_preview_path()
+  │   └── Canonical root: <projects_dir>/<project_id>/media/
+  │       (Rejects project.json, cache/, outputs/, cloud-jobs/)
+  └── CloudArtifact: resolve_cloud_artifact_preview_path()
+      └── Canonical root: <projects_dir>/<project_id>/cloud-jobs/artifacts/
+          (Rejects job manifests, tmp files, outside files; verifies job.state == COMPLETED)
+       │
+       ▼
+  app.asset_protocol_scope().allow_file(canonical_file)
        │
        ▼
   AuthorizedAssetPreview DTO { localPath, container, videoCodec, alphaValidated, audioRequired, actualHasAudio }
@@ -67,7 +73,7 @@ In Phase 18, we replaced the prototype mock transformation preview UX with a pro
   [On Unmount / Job Switch]
        │
        ▼
-  revoke_preview_asset() -> app.asset_protocol_scope().forbid_file(canonical_file)
+  revoke_preview_asset() -> Calls same resolver -> app.asset_protocol_scope().forbid_file(canonical_file)
 ```
 
 ---
@@ -87,7 +93,8 @@ In Phase 18, we replaced the prototype mock transformation preview UX with a pro
    - Extracted shared authoritative core `evaluate_cloud_submission_preflight`.
    - Unified `validate_and_prepare_cloud_submission` to consume `evaluate_cloud_submission_preflight`.
 5. **`src-tauri/src/commands/mod.rs` & `src-tauri/src/lib.rs`**:
-   - Implemented and registered 7 IPC commands:
+   - Implemented `resolve_project_source_preview_path` and `resolve_cloud_artifact_preview_path`.
+   - Registered 7 IPC commands with shared resolver integration:
      - `preflight_cloud_transformation`
      - `start_cloud_transformation`
      - `list_cloud_jobs`
@@ -96,15 +103,28 @@ In Phase 18, we replaced the prototype mock transformation preview UX with a pro
      - `open_cloud_artifact`
      - `open_cloud_artifact_folder`
 6. **`src-tauri/src/ai/tests_phase18.rs`**:
-   - Created 9 Rust unit and integration tests covering preflight facts, limits, references fail-closed, budget exceeded, event payloads, DTO serialization, project job listing, and preview gating.
+   - 13 Rust unit and integration tests covering:
+     - Preflight source facts override fake request parameters
+     - Background removal duration limit
+     - Background removal reference rejection
+     - Budget exceeded gating
+     - Event payload state revision and artifact descriptors
+     - CamelCase DTO serialization
+     - Truthful AuthorizedAssetPreview DTO
+     - Persistent job store project listing
+     - Non-completed preview rejection
+     - Deterministic registry pricing tiers (720p @ $0.03/s, 1080p @ $0.06/s)
+     - Narrowed project source preview path security roots (`<project>/media`)
+     - Narrowed cloud artifact preview path security roots (`<project>/cloud-jobs/artifacts`)
+     - Real authoritative preflight fixture test with ffmpeg lavfi testsrc
 7. **`src/types/contracts.ts` & `src/lib/ipc.ts`**:
    - Added TypeScript interfaces and `cloudApi` method wrappers.
 8. **`src/stores/cloudJobHelpers.ts`**:
-   - Implemented pure monotonic revision merger `mergeCloudJobSnapshot` and `isNewerRevision`.
+   - Implemented pure monotonic revision merger `mergeCloudJobSnapshot`, `isNewerRevision`, and canonical `getCloudJobVisualState`.
 9. **`src/stores/cloudJobStore.ts`**:
    - Created dedicated Zustand store with canonical `internalJobId` indexing, event subscription race protection, preflight integration, and exact-file asset authorization.
 10. **`src/stores/__tests__/cloudJobStore.test.ts`**:
-    - Created Vitest unit test suite verifying monotonic revisions, idempotency, canonical indexing, and zero-fabrication of `BLOCKED` jobs.
+    - Created Vitest unit test suite (12 tests) verifying monotonic revisions, idempotency, canonical indexing, zero-fabrication of `BLOCKED` jobs, and comprehensive state visual classification.
 11. **`src/features/transform/RealTransformPreview.tsx`**:
     - Implemented synchronized dual video player with format badges (`MP4 • H.264`, `WebM • VP9 • Alpha`), alpha checkerboard, and fallback actions.
 12. **`src/features/transform/TransformPanel.tsx`**:
@@ -122,23 +142,23 @@ In Phase 18, we replaced the prototype mock transformation preview UX with a pro
 2. **Rust Compilation**: `cargo check --all-targets --manifest-path src-tauri/Cargo.toml`
    - Result: **Passed with 0 errors, 0 warnings**.
 3. **Phase 18 Test Suite**: `cargo test --manifest-path src-tauri/Cargo.toml -- tests_phase18 --test-threads=1`
-   - Result: **9 passed; 0 failed; 0 ignored; finished in 0.03s**.
+   - Result: **13 passed; 0 failed; 0 ignored; finished in 0.43s**.
 4. **Phase 17 Test Suite**: `cargo test --manifest-path src-tauri/Cargo.toml -- tests_phase17 --test-threads=1`
-   - Result: **56 passed; 0 failed; 0 ignored; finished in 1.64s**.
+   - Result: **56 passed; 0 failed; 0 ignored; finished in 0.26s**.
 5. **Phase 16 Test Suite**: `cargo test --manifest-path src-tauri/Cargo.toml -- tests_phase16 --test-threads=1`
-   - Result: **39 passed; 0 failed; 0 ignored; finished in 4.13s**.
+   - Result: **39 passed; 0 failed; 0 ignored; finished in 4.27s**.
 6. **Phase 15 Test Suite**: `cargo test --manifest-path src-tauri/Cargo.toml -- tests_phase15 --test-threads=1`
-   - Result: **38 passed; 0 failed; 0 ignored; finished in 9.96s**.
+   - Result: **38 passed; 0 failed; 0 ignored; finished in 10.24s**.
 7. **Phase 14 Test Suite**: `cargo test --manifest-path src-tauri/Cargo.toml -- test_phase14 --test-threads=1`
-   - Result: **10 passed; 0 failed; 0 ignored; finished in 0.16s**.
+   - Result: **10 passed; 0 failed; 0 ignored; finished in 0.15s**.
 8. **Cloud MVP Test Suite**: `cargo test --manifest-path src-tauri/Cargo.toml -- test_cloud --test-threads=1`
    - Result: **6 passed; 0 failed; 0 ignored; finished in 0.00s**.
 9. **Full Rust Test Suite**: `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1`
-   - Result: **757 passed; 0 failed; 0 ignored; finished in 56.88s**.
+   - Result: **761 passed; 0 failed; 0 ignored; finished in 57.00s**.
 10. **Frontend Vitest Unit Suite**: `npm.cmd test -- --run`
-    - Result: **7 passed; 0 failed; finished in 0.24s**.
+    - Result: **12 passed; 0 failed; finished in 0.27s**.
 11. **Frontend Production Build**: `npm.cmd run build`
-    - Result: **Built in 4.79s (0 errors)**.
+    - Result: **Built in 5.20s (0 errors)**.
 
 ---
 
