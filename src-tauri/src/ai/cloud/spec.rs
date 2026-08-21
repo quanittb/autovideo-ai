@@ -7,6 +7,37 @@ use crate::projects::Project;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rational {
+    pub num: u32,
+    pub den: u32,
+}
+
+impl Rational {
+    pub fn new(num: u32, den: u32) -> Self {
+        Self { num, den }
+    }
+
+    pub fn to_f64(&self) -> f64 {
+        if self.den == 0 {
+            0.0
+        } else {
+            self.num as f64 / self.den as f64
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailedTimingFacts {
+    pub r_frame_rate: Rational,
+    pub avg_frame_rate: Rational,
+    pub time_base: Rational,
+    pub is_vfr: bool,
+    pub nb_frames: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceMediaFacts {
@@ -15,12 +46,33 @@ pub struct SourceMediaFacts {
     pub height: u32,
     pub fps: f64,
     pub has_audio: bool,
+    #[serde(default)]
+    pub timing: Option<DetailedTimingFacts>,
+}
+
+impl Default for SourceMediaFacts {
+    fn default() -> Self {
+        Self {
+            duration_sec: 0.0,
+            width: 0,
+            height: 0,
+            fps: 0.0,
+            has_audio: false,
+            timing: None,
+        }
+    }
 }
 
 pub struct SourceMediaProbe;
 
 impl SourceMediaProbe {
     pub fn probe_file(path: &Path) -> Result<SourceMediaFacts, CloudProviderError> {
+        Self::probe_file_detailed(path).map(|(facts, _)| facts)
+    }
+
+    pub fn probe_file_detailed(
+        path: &Path,
+    ) -> Result<(SourceMediaFacts, DetailedTimingFacts), CloudProviderError> {
         if !path.exists() || !path.is_file() {
             return Err(CloudProviderError::RequestInvalid(format!(
                 "SOURCE_NOT_FOUND: Source video file not found at {}",
@@ -28,7 +80,6 @@ impl SourceMediaProbe {
             )));
         }
 
-        let media_service = crate::media::MediaService::new();
         let metadata = std::fs::metadata(path).map_err(|e| {
             CloudProviderError::RequestInvalid(format!(
                 "SOURCE_READ_FAILED: Failed to read source metadata: {}",
@@ -42,22 +93,127 @@ impl SourceMediaProbe {
             ));
         }
 
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("source.mp4");
-        let container = path.extension().and_then(|e| e.to_str()).unwrap_or("mp4");
-
-        let probe = media_service
-            .probe_with_ffprobe(path, file_name, container, metadata.len())
+        let output = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,time_base,duration,nb_frames,tags:format=duration,format_name",
+                "-of",
+                "json",
+                path.to_str().ok_or_else(|| {
+                    CloudProviderError::RequestInvalid("Invalid unicode in file path".to_string())
+                })?,
+            ])
+            .output()
             .map_err(|e| {
                 CloudProviderError::RequestInvalid(format!(
-                    "SOURCE_PROBE_FAILED: Failed to probe source media with ffprobe: {}",
+                    "SOURCE_PROBE_FAILED: Failed to invoke ffprobe: {}",
                     e
                 ))
             })?;
 
-        let duration_sec = probe.duration_ms as f64 / 1000.0;
+        if !output.status.success() {
+            return Err(CloudProviderError::RequestInvalid(format!(
+                "SOURCE_PROBE_FAILED: ffprobe returned non-zero exit code: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        let json_str = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+            CloudProviderError::RequestInvalid(format!(
+                "SOURCE_PROBE_FAILED: Failed to parse ffprobe json: {}",
+                e
+            ))
+        })?;
+
+        let streams = parsed.get("streams").and_then(|s| s.as_array());
+        let mut width = 0u32;
+        let mut height = 0u32;
+        let mut has_audio = false;
+        let mut stream_duration_sec = 0.0f64;
+        let mut r_frame_rate = Rational::new(30, 1);
+        let mut avg_frame_rate = Rational::new(30, 1);
+        let mut time_base = Rational::new(1, 1000);
+        let mut nb_frames: Option<u64> = None;
+        let mut video_stream_found = false;
+
+        fn parse_rational(s: &str) -> Option<Rational> {
+            let (num_str, den_str) = s.split_once('/')?;
+            let num = num_str.parse::<u32>().ok()?;
+            let den = den_str.parse::<u32>().ok()?;
+            Some(Rational::new(num, den))
+        }
+
+        if let Some(stream_list) = streams {
+            for stream in stream_list {
+                let codec_type = stream
+                    .get("codec_type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default();
+                if codec_type == "video" && !video_stream_found {
+                    video_stream_found = true;
+                    if let Some(w) = stream.get("width").and_then(|v| v.as_u64()) {
+                        width = w as u32;
+                    }
+                    if let Some(h) = stream.get("height").and_then(|v| v.as_u64()) {
+                        height = h as u32;
+                    }
+                    if let Some(dur_str) = stream.get("duration").and_then(|v| v.as_str()) {
+                        if let Ok(d) = dur_str.parse::<f64>() {
+                            if d > 0.0 {
+                                stream_duration_sec = d;
+                            }
+                        }
+                    }
+                    if let Some(r_str) = stream.get("r_frame_rate").and_then(|v| v.as_str()) {
+                        if let Some(rat) = parse_rational(r_str) {
+                            if rat.den > 0 {
+                                r_frame_rate = rat;
+                            }
+                        }
+                    }
+                    if let Some(avg_str) = stream.get("avg_frame_rate").and_then(|v| v.as_str()) {
+                        if let Some(rat) = parse_rational(avg_str) {
+                            if rat.den > 0 {
+                                avg_frame_rate = rat;
+                            }
+                        }
+                    }
+                    if let Some(tb_str) = stream.get("time_base").and_then(|v| v.as_str()) {
+                        if let Some(rat) = parse_rational(tb_str) {
+                            if rat.den > 0 {
+                                time_base = rat;
+                            }
+                        }
+                    }
+                    if let Some(nbf_str) = stream.get("nb_frames").and_then(|v| v.as_str()) {
+                        if let Ok(nbf) = nbf_str.parse::<u64>() {
+                            nb_frames = Some(nbf);
+                        }
+                    }
+                } else if codec_type == "audio" {
+                    has_audio = true;
+                }
+            }
+        }
+
+        let mut format_duration_sec = 0.0f64;
+        if let Some(format_obj) = parsed.get("format") {
+            if let Some(dur_str) = format_obj.get("duration").and_then(|v| v.as_str()) {
+                if let Ok(d) = dur_str.parse::<f64>() {
+                    format_duration_sec = d;
+                }
+            }
+        }
+
+        let duration_sec = if stream_duration_sec > 0.0 {
+            stream_duration_sec
+        } else {
+            format_duration_sec
+        };
+
         if duration_sec <= 0.0 || !duration_sec.is_finite() {
             return Err(CloudProviderError::RequestInvalid(format!(
                 "INVALID_DURATION: Probed non-positive or non-finite duration {:.2}s",
@@ -65,27 +221,47 @@ impl SourceMediaProbe {
             )));
         }
 
-        if probe.width == 0 || probe.height == 0 {
+        if width == 0 || height == 0 {
             return Err(CloudProviderError::RequestInvalid(format!(
                 "INVALID_DIMENSIONS: Probed invalid dimensions {}x{}",
-                probe.width, probe.height
+                width, height
             )));
         }
 
-        if probe.fps <= 0.0 || !probe.fps.is_finite() {
+        let fps = r_frame_rate.to_f64();
+        if fps <= 0.0 || !fps.is_finite() {
             return Err(CloudProviderError::RequestInvalid(format!(
                 "INVALID_FPS: Probed invalid fps {:.2}",
-                probe.fps
+                fps
             )));
         }
 
-        Ok(SourceMediaFacts {
+        // VFR detection: if r_frame_rate and avg_frame_rate differ significantly or den == 0
+        let avg_fps = avg_frame_rate.to_f64();
+        let is_vfr = if avg_fps > 0.0 && (fps - avg_fps).abs() > 0.05 {
+            true
+        } else {
+            false
+        };
+
+        let timing_facts = DetailedTimingFacts {
+            r_frame_rate,
+            avg_frame_rate,
+            time_base,
+            is_vfr,
+            nb_frames,
+        };
+
+        let source_facts = SourceMediaFacts {
             duration_sec,
-            width: probe.width,
-            height: probe.height,
-            fps: probe.fps,
-            has_audio: probe.has_audio,
-        })
+            width,
+            height,
+            fps,
+            has_audio,
+            timing: Some(timing_facts.clone()),
+        };
+
+        Ok((source_facts, timing_facts))
     }
 }
 

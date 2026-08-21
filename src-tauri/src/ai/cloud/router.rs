@@ -140,6 +140,21 @@ pub enum RoutingTarget {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RoutingBlockCode {
+    ProviderDurationLimit,
+    ProviderResolutionLimit,
+    ProviderFpsLimit,
+    UnsupportedTask,
+    ProviderUnavailable,
+    CostUnknown,
+    CostBudgetExceeded,
+    MissingProviderCredentials,
+    MissingSourceMedia,
+    InvalidReferenceInputs,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutingDecision {
@@ -154,6 +169,46 @@ pub struct RoutingDecision {
     pub estimated_cost: CostEstimate,
     pub fallback_available: bool,
     pub auto_submit_allowed: bool,
+    #[serde(default)]
+    pub block_code: Option<RoutingBlockCode>,
+}
+
+impl Default for RoutingDecision {
+    fn default() -> Self {
+        let breakdown = CostBreakdown {
+            provider_id: "none".to_string(),
+            model_id: "none".to_string(),
+            billable_duration_sec: 0.0,
+            resolution: (0, 0),
+            resolution_tier: None,
+            unit_rate_usd: None,
+            pricing_observed_at: None,
+            segment_count: 1,
+            overlap_duration_sec: 0.0,
+            retry_allowance_usd: 0.0,
+            inference_cost_usd: None,
+            transfer_storage_cost_usd: None,
+            total_usd: None,
+            confidence: CostConfidence::Unknown,
+            currency: "USD".to_string(),
+            breakdown: String::new(),
+        };
+        let estimated = breakdown.to_estimate();
+        Self {
+            target: RoutingTarget::Unavailable,
+            execution_class: ExecutionClass::LocalDeterministic,
+            provider_id: "none".to_string(),
+            model_id: "none".to_string(),
+            task: TaskClass::CharacterReplacement,
+            mode: RoutingPreference::CostSaving,
+            reason: String::new(),
+            cost_breakdown: breakdown,
+            estimated_cost: estimated,
+            fallback_available: false,
+            auto_submit_allowed: false,
+            block_code: None,
+        }
+    }
 }
 
 pub struct GenerationRouter;
@@ -268,6 +323,7 @@ impl GenerationRouter {
                 cost_breakdown: breakdown,
                 fallback_available: false,
                 auto_submit_allowed: false,
+                block_code: Some(RoutingBlockCode::UnsupportedTask),
             };
         }
 
@@ -304,6 +360,7 @@ impl GenerationRouter {
                 cost_breakdown: breakdown,
                 fallback_available: false,
                 auto_submit_allowed: false,
+                block_code: Some(RoutingBlockCode::UnsupportedTask),
             };
         }
 
@@ -352,6 +409,7 @@ impl GenerationRouter {
                             cost_breakdown: breakdown,
                             fallback_available: false,
                             auto_submit_allowed: false,
+                            block_code: Some(RoutingBlockCode::ProviderDurationLimit),
                         };
                     }
                 }
@@ -426,6 +484,7 @@ impl GenerationRouter {
                     cost_breakdown: breakdown,
                     fallback_available: false,
                     auto_submit_allowed: false,
+                    block_code: Some(RoutingBlockCode::ProviderResolutionLimit),
                 };
             }
         }
@@ -523,6 +582,7 @@ impl GenerationRouter {
                     cost_breakdown: breakdown,
                     fallback_available: false,
                     auto_submit_allowed: false,
+                    block_code: Some(RoutingBlockCode::ProviderResolutionLimit),
                 };
             }
         }
@@ -684,6 +744,7 @@ impl GenerationRouter {
             cost_breakdown: breakdown,
             fallback_available: true,
             auto_submit_allowed: false,
+            block_code: None,
         }
     }
 
@@ -767,6 +828,7 @@ impl GenerationRouter {
             cost_breakdown: breakdown,
             fallback_available: true,
             auto_submit_allowed: true,
+            block_code: None,
         }
     }
 }

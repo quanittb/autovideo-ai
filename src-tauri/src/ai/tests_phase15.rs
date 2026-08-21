@@ -187,6 +187,7 @@ mod tests {
                     cost_breakdown: CostBreakdown::default(),
                     fallback_available: false,
                     auto_submit_allowed: true,
+                    block_code: None,
                 },
                 budget_limit: 3.00,
                 provider_key: crate::ai::cloud::ProviderKey::new("replicate", "minimax/video-01"),

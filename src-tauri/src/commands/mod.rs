@@ -2094,3 +2094,169 @@ pub fn open_cloud_artifact_folder(
 
     Ok(())
 }
+
+// -----------------------------------------------------------------------------
+// Phase 19 Segmented Cloud Generation Commands
+// -----------------------------------------------------------------------------
+
+pub fn resolve_segmented_cloud_artifact_preview_path(
+    project_id: &str,
+    parent_id: &str,
+    store: &crate::ai::cloud::SegmentedCloudJobStore,
+) -> Result<(PathBuf, crate::ai::cloud::SegmentedCloudJobManifest), String> {
+    crate::ai::cloud::validate_identifier(project_id, "projectId").map_err(|e| format!("{}", e))?;
+    crate::ai::cloud::validate_identifier(parent_id, "parentId").map_err(|e| format!("{}", e))?;
+
+    let manifest = store
+        .load_manifest(project_id, parent_id)
+        .map_err(|e| format!("{}", e))?;
+
+    if manifest.state != crate::ai::cloud::SegmentedJobState::Completed {
+        return Err(format!(
+            "PREVIEW_NOT_ELIGIBLE: Segmented cloud job {} is in state {:?}, completed state required for preview",
+            parent_id, manifest.state
+        ));
+    }
+
+    let final_output = manifest
+        .final_output
+        .as_ref()
+        .ok_or_else(|| "NO_FINAL_OUTPUT: Manifest has no final output record".to_string())?;
+
+    let final_path = final_output
+        .final_path
+        .as_ref()
+        .ok_or_else(|| "NO_FINAL_PATH: Manifest output has no final artifact path".to_string())?;
+
+    if !final_path.is_file() {
+        return Err(format!(
+            "ARTIFACT_NOT_FOUND: Artifact file does not exist at {}",
+            final_path.display()
+        ));
+    }
+
+    let canonical_file = final_path
+        .canonicalize()
+        .map_err(|e| format!("CANONICALIZE_FAILED: {}", e))?;
+    let artifacts_root = store
+        .storage_paths
+        .projects_dir
+        .join(project_id)
+        .join("cloud-jobs")
+        .join("artifacts");
+    let canonical_artifacts_root = artifacts_root
+        .canonicalize()
+        .map_err(|e| format!("ARTIFACTS_ROOT_NOT_FOUND: {}", e))?;
+
+    if !canonical_file.starts_with(&canonical_artifacts_root) {
+        return Err(
+            "SECURITY_VIOLATION: Artifact file is outside project cloud artifacts directory"
+                .to_string(),
+        );
+    }
+
+    Ok((canonical_file, manifest))
+}
+
+#[command]
+pub fn preflight_segmented_cloud_transformation(
+    request: crate::ai::cloud::CloudJobRequest,
+    max_cost: Option<f64>,
+    orchestrator: tauri::State<'_, Arc<crate::ai::cloud::SegmentedCloudJobOrchestrator>>,
+) -> Result<crate::ai::cloud::SegmentedCloudSubmissionPreflight, String> {
+    orchestrator
+        .preflight_segmented_transformation(&request, max_cost)
+        .map_err(|e| format!("{}", e))
+}
+
+#[command]
+pub async fn start_segmented_cloud_transformation(
+    request: crate::ai::cloud::CloudJobRequest,
+    max_cost: Option<f64>,
+    orchestrator: tauri::State<'_, Arc<crate::ai::cloud::SegmentedCloudJobOrchestrator>>,
+) -> Result<crate::ai::cloud::SegmentedCloudJobManifest, String> {
+    orchestrator
+        .start_segmented_transformation(request, max_cost)
+        .await
+        .map_err(|e| format!("{}", e))
+}
+
+#[command]
+pub fn list_segmented_cloud_jobs(
+    project_id: String,
+    orchestrator: tauri::State<'_, Arc<crate::ai::cloud::SegmentedCloudJobOrchestrator>>,
+) -> Result<Vec<crate::ai::cloud::SegmentedCloudJobManifest>, String> {
+    crate::ai::cloud::validate_identifier(&project_id, "projectId")
+        .map_err(|e| format!("{}", e))?;
+    orchestrator
+        .list_segmented_jobs_in_project(&project_id)
+        .map_err(|e| format!("{}", e))
+}
+
+#[command]
+pub async fn cancel_segmented_cloud_job(
+    project_id: String,
+    parent_id: String,
+    orchestrator: tauri::State<'_, Arc<crate::ai::cloud::SegmentedCloudJobOrchestrator>>,
+) -> Result<crate::ai::cloud::SegmentedCloudJobManifest, String> {
+    crate::ai::cloud::validate_identifier(&project_id, "projectId")
+        .map_err(|e| format!("{}", e))?;
+    crate::ai::cloud::validate_identifier(&parent_id, "parentId").map_err(|e| format!("{}", e))?;
+    orchestrator
+        .cancel_segmented_transformation(&project_id, &parent_id)
+        .await
+        .map_err(|e| format!("{}", e))
+}
+
+#[command]
+pub async fn approve_segmented_cloud_budget(
+    project_id: String,
+    parent_id: String,
+    max_cost: f64,
+    orchestrator: tauri::State<'_, Arc<crate::ai::cloud::SegmentedCloudJobOrchestrator>>,
+) -> Result<crate::ai::cloud::SegmentedCloudJobManifest, String> {
+    crate::ai::cloud::validate_identifier(&project_id, "projectId")
+        .map_err(|e| format!("{}", e))?;
+    crate::ai::cloud::validate_identifier(&parent_id, "parentId").map_err(|e| format!("{}", e))?;
+    orchestrator
+        .approve_segmented_budget(&project_id, &parent_id, max_cost)
+        .await
+        .map_err(|e| format!("{}", e))
+}
+
+#[command]
+pub fn authorize_segmented_preview_asset(
+    project_id: String,
+    parent_id: String,
+    app: AppHandle,
+    store: tauri::State<'_, Arc<crate::ai::cloud::SegmentedCloudJobStore>>,
+) -> Result<crate::ai::cloud::AuthorizedAssetPreview, String> {
+    let (canonical_file, manifest) =
+        resolve_segmented_cloud_artifact_preview_path(&project_id, &parent_id, &store)?;
+
+    let _ = app.asset_protocol_scope().allow_file(&canonical_file);
+
+    Ok(crate::ai::cloud::AuthorizedAssetPreview {
+        local_path: canonical_file.to_string_lossy().to_string(),
+        container: "webm".to_string(),
+        video_codec: "vp9".to_string(),
+        alpha_validated: manifest.state == crate::ai::cloud::SegmentedJobState::Completed,
+        audio_required: manifest.source_facts.has_audio,
+        actual_has_audio: Some(manifest.source_facts.has_audio),
+    })
+}
+
+#[command]
+pub fn revoke_segmented_preview_asset(
+    project_id: String,
+    parent_id: String,
+    app: AppHandle,
+    store: tauri::State<'_, Arc<crate::ai::cloud::SegmentedCloudJobStore>>,
+) -> Result<(), String> {
+    if let Ok((canonical_file, _)) =
+        resolve_segmented_cloud_artifact_preview_path(&project_id, &parent_id, &store)
+    {
+        let _ = app.asset_protocol_scope().forbid_file(&canonical_file);
+    }
+    Ok(())
+}

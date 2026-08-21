@@ -32,17 +32,32 @@ pub fn run() {
             let resolver = Arc::new(crate::ai::cloud::DefaultCloudProviderResolver::new());
             let submission_gate = Arc::new(crate::ai::cloud::DefaultCloudSubmissionGate::new());
             let lifecycle = Arc::new(crate::ai::cloud::CloudJobLifecycleService::new(
-                storage_paths,
+                storage_paths.clone(),
                 resolver,
                 event_sink,
                 submission_gate,
                 crate::ai::cloud::LifecycleTimingConfig::production(),
             ));
+            let seg_store = Arc::new(crate::ai::cloud::SegmentedCloudJobStore::new(
+                storage_paths.clone(),
+            ));
+            let registry = crate::ai::cloud::ProviderRegistry::new();
+            let orchestrator = Arc::new(crate::ai::cloud::SegmentedCloudJobOrchestrator::new(
+                lifecycle.clone(),
+                (*seg_store).clone(),
+                storage_paths,
+                registry,
+                Some(app.handle().clone()),
+            ));
 
             app.manage(lifecycle.clone());
+            app.manage(seg_store.clone());
+            app.manage(orchestrator.clone());
 
+            let orchestrator_clone = orchestrator.clone();
             tauri::async_runtime::spawn(async move {
                 let _ = lifecycle.recover_startup_jobs().await;
+                let _ = orchestrator_clone.recover_startup_segmented_jobs().await;
             });
 
             Ok(())
@@ -138,6 +153,13 @@ pub fn run() {
             revoke_preview_asset,
             open_cloud_artifact,
             open_cloud_artifact_folder,
+            preflight_segmented_cloud_transformation,
+            start_segmented_cloud_transformation,
+            list_segmented_cloud_jobs,
+            cancel_segmented_cloud_job,
+            approve_segmented_cloud_budget,
+            authorize_segmented_preview_asset,
+            revoke_segmented_preview_asset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

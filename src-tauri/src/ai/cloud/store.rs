@@ -466,3 +466,252 @@ impl PersistentCloudJobStore {
         Ok(None)
     }
 }
+
+// -----------------------------------------------------------------------------
+// SegmentedCloudJobStore
+// -----------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct SegmentedCloudJobStore {
+    pub storage_paths: StoragePaths,
+}
+
+impl SegmentedCloudJobStore {
+    pub fn new(storage_paths: StoragePaths) -> Self {
+        Self { storage_paths }
+    }
+
+    pub fn project_segmented_dir(&self, project_id: &str) -> Result<PathBuf, CloudProviderError> {
+        validate_identifier(project_id, "projectId")?;
+        let dir = self
+            .storage_paths
+            .projects_dir
+            .join(project_id)
+            .join("cloud-jobs")
+            .join("segmented");
+        Ok(dir)
+    }
+
+    pub fn parent_job_dir(
+        &self,
+        project_id: &str,
+        parent_id: &str,
+    ) -> Result<PathBuf, CloudProviderError> {
+        validate_identifier(parent_id, "parentId")?;
+        let dir = self.project_segmented_dir(project_id)?.join(parent_id);
+        Ok(dir)
+    }
+
+    pub fn manifest_file_path(
+        &self,
+        project_id: &str,
+        parent_id: &str,
+    ) -> Result<PathBuf, CloudProviderError> {
+        let parent_dir = self.parent_job_dir(project_id, parent_id)?;
+        Ok(parent_dir.join("manifest.json"))
+    }
+
+    pub fn manifest_tmp_file_path(
+        &self,
+        project_id: &str,
+        parent_id: &str,
+    ) -> Result<PathBuf, CloudProviderError> {
+        let parent_dir = self.parent_job_dir(project_id, parent_id)?;
+        Ok(parent_dir.join("manifest.json.tmp"))
+    }
+
+    pub fn save_manifest_atomic(
+        &self,
+        manifest: &super::manifest::SegmentedCloudJobManifest,
+    ) -> Result<(), CloudProviderError> {
+        let parent_dir = self.parent_job_dir(&manifest.project_id, &manifest.parent_id)?;
+        fs::create_dir_all(&parent_dir).map_err(|e| {
+            CloudProviderError::ProviderUnavailable(format!(
+                "Failed to create segmented job dir {}: {}",
+                parent_dir.display(),
+                e
+            ))
+        })?;
+
+        let primary_path = self.manifest_file_path(&manifest.project_id, &manifest.parent_id)?;
+        let tmp_path = self.manifest_tmp_file_path(&manifest.project_id, &manifest.parent_id)?;
+
+        let serialized = serde_json::to_string_pretty(manifest).map_err(|e| {
+            CloudProviderError::ProviderUnavailable(format!(
+                "Failed to serialize segmented job manifest: {}",
+                e
+            ))
+        })?;
+
+        let mut file = File::create(&tmp_path).map_err(|e| {
+            CloudProviderError::ProviderUnavailable(format!(
+                "Failed to create tmp manifest file {}: {}",
+                tmp_path.display(),
+                e
+            ))
+        })?;
+
+        file.write_all(serialized.as_bytes()).map_err(|e| {
+            CloudProviderError::ProviderUnavailable(format!(
+                "Failed to write tmp manifest file {}: {}",
+                tmp_path.display(),
+                e
+            ))
+        })?;
+
+        file.sync_all().map_err(|e| {
+            CloudProviderError::ProviderUnavailable(format!(
+                "Failed to flush tmp manifest file {}: {}",
+                tmp_path.display(),
+                e
+            ))
+        })?;
+
+        drop(file);
+
+        atomic_replace(&tmp_path, &primary_path).map_err(|e| {
+            CloudProviderError::ProviderUnavailable(format!(
+                "Atomic rename failed from {} to {}: {}",
+                tmp_path.display(),
+                primary_path.display(),
+                e
+            ))
+        })?;
+
+        Ok(())
+    }
+
+    pub fn load_manifest(
+        &self,
+        project_id: &str,
+        parent_id: &str,
+    ) -> Result<super::manifest::SegmentedCloudJobManifest, CloudProviderError> {
+        let primary_path = self.manifest_file_path(project_id, parent_id)?;
+        let tmp_path = self.manifest_tmp_file_path(project_id, parent_id)?;
+
+        fn read_and_parse(
+            p: &Path,
+            is_primary: bool,
+        ) -> Result<super::manifest::SegmentedCloudJobManifest, String> {
+            if !p.exists() {
+                return Err(if is_primary {
+                    "Primary manifest file missing".to_string()
+                } else {
+                    "Temp manifest file missing".to_string()
+                });
+            }
+            let data = fs::read_to_string(p).map_err(|e| format!("Read error: {}", e))?;
+            serde_json::from_str(&data).map_err(|e| format!("Parse error: {}", e))
+        }
+
+        let primary_res = read_and_parse(&primary_path, true);
+        let tmp_res = read_and_parse(&tmp_path, false);
+
+        let manifest = match (primary_res, tmp_res) {
+            // Case 1: Both primary and tmp valid -> compare state_revision (CAS)
+            (Ok(p_manifest), Ok(tmp_manifest)) => {
+                if tmp_manifest.state_revision > p_manifest.state_revision {
+                    // Newer state was in temp before crash -> promote temp!
+                    atomic_replace(&tmp_path, &primary_path).map_err(|e| {
+                        CloudProviderError::ProviderUnavailable(format!(
+                            "Failed to promote recovered tmp manifest to primary: {}",
+                            e
+                        ))
+                    })?;
+                    tmp_manifest
+                } else {
+                    // Primary is same or newer -> clean up stale temp
+                    let _ = fs::remove_file(&tmp_path);
+                    p_manifest
+                }
+            }
+
+            // Case 2: Primary valid, temp missing or corrupt -> use primary
+            (Ok(p_manifest), Err(_)) => {
+                if tmp_path.exists() {
+                    let _ = fs::remove_file(&tmp_path);
+                }
+                p_manifest
+            }
+
+            // Case 3: Primary missing, temp valid -> promote temp
+            (Err(e), Ok(tmp_manifest)) if e.contains("Primary manifest file missing") => {
+                atomic_replace(&tmp_path, &primary_path).map_err(|e| {
+                    CloudProviderError::ProviderUnavailable(format!(
+                        "Failed to promote recovered tmp manifest to primary: {}",
+                        e
+                    ))
+                })?;
+                tmp_manifest
+            }
+
+            // Case 4: Primary corrupt, temp valid -> backup corrupt primary and promote temp
+            (Err(_), Ok(tmp_manifest)) => {
+                let corrupt_path = primary_path.with_extension("json.corrupt");
+                let _ = atomic_replace(&primary_path, &corrupt_path);
+                atomic_replace(&tmp_path, &primary_path).map_err(|e| {
+                    CloudProviderError::ProviderUnavailable(format!(
+                        "Failed to promote recovered tmp manifest over corrupt primary: {}",
+                        e
+                    ))
+                })?;
+                tmp_manifest
+            }
+
+            // Case 5: Both missing or corrupt -> recovery failure (Fail-Closed)
+            (Err(e1), Err(e2)) => {
+                return Err(CloudProviderError::ProviderUnavailable(format!(
+                    "RECOVERY_FAILED: Segmented job manifest primary corrupt/missing ({}) and tmp corrupt/missing ({}) for {}",
+                    e1, e2, parent_id
+                )));
+            }
+        };
+
+        Ok(manifest)
+    }
+
+    pub fn list_segmented_jobs(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<super::manifest::SegmentedCloudJobManifest>, CloudProviderError> {
+        let seg_dir = self.project_segmented_dir(project_id)?;
+        if !seg_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut manifests = Vec::new();
+        let entries = fs::read_dir(&seg_dir).map_err(|e| {
+            CloudProviderError::ProviderUnavailable(format!(
+                "Failed to read segmented jobs directory {}: {}",
+                seg_dir.display(),
+                e
+            ))
+        })?;
+
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                let parent_id = entry.file_name().to_string_lossy().to_string();
+                if let Ok(manifest) = self.load_manifest(project_id, &parent_id) {
+                    manifests.push(manifest);
+                }
+            }
+        }
+
+        manifests.sort_by(|a, b| b.timestamps.created_at.cmp(&a.timestamps.created_at));
+        Ok(manifests)
+    }
+
+    pub fn find_parent_by_client_request_id(
+        &self,
+        project_id: &str,
+        client_request_id: &str,
+    ) -> Result<Option<super::manifest::SegmentedCloudJobManifest>, CloudProviderError> {
+        let list = self.list_segmented_jobs(project_id)?;
+        for m in list {
+            if m.client_request_id == client_request_id || m.parent_id == client_request_id {
+                return Ok(Some(m));
+            }
+        }
+        Ok(None)
+    }
+}

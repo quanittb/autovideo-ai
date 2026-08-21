@@ -42,6 +42,7 @@ fn test_phase18_01_preflight_uses_authoritative_source_facts_over_request_durati
         height: 1080,
         fps: 30.0,
         has_audio: false,
+        ..Default::default()
     };
     let decision = crate::ai::cloud::router::GenerationRouter::route_with_facts(
         TaskClass::CharacterReplacement,
@@ -75,6 +76,7 @@ fn test_phase18_02_preflight_background_removal_duration_limit_blocks_submission
         height: 1080,
         fps: 30.0,
         has_audio: false,
+        ..Default::default()
     };
     let req = make_test_request("BACKGROUND_REMOVAL", 10.0, None);
 
@@ -188,6 +190,7 @@ fn test_phase18_06_preflight_dto_serialization_camel_case() {
             estimated_cost: Default::default(),
             fallback_available: false,
             auto_submit_allowed: true,
+            block_code: None,
         },
         source_facts: Some(SourceMediaFacts {
             duration_sec: 15.0,
@@ -195,6 +198,7 @@ fn test_phase18_06_preflight_dto_serialization_camel_case() {
             height: 1080,
             fps: 30.0,
             has_audio: false,
+            ..Default::default()
         }),
         budget_limit: 3.0,
         budget_approved: true,
@@ -308,6 +312,7 @@ fn test_phase18_10_deterministic_registry_pricing_tiers() {
         height: 720,
         fps: 24.0,
         has_audio: true,
+        ..Default::default()
     };
     let decision_720p = crate::ai::cloud::router::GenerationRouter::route_with_facts(
         TaskClass::CharacterReplacement,
@@ -331,6 +336,7 @@ fn test_phase18_10_deterministic_registry_pricing_tiers() {
         height: 1080,
         fps: 24.0,
         has_audio: true,
+        ..Default::default()
     };
     let decision_1080p = crate::ai::cloud::router::GenerationRouter::route_with_facts(
         TaskClass::CharacterReplacement,

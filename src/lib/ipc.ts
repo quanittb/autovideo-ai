@@ -740,6 +740,13 @@ export interface AuthorizedAssetPreview {
   actualHasAudio?: boolean | null;
 }
 
+export type RoutingBlockCode =
+  | 'PROVIDER_DURATION_LIMIT'
+  | 'PROVIDER_RESOLUTION_LIMIT'
+  | 'PROVIDER_FPS_LIMIT'
+  | 'UNSUPPORTED_TASK'
+  | 'COST_BUDGET_EXCEEDED';
+
 export interface RoutingDecision {
   target: 'LOCAL' | 'CLOUD' | 'HYBRID' | 'UNAVAILABLE' | 'Local' | 'Cloud' | 'Hybrid' | 'Unavailable';
   executionClass: ExecutionClass;
@@ -748,6 +755,7 @@ export interface RoutingDecision {
   task: TaskClass | string;
   mode: RoutingPreference | string;
   reason: string;
+  blockCode?: RoutingBlockCode | null;
   costBreakdown: CostBreakdown;
   estimatedCost: CostEstimate;
   fallbackAvailable: boolean;
@@ -816,8 +824,164 @@ export const cloudApi = {
   openCloudArtifactFolder: async (projectId: string, internalJobId: string): Promise<void> => {
     return await invoke('open_cloud_artifact_folder', { projectId, internalJobId });
   },
+
+  preflightSegmentedTransformation: async (
+    request: CloudJobRequest,
+    maxCost?: number
+  ): Promise<SegmentedCloudSubmissionPreflight> => {
+    return await invoke('preflight_segmented_cloud_transformation', { request, maxCost });
+  },
+
+  startSegmentedTransformation: async (
+    request: CloudJobRequest,
+    maxCost?: number
+  ): Promise<SegmentedCloudJobManifest> => {
+    return await invoke('start_segmented_cloud_transformation', { request, maxCost });
+  },
+
+  listSegmentedJobs: async (projectId: string): Promise<SegmentedCloudJobManifest[]> => {
+    return await invoke('list_segmented_cloud_jobs', { projectId });
+  },
+
+  cancelSegmentedJob: async (
+    projectId: string,
+    parentId: string
+  ): Promise<SegmentedCloudJobManifest> => {
+    return await invoke('cancel_segmented_cloud_job', { projectId, parentId });
+  },
+
+  approveSegmentedBudget: async (
+    projectId: string,
+    parentId: string,
+    maxCost: number
+  ): Promise<SegmentedCloudJobManifest> => {
+    return await invoke('approve_segmented_cloud_budget', { projectId, parentId, maxCost });
+  },
+
+  authorizeSegmentedPreviewAsset: async (
+    projectId: string,
+    parentId: string
+  ): Promise<AuthorizedAssetPreview> => {
+    return await invoke('authorize_segmented_preview_asset', { projectId, parentId });
+  },
+
+  revokeSegmentedPreviewAsset: async (
+    projectId: string,
+    parentId: string
+  ): Promise<void> => {
+    return await invoke('revoke_segmented_preview_asset', { projectId, parentId });
+  },
 };
 
+export type SegmentedJobState =
+  | 'PLANNING'
+  | 'SPLITTING'
+  | 'COST_APPROVAL_REQUIRED'
+  | 'READY'
+  | 'RUNNING'
+  | 'STITCHING'
+  | 'VALIDATING_OUTPUT'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'BLOCKED'
+  | 'CANCELLED';
 
+export interface SegmentBoundary {
+  index: number;
+  startFrame: number;
+  endFrame: number;
+  startPts: number;
+  endPts: number;
+  startMs: number;
+  endMs: number;
+  expectedDurationSec: number;
+}
 
+export interface Rational {
+  num: number;
+  den: number;
+}
 
+export interface DetailedTimingFacts {
+  rFrameRate: Rational;
+  avgFrameRate: Rational;
+  timeBase: Rational;
+  isVfr: boolean;
+  nbFrames?: number | null;
+}
+
+export interface SegmentPlan {
+  planId: string;
+  sourceFacts: SourceMediaFacts;
+  timingFacts: DetailedTimingFacts;
+  boundaries: SegmentBoundary[];
+  policyVersion: number;
+  providerLimitMs: number;
+  totalSourceDurationSec: number;
+}
+
+export interface SegmentChildRecord {
+  segmentIndex: number;
+  clientJobId: string;
+  internalJobId?: string | null;
+  inputSegmentPath?: string | null;
+  state?: CloudJobState | null;
+  outputArtifactPath?: string | null;
+  durationSec: number;
+  costUsd?: number | null;
+  updatedAt: string;
+}
+
+export interface OutputArtifactRecord {
+  temporaryPath?: string | null;
+  finalPath?: string | null;
+  artifactHash?: string | null;
+  width?: number | null;
+  height?: number | null;
+  durationSec?: number | null;
+  fps?: number | null;
+}
+
+export interface SegmentedCloudJobManifest {
+  schemaVersion: number;
+  stateRevision: number;
+  parentId: string;
+  clientRequestId: string;
+  projectId: string;
+  taskType: string;
+  providerId: string;
+  modelId: string;
+  configurationHash: string;
+  state: SegmentedJobState;
+  sourceFacts: SourceMediaFacts;
+  timingFacts: DetailedTimingFacts;
+  segmentPlan: SegmentPlan;
+  childJobs: SegmentChildRecord[];
+  budgetLimit?: number | null;
+  provisionalEstimateUsd: number;
+  actualBatchBaseEstimateUsd?: number | null;
+  finalOutput?: OutputArtifactRecord | null;
+  timestamps: {
+    createdAt: string;
+    updatedAt: string;
+    submittedAt?: string | null;
+    completedAt?: string | null;
+  };
+  cancellationRequested: boolean;
+  progressPct?: number | null;
+  error?: JobErrorRecord | null;
+}
+
+export interface SegmentedCloudSubmissionPreflight {
+  taskClass: string;
+  segmentable: boolean;
+  estimatedSegments: number;
+  sourceFacts: SourceMediaFacts;
+  timingFacts: DetailedTimingFacts;
+  provisionalCostUsd: number;
+  budgetLimit: number;
+  budgetApproved: boolean;
+  blockingCode?: string | null;
+  providerId: string;
+  modelId: string;
+}

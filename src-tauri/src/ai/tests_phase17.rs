@@ -199,6 +199,7 @@ mod tests {
                     height: 1080,
                     fps: 30.0,
                     has_audio: true,
+                    ..Default::default()
                 },
                 background_mode: BackgroundMode::Transparent,
                 output_format: BackgroundRemovalOutputFormat::WebmVp9,
@@ -237,6 +238,7 @@ mod tests {
                     height: 1080,
                     fps: 30.0,
                     has_audio: true,
+                    ..Default::default()
                 },
                 background_mode: BackgroundMode::Transparent,
                 output_format: BackgroundRemovalOutputFormat::WebmVp9,
@@ -520,6 +522,7 @@ mod tests {
             height: 1080,
             fps: 29.97,
             has_audio: true,
+            ..Default::default()
         };
         let json = serde_json::to_string(&facts).unwrap();
         let deserialized: SourceMediaFacts = serde_json::from_str(&json).unwrap();
@@ -541,6 +544,7 @@ mod tests {
                 height: 720,
                 fps: 24.0,
                 has_audio: false,
+                ..Default::default()
             },
             background_mode: BackgroundMode::Transparent,
             output_format: BackgroundRemovalOutputFormat::WebmVp9,
@@ -596,6 +600,7 @@ mod tests {
                     height: 1080,
                     fps: 30.0,
                     has_audio: true,
+                    ..Default::default()
                 },
                 background_mode: BackgroundMode::Transparent,
                 output_format: BackgroundRemovalOutputFormat::WebmVp9,
@@ -659,6 +664,7 @@ mod tests {
             height: 1080,
             fps: 30.0,
             has_audio: true,
+            ..Default::default()
         };
         let decision = GenerationRouter::route_with_facts(
             TaskClass::BackgroundRemoval,
@@ -686,6 +692,7 @@ mod tests {
             height: 1080,
             fps: 30.0,
             has_audio: true,
+            ..Default::default()
         };
         let decision = GenerationRouter::route_with_facts(
             TaskClass::BackgroundRemoval,
@@ -1049,6 +1056,7 @@ mod tests {
             height: 1080,
             fps: 30.0,
             has_audio: false,
+            ..Default::default()
         };
         let dec_1080p = GenerationRouter::route_with_facts(
             TaskClass::BackgroundRemoval,
@@ -1069,6 +1077,7 @@ mod tests {
             height: 16000,
             fps: 30.0,
             has_audio: false,
+            ..Default::default()
         };
         let dec_16000 = GenerationRouter::route_with_facts(
             TaskClass::BackgroundRemoval,
@@ -1089,6 +1098,7 @@ mod tests {
             height: 1080,
             fps: 30.0,
             has_audio: false,
+            ..Default::default()
         };
         let dec_over = GenerationRouter::route_with_facts(
             TaskClass::BackgroundRemoval,
@@ -1119,6 +1129,7 @@ mod tests {
             height: 720,
             fps: 24.0,
             has_audio: true,
+            ..Default::default()
         };
         let decision = GenerationRouter::route_with_facts(
             TaskClass::BackgroundRemoval,
@@ -1203,6 +1214,7 @@ mod tests {
             height: 1080,
             fps: 29.97,
             has_audio: true,
+            ..Default::default()
         };
 
         let plan = ValidatedSubmissionPlan {
@@ -1229,6 +1241,7 @@ mod tests {
                 },
                 fallback_available: false,
                 auto_submit_allowed: true,
+                block_code: None,
             },
             budget_limit: 3.0,
             provider_key: ProviderKey::new("replicate", "bria/video-remove-background"),
@@ -1284,6 +1297,7 @@ mod tests {
                 },
                 fallback_available: false,
                 auto_submit_allowed: true,
+                block_code: None,
             },
             budget_limit: 3.0,
             provider_key: ProviderKey::new("replicate", "bria/video-remove-background"),
@@ -1326,6 +1340,7 @@ mod tests {
             height: 1080,
             fps: 30.0,
             has_audio: true,
+            ..Default::default()
         };
 
         let bg_spec = BackgroundRemovalSpec {
@@ -1375,6 +1390,7 @@ mod tests {
             height: 1080,
             fps: 30.0,
             has_audio: true,
+            ..Default::default()
         };
 
         let mut bg_spec1 = BackgroundRemovalSpec {
@@ -1417,6 +1433,7 @@ mod tests {
             height: 1080,
             fps: 30.0,
             has_audio: true,
+            ..Default::default()
         };
 
         let bg_spec1 = BackgroundRemovalSpec {
@@ -1468,6 +1485,7 @@ mod tests {
             height: 1080,
             fps: 30.0,
             has_audio: true,
+            ..Default::default()
         };
 
         let bg_spec1 = BackgroundRemovalSpec {
