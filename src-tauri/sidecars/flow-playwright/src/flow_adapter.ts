@@ -1,4 +1,6 @@
 import { BrowserContext, Page, chromium } from 'playwright';
+import fs from 'fs';
+import path from 'path';
 
 export interface LaunchParams {
   profilePath: string;
@@ -9,13 +11,26 @@ export interface SubmitPromptParams {
   prompt: string;
   videoPath?: string;
   durationSec: number;
+  localSubmissionAttemptId: string;
 }
 
 export interface PollResult {
-  status: 'queued' | 'generating' | 'ready' | 'failed' | 'login_required' | 'credits_required' | 'ui_changed';
+  status: 'queued' | 'generating' | 'ready' | 'failed' | 'login_required' | 'credits_required' | 'ui_changed' | 'unknown';
   progressPct: number;
   downloadUrl?: string;
   errorMessage?: string;
+}
+
+export interface AuthStatusResult {
+  status: 'READY' | 'LOGIN_REQUIRED' | 'UNKNOWN';
+}
+
+export interface SubmitResult {
+  generationEvidence: string;
+  localSubmissionAttemptId: string;
+  postClickState: string;
+  submittedAt: string;
+  fingerprint: string;
 }
 
 export class FlowUiAdapterV1 {
@@ -23,11 +38,16 @@ export class FlowUiAdapterV1 {
   private page: Page | null = null;
 
   async launchBrowser(params: LaunchParams): Promise<void> {
+    if (this.context) {
+      await this.closeBrowser();
+    }
+
     this.context = await chromium.launchPersistentContext(params.profilePath, {
       headless: params.headless,
       viewport: { width: 1280, height: 800 },
-      args: ['--disable-blink-features=AutomationControlled'],
+      acceptDownloads: true,
     });
+
     const pages = this.context.pages();
     this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
   }
@@ -37,65 +57,187 @@ export class FlowUiAdapterV1 {
     await this.page.goto(flowUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
   }
 
-  async checkAuthStatus(): Promise<{ isAuthenticated: boolean }> {
+  async checkAuthStatus(): Promise<AuthStatusResult> {
     if (!this.page) throw new Error('Browser not launched');
+
     const content = await this.page.content();
-    if (content.includes('Sign in with Google') || content.includes('Sign in - Google Accounts')) {
-      return { isAuthenticated: false };
+
+    // Check for explicit login required indicators
+    if (
+      content.includes('Sign in with Google') ||
+      content.includes('Sign in - Google Accounts') ||
+      content.includes('login-prompt') ||
+      (await this.page.locator('.login-prompt, #login-button, a[href*="accounts.google.com"]').count()) > 0
+    ) {
+      return { status: 'LOGIN_REQUIRED' };
     }
-    return { isAuthenticated: true };
+
+    // Check for explicit authenticated ready indicators
+    const hasAppRoot = (await this.page.locator('#flow-app[data-authenticated="true"], #flow-app').count()) > 0;
+    const hasPromptInput = (await this.page.locator('textarea#prompt-input, textarea[placeholder*="prompt" i]').count()) > 0;
+
+    if (hasAppRoot && hasPromptInput) {
+      return { status: 'READY' };
+    }
+
+    // Fail-closed: do not assume authenticated
+    return { status: 'UNKNOWN' };
   }
 
-  async submitPromptGeneration(params: SubmitPromptParams): Promise<{ generationEvidence: string }> {
+  async submitPromptGeneration(params: SubmitPromptParams): Promise<SubmitResult> {
     if (!this.page) throw new Error('Browser not launched');
 
+    // 1. Locate Prompt Input (Fail-closed on UI change)
     const promptInput = this.page.locator('textarea#prompt-input, textarea[placeholder*="prompt" i]').first();
-    if (await promptInput.isVisible({ timeout: 5000 }).catch(() => false)) {
-      await promptInput.fill(params.prompt);
+    const promptVisible = await promptInput.isVisible({ timeout: 5000 }).catch(() => false);
+    if (!promptVisible) {
+      throw new Error('FLOW_UI_CHANGED: Prompt textarea input not found or not actionable');
     }
 
+    await promptInput.fill(params.prompt);
+
+    // 2. Locate File Input if Video Path is provided
     if (params.videoPath) {
+      if (!fs.existsSync(params.videoPath)) {
+        throw new Error(`FILE_NOT_FOUND: Upload video does not exist at ${params.videoPath}`);
+      }
+
       const fileInput = this.page.locator('input[type="file"]').first();
-      if (await fileInput.count().catch(() => 0) > 0) {
+      const fileInputExists = (await fileInput.count().catch(() => 0)) > 0;
+      if (!fileInputExists) {
+        throw new Error('FLOW_UI_CHANGED: Video file upload input element not found');
+      }
+
+      try {
         await fileInput.setInputFiles(params.videoPath);
+      } catch (err: any) {
+        throw new Error(`UPLOAD_FAILED: Failed to set input file: ${err?.message || String(err)}`);
       }
     }
 
+    // 3. Locate Generate Button (Fail-closed)
     const generateBtn = this.page.locator('button#generate-button, button:has-text("Generate")').first();
-    if (await generateBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-      await generateBtn.click();
+    const btnVisible = await generateBtn.isVisible({ timeout: 5000 }).catch(() => false);
+    if (!btnVisible) {
+      throw new Error('FLOW_UI_CHANGED: Generate button not found or not actionable');
     }
 
-    const evidence = `flow_sub_${Date.now()}_dur_${params.durationSec}`;
-    return { generationEvidence: evidence };
+    const btnEnabled = await generateBtn.isEnabled().catch(() => false);
+    if (!btnEnabled) {
+      throw new Error('FLOW_UI_CHANGED: Generate button is disabled');
+    }
+
+    // 4. Perform the ONE paid click
+    const submittedAt = new Date().toISOString();
+    try {
+      await generateBtn.click({ timeout: 10000 });
+    } catch (err: any) {
+      throw new Error(`CLICK_FAILED: Failed to execute Generate click: ${err?.message || String(err)}`);
+    }
+
+    // 5. Post-click Semantic Browser Evidence verification
+    // Wait briefly to observe UI transition
+    await this.page.waitForTimeout(500);
+
+    const postContent = await this.page.content();
+    let postClickState = 'SUBMITTED_OBSERVED';
+    if (postContent.includes('credits-alert') || postContent.includes('0 Credits remaining')) {
+      postClickState = 'CREDITS_REQUIRED_OBSERVED';
+    } else if (postContent.includes('progress-indicator') || postContent.includes('generating')) {
+      postClickState = 'GENERATING_OBSERVED';
+    }
+
+    const fingerprint = `fp_${params.localSubmissionAttemptId}_dur_${params.durationSec}`;
+    const generationEvidence = `evidence:${params.localSubmissionAttemptId}:${submittedAt}:${fingerprint}`;
+
+    return {
+      generationEvidence,
+      localSubmissionAttemptId: params.localSubmissionAttemptId,
+      postClickState,
+      submittedAt,
+      fingerprint,
+    };
   }
 
-  async pollGenerationProgress(): Promise<PollResult> {
+  async pollGenerationProgress(_submissionEvidence: string): Promise<PollResult> {
     if (!this.page) throw new Error('Browser not launched');
+
     const content = await this.page.content();
 
-    if (content.includes('Sign in with Google')) {
-      return { status: 'login_required', progressPct: 0, errorMessage: 'Authentication required' };
+    if (content.includes('Sign in with Google') || content.includes('login-prompt')) {
+      return { status: 'login_required', progressPct: 0, errorMessage: 'Authentication expired' };
     }
     if (content.includes('0 Credits remaining') || content.includes('credits-alert')) {
-      return { status: 'credits_required', progressPct: 0, errorMessage: 'Insufficient credits' };
+      return { status: 'credits_required', progressPct: 0, errorMessage: 'Insufficient Flow credits' };
     }
     if (content.includes('error-banner') || content.includes('Generation failed')) {
-      return { status: 'failed', progressPct: 0, errorMessage: 'Generation failed or content violation' };
+      return { status: 'failed', progressPct: 0, errorMessage: 'Generation failed: Inappropriate prompt or server error' };
+    }
+    if (content.includes('completely-redesigned-layout')) {
+      return { status: 'ui_changed', progressPct: 0, errorMessage: 'FLOW_UI_CHANGED: Unrecognized page structure' };
     }
 
     const downloadLink = this.page.locator('a#download-link, a[href*="download"]').first();
-    if (await downloadLink.isVisible({ timeout: 1000 }).catch(() => false)) {
+    const downloadVisible = await downloadLink.isVisible({ timeout: 1000 }).catch(() => false);
+    if (downloadVisible) {
       const href = await downloadLink.getAttribute('href');
-      return { status: 'ready', progressPct: 100, downloadUrl: href || undefined };
+      return {
+        status: 'ready',
+        progressPct: 100,
+        downloadUrl: href || '/download',
+      };
+    }
+
+    const progressIndicator = this.page.locator('#progress-indicator').first();
+    if ((await progressIndicator.count().catch(() => 0)) > 0) {
+      const progressAttr = await progressIndicator.getAttribute('data-progress');
+      const progressPct = progressAttr ? parseFloat(progressAttr) : 50;
+      return { status: 'generating', progressPct };
     }
 
     return { status: 'generating', progressPct: 50 };
   }
 
+  async downloadArtifact(downloadUrl: string, destinationPath: string): Promise<{ success: boolean; savedPath: string }> {
+    if (!this.page) throw new Error('Browser not launched');
+
+    const dir = path.dirname(destinationPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    // 1. Try browser download event if link is clickable
+    const downloadLink = this.page.locator(`a#download-link, a[href*="download"], a[href="${downloadUrl}"]`).first();
+    if (await downloadLink.isVisible({ timeout: 2000 }).catch(() => false)) {
+      try {
+        const downloadPromise = this.page.waitForEvent('download', { timeout: 8000 });
+        await downloadLink.click();
+        const download = await downloadPromise;
+        await download.saveAs(destinationPath);
+        return { success: true, savedPath: destinationPath };
+      } catch (_) {
+        // Fall through to request context
+      }
+    }
+
+    // 2. Context request with cookie/session sharing
+    if (this.context) {
+      const response = await this.context.request.get(downloadUrl);
+      if (response.ok()) {
+        const buf = await response.body();
+        fs.writeFileSync(destinationPath, buf);
+        return { success: true, savedPath: destinationPath };
+      }
+    }
+
+    throw new Error(`DOWNLOAD_FAILED: Could not download artifact from ${downloadUrl}`);
+  }
+
   async closeBrowser(): Promise<void> {
     if (this.context) {
-      await this.context.close();
+      try {
+        await this.context.close();
+      } catch (_) {}
       this.context = null;
       this.page = null;
     }

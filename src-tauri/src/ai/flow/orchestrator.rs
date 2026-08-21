@@ -31,7 +31,7 @@ impl FlowOrchestrator {
         let store = FlowJobStore::new(storage_paths.clone());
         let profile_manager = FlowProfileManager::new(storage_paths.app_data_dir.clone());
         let bridge = PlaywrightBridge::new();
-        let capability_policy = FlowCapabilityPolicy::default();
+        let capability_policy = FlowCapabilityPolicy::for_edit_uploaded_video();
 
         Self {
             storage_paths,
@@ -46,7 +46,7 @@ impl FlowOrchestrator {
         let store = FlowJobStore::new(storage_paths.clone());
         let profile_manager = FlowProfileManager::new(storage_paths.app_data_dir.clone());
         let bridge = PlaywrightBridge::with_mock_url(mock_url);
-        let capability_policy = FlowCapabilityPolicy::default();
+        let capability_policy = FlowCapabilityPolicy::for_edit_uploaded_video();
 
         Self {
             storage_paths,
@@ -119,32 +119,28 @@ impl FlowOrchestrator {
         let prompt_hash = calculate_prompt_hash(&submitted_prompt);
         let source_provenance = prompt_source.unwrap_or(PromptSource::User);
 
-        let source_bytes = std::fs::read(&source_video_path).unwrap_or_default();
+        // Derive deterministic config hash
         let mut hasher = Sha256::new();
-        hasher.update(&source_bytes);
-        let source_content_hash = format!("{:x}", hasher.finalize());
-        let source_file_name = source_video_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string());
+        hasher.update(parent_id.as_bytes());
+        hasher.update(submitted_prompt.as_bytes());
+        hasher.update(source_video_path.to_string_lossy().as_bytes());
+        let config_hash = format!("{:x}", hasher.finalize());
 
-        let credit_est = self.capability_policy.estimate_credits(plan.segments.len());
-        let credit_record = super::capability::FlowCreditRecord {
-            estimated_credits: credit_est,
-            observed_credit_balance: None,
-            completed_generations: 0,
-        };
+        let mut credit_record = super::capability::FlowCreditRecord::default();
+        credit_record.estimated_credits =
+            self.capability_policy.estimate_credits(plan.segments.len());
 
         let mut manifest = FlowGenerationManifest::new(
             parent_id.clone(),
             client_request_id,
             project_id.clone(),
             profile_id,
-            format!("cfg_{}", prompt_hash),
+            config_hash,
             None,
-            source_content_hash,
-            source_file_name,
-            submitted_prompt,
             prompt_hash,
+            None,
+            submitted_prompt,
+            calculate_prompt_hash(clean_prompt),
             source_provenance,
             self.capability_policy.capability_policy_version,
             self.capability_policy.split_policy_version,
@@ -182,8 +178,11 @@ impl FlowOrchestrator {
     ) -> Result<(), String> {
         let mut manifest = self.store.load_manifest(project_id, parent_id)?;
 
-        // Acquire profile lock
-        let _guard = match self.profile_manager.try_lock_profile(&manifest.profile_id) {
+        let profile_dir = self.profile_manager.get_profile_dir(&manifest.profile_id)?;
+        let _guard = match self
+            .profile_manager
+            .acquire_session_lock(&manifest.profile_id)
+        {
             Ok(g) => g,
             Err(e) => {
                 manifest.state = FlowJobState::Blocked;
@@ -199,7 +198,7 @@ impl FlowOrchestrator {
         let flow_dir = self.store.parent_flow_job_dir(project_id, parent_id)?;
         let segments_dir = flow_dir.join("input_segments");
         let outputs_dir = flow_dir.join("output_segments");
-        std::fs::create_dir_all(&outputs_dir).map_err(|e| format!("{}", e))?;
+        let _ = std::fs::create_dir_all(&outputs_dir);
 
         // 1. Splitting Phase
         if manifest.child_segments.is_empty() {
@@ -229,60 +228,98 @@ impl FlowOrchestrator {
                 return Ok(());
             }
 
+            let sub_state = manifest.child_segments[i].submission_state;
             if manifest.child_segments[i].state == FlowJobState::Completed
-                || manifest.child_segments[i].submission_state
-                    == FlowChildSubmissionState::ProvenCompleted
+                || sub_state == FlowChildSubmissionState::ProvenCompleted
             {
                 continue;
             }
 
-            let seg_filename = manifest.child_segments[i].segment_file_name.clone();
-            let seg_duration = manifest.child_segments[i].duration_sec;
-
-            manifest.active_segment_index = i;
-            manifest.state = FlowJobState::Submitting;
-            manifest.child_segments[i].state = FlowJobState::Submitting;
-
-            // Before click: Persist local submission attempt state FIRST!
-            let attempt_id = format!("att_{}_{}", i, Utc::now().timestamp_millis());
-            manifest.child_segments[i].local_submission_attempt_id = Some(attempt_id.clone());
-            manifest.child_segments[i].submission_state =
-                FlowChildSubmissionState::AttemptPersisted;
-            self.store.save_manifest_atomic(&mut manifest)?;
-
-            let seg_input_path = segments_dir.join(&seg_filename);
-
-            // Execute browser submission via Playwright bridge
-            let submission_evidence = match self
-                .bridge
-                .submit_generation(&frozen_prompt, Some(&seg_input_path), seg_duration)
-                .await
-            {
-                Ok(ev) => ev,
-                Err(e) => {
-                    // Transition to GenerationAmbiguous if attempt was persisted but unconfirmed
+            // CRASH RECOVERY POLICY CHECK:
+            let submission_evidence = match sub_state {
+                FlowChildSubmissionState::ProvenSubmitted => {
+                    // ZERO submit! Resume polling directly using existing persisted evidence
+                    manifest.child_segments[i]
+                        .submission_evidence
+                        .clone()
+                        .unwrap_or_default()
+                }
+                FlowChildSubmissionState::AttemptPersisted
+                | FlowChildSubmissionState::Ambiguous => {
+                    // Crash happened in the Generate click window -> ZERO automatic resubmit!
                     manifest.state = FlowJobState::GenerationAmbiguous;
                     manifest.child_segments[i].state = FlowJobState::GenerationAmbiguous;
                     manifest.child_segments[i].submission_state =
                         FlowChildSubmissionState::Ambiguous;
                     manifest.error = Some(JobErrorRecord {
-                        code: "SUBMISSION_UNCONFIRMED".to_string(),
-                        sanitized_message: e,
+                        code: "GENERATION_AMBIGUOUS".to_string(),
+                        sanitized_message: "Unconfirmed generation attempt requires user action or UI reconciliation".to_string(),
                     });
                     self.store.save_manifest_atomic(&mut manifest)?;
                     return Ok(());
                 }
+                FlowChildSubmissionState::NeverAttempted => {
+                    let seg_filename = manifest.child_segments[i].segment_file_name.clone();
+                    let seg_duration = manifest.child_segments[i].duration_sec;
+
+                    manifest.active_segment_index = i;
+                    manifest.state = FlowJobState::Submitting;
+                    manifest.child_segments[i].state = FlowJobState::Submitting;
+
+                    // Before click: Persist local submission attempt state FIRST!
+                    let attempt_id = format!("att_{}_{}", i, Utc::now().timestamp_millis());
+                    manifest.child_segments[i].local_submission_attempt_id =
+                        Some(attempt_id.clone());
+                    manifest.child_segments[i].submission_state =
+                        FlowChildSubmissionState::AttemptPersisted;
+                    self.store.save_manifest_atomic(&mut manifest)?;
+
+                    let seg_input_path = segments_dir.join(&seg_filename);
+
+                    // Execute ONE browser submission via Playwright bridge
+                    match self
+                        .bridge
+                        .submit_generation(
+                            &profile_dir,
+                            &frozen_prompt,
+                            Some(&seg_input_path),
+                            seg_duration,
+                            &attempt_id,
+                        )
+                        .await
+                    {
+                        Ok(ev) => {
+                            manifest.child_segments[i].submission_state =
+                                FlowChildSubmissionState::ProvenSubmitted;
+                            manifest.child_segments[i].submission_evidence = Some(ev.clone());
+                            manifest.state = FlowJobState::Generating;
+                            manifest.child_segments[i].state = FlowJobState::Generating;
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            ev
+                        }
+                        Err(e) => {
+                            manifest.state = FlowJobState::GenerationAmbiguous;
+                            manifest.child_segments[i].state = FlowJobState::GenerationAmbiguous;
+                            manifest.child_segments[i].submission_state =
+                                FlowChildSubmissionState::Ambiguous;
+                            manifest.error = Some(JobErrorRecord {
+                                code: "SUBMISSION_FAILED".to_string(),
+                                sanitized_message: e,
+                            });
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            return Ok(());
+                        }
+                    }
+                }
+                FlowChildSubmissionState::ProvenCompleted => continue,
             };
 
-            // Proven submitted
-            manifest.child_segments[i].submission_state = FlowChildSubmissionState::ProvenSubmitted;
-            manifest.child_segments[i].submission_evidence = Some(submission_evidence.clone());
-            manifest.state = FlowJobState::Generating;
-            manifest.child_segments[i].state = FlowJobState::Generating;
-            self.store.save_manifest_atomic(&mut manifest)?;
+            // 3. Poll until complete
+            let poll_result = self
+                .bridge
+                .poll_generation(&profile_dir, &submission_evidence)
+                .await?;
 
-            // Poll until complete
-            let poll_result = self.bridge.poll_generation(&submission_evidence).await?;
             match poll_result.status.as_str() {
                 "login_required" => {
                     manifest.state = FlowJobState::LoginRequired;
@@ -306,65 +343,87 @@ impl FlowOrchestrator {
                         code: "GENERATION_FAILED".to_string(),
                         sanitized_message: poll_result
                             .error_message
-                            .unwrap_or_else(|| "Generation failed".to_string()),
+                            .unwrap_or_else(|| "Flow generation failed".to_string()),
                     });
                     self.store.save_manifest_atomic(&mut manifest)?;
                     return Ok(());
                 }
-                _ => {}
+                "ready" => {
+                    let download_url = poll_result
+                        .download_url
+                        .unwrap_or_else(|| "/download".to_string());
+                    let seg_out_name = format!("child_out_{:03}.mp4", i);
+                    let seg_out_path = outputs_dir.join(&seg_out_name);
+
+                    manifest.state = FlowJobState::Downloading;
+                    manifest.child_segments[i].state = FlowJobState::Downloading;
+                    self.store.save_manifest_atomic(&mut manifest)?;
+
+                    self.bridge
+                        .download_artifact(&profile_dir, &download_url, &seg_out_path)
+                        .await?;
+
+                    // Validate segment
+                    manifest.state = FlowJobState::ValidatingSegment;
+                    manifest.child_segments[i].state = FlowJobState::ValidatingSegment;
+                    self.store.save_manifest_atomic(&mut manifest)?;
+
+                    let val_rec = FlowOutputValidator::validate_child_artifact(
+                        &seg_out_path,
+                        manifest.child_segments[i].duration_sec,
+                    )?;
+
+                    manifest.child_segments[i].download_artifact_path = Some(seg_out_path);
+                    manifest.child_segments[i].download_artifact_sha = Some(val_rec.sha256);
+                    manifest.child_segments[i].state = FlowJobState::Completed;
+                    manifest.child_segments[i].submission_state =
+                        FlowChildSubmissionState::ProvenCompleted;
+                    manifest.credit_record.completed_generations += 1;
+                    self.store.save_manifest_atomic(&mut manifest)?;
+                }
+                _ => {
+                    // Generating/Queued
+                }
             }
-
-            // Download segment output
-            manifest.state = FlowJobState::Downloading;
-            manifest.child_segments[i].state = FlowJobState::Downloading;
-            self.store.save_manifest_atomic(&mut manifest)?;
-
-            let out_seg_path = outputs_dir.join(format!("out_segment_{:03}.mp4", i));
-            let download_url = poll_result
-                .download_url
-                .unwrap_or_else(|| format!("{}/download", self.bridge.target_url()));
-            self.bridge
-                .download_artifact(&download_url, &out_seg_path)
-                .await?;
-
-            // Validate segment output
-            manifest.state = FlowJobState::ValidatingSegment;
-            manifest.child_segments[i].state = FlowJobState::ValidatingSegment;
-            self.store.save_manifest_atomic(&mut manifest)?;
-
-            let validated_child =
-                FlowOutputValidator::validate_child_artifact(&out_seg_path, seg_duration)?;
-            manifest.child_segments[i].download_artifact_path = Some(out_seg_path);
-            manifest.child_segments[i].download_artifact_sha = Some(validated_child.sha256);
-            manifest.child_segments[i].submission_state = FlowChildSubmissionState::ProvenCompleted;
-            manifest.child_segments[i].state = FlowJobState::Completed;
-            manifest.child_segments[i].timestamps.completed_at = Some(Utc::now().to_rfc3339());
-            manifest.credit_record.completed_generations += 1;
-            self.store.save_manifest_atomic(&mut manifest)?;
         }
 
-        // 3. Final Stitching & Audio Muxing Phase
+        // 4. Final Stitching Phase
         manifest.state = FlowJobState::Stitching;
         self.store.save_manifest_atomic(&mut manifest)?;
 
-        let child_output_paths: Vec<PathBuf> = manifest
-            .child_segments
-            .iter()
-            .filter_map(|c| c.download_artifact_path.clone())
-            .collect();
+        let mut downloaded_segments = Vec::new();
+        for child in &manifest.child_segments {
+            if let Some(ref p) = child.download_artifact_path {
+                downloaded_segments.push(p.clone());
+            }
+        }
 
-        let final_output_file = flow_dir.join("final_flow_output.mp4");
-        let final_record = FlowStitcher::stitch_flow_segments(
-            &child_output_paths,
+        if downloaded_segments.len() != manifest.child_segments.len() {
+            manifest.state = FlowJobState::Failed;
+            manifest.error = Some(JobErrorRecord {
+                code: "STITCH_INCOMPLETE".to_string(),
+                sanitized_message: "Not all segment artifacts are downloaded".to_string(),
+            });
+            self.store.save_manifest_atomic(&mut manifest)?;
+            return Ok(());
+        }
+
+        let final_video_out = flow_dir.join("final_flow_output.mp4");
+        let stitched_record = FlowStitcher::stitch_flow_segments(
+            &downloaded_segments,
             Some(source_video_path),
             manifest.source_facts.duration_sec,
             &manifest.final_audio_policy,
-            &final_output_file,
+            &final_video_out,
         )?;
 
-        manifest.final_output = Some(final_record);
+        // Validate final output
+        manifest.state = FlowJobState::ValidatingFinal;
+        self.store.save_manifest_atomic(&mut manifest)?;
+
+        manifest.final_output = Some(stitched_record);
+
         manifest.state = FlowJobState::Completed;
-        manifest.timestamps.completed_at = Some(Utc::now().to_rfc3339());
         self.store.save_manifest_atomic(&mut manifest)?;
 
         Ok(())

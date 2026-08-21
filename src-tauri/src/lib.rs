@@ -167,6 +167,8 @@ pub fn run() {
             list_flow_profiles,
             create_flow_profile,
             delete_flow_profile,
+            open_flow_profile_browser,
+            refresh_flow_profile_status,
             start_flow_generation,
             get_flow_job_status,
             list_flow_jobs,

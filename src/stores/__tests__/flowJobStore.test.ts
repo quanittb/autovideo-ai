@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useFlowJobStore } from '../flowJobStore';
 import { flowApi } from '../../lib/ipc';
 
@@ -6,11 +6,9 @@ vi.mock('../../lib/ipc', () => ({
   flowApi: {
     listProfiles: vi.fn(),
     createProfile: vi.fn(),
-    deleteProfile: vi.fn(),
     getGeminiStatus: vi.fn(),
     startFlowGeneration: vi.fn(),
     getFlowJobStatus: vi.fn(),
-    listFlowJobs: vi.fn(),
   },
 }));
 
@@ -33,9 +31,8 @@ describe('flowJobStore', () => {
       {
         profileId: 'prof_1',
         name: 'Profile 1',
-        profileDir: '/data/prof_1',
+        status: 'READY',
         isLocked: false,
-        isAuthenticated: true,
         createdAt: '2026-08-21T00:00:00Z',
         updatedAt: '2026-08-21T00:00:00Z',
       },
@@ -53,9 +50,8 @@ describe('flowJobStore', () => {
     vi.mocked(flowApi.createProfile).mockResolvedValueOnce({
       profileId: 'prof_new',
       name: 'New Profile',
-      profileDir: '/data/prof_new',
+      status: 'LOGIN_REQUIRED',
       isLocked: false,
-      isAuthenticated: false,
       createdAt: '2026-08-21T00:00:00Z',
       updatedAt: '2026-08-21T00:00:00Z',
     });
@@ -81,6 +77,7 @@ describe('flowJobStore', () => {
       totalSegments: 2,
       estimatedCredits: 80,
       completedGenerations: 0,
+      finalOutputReady: false,
       timestamps: {
         createdAt: '2026-08-21T00:00:00Z',
         updatedAt: '2026-08-21T00:00:00Z',
@@ -94,7 +91,7 @@ describe('flowJobStore', () => {
         'prof_1',
         'A cybernetic cat jumping across rooftops',
         'USER',
-        '/path/video.mp4'
+        'video_001.mp4'
       );
 
     const state = useFlowJobStore.getState();
@@ -119,6 +116,7 @@ describe('flowJobStore', () => {
         totalSegments: 2,
         estimatedCredits: 80,
         completedGenerations: 0,
+        finalOutputReady: false,
         timestamps: {
           createdAt: '2026-08-21T00:00:00Z',
           updatedAt: '2026-08-21T00:00:00Z',
@@ -139,7 +137,7 @@ describe('flowJobStore', () => {
       totalSegments: 2,
       estimatedCredits: 80,
       completedGenerations: 2,
-      finalOutputPath: '/data/final.mp4',
+      finalOutputReady: true,
       timestamps: {
         createdAt: '2026-08-21T00:00:00Z',
         updatedAt: '2026-08-21T00:00:00Z',
@@ -151,6 +149,6 @@ describe('flowJobStore', () => {
     const state = useFlowJobStore.getState();
     expect(state.activeJob?.state).toBe('COMPLETED');
     expect(state.activeJob?.completedGenerations).toBe(2);
-    expect(state.activeJob?.finalOutputPath).toBe('/data/final.mp4');
+    expect(state.activeJob?.finalOutputReady).toBe(true);
   });
 });

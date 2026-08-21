@@ -1,13 +1,14 @@
 import React, { useState } from 'react';
-import { User, ShieldCheck, AlertCircle, Plus, Lock } from 'lucide-react';
-import { FlowProfileInfo } from '../../lib/ipc';
+import { User, ShieldCheck, AlertCircle, Plus, Lock, ExternalLink, RefreshCw } from 'lucide-react';
+import { FlowProfileSnapshot, flowApi } from '../../lib/ipc';
 
 interface FlowProfileSelectorProps {
-  profiles: FlowProfileInfo[];
+  profiles: FlowProfileSnapshot[];
   selectedProfileId: string | null;
   isLoading: boolean;
   onSelectProfile: (profileId: string) => void;
   onCreateProfile: (profileId: string, name: string) => Promise<void>;
+  onRefreshProfiles?: () => void;
 }
 
 export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
@@ -16,10 +17,14 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
   isLoading,
   onSelectProfile,
   onCreateProfile,
+  onRefreshProfiles,
 }) => {
   const [showCreate, setShowCreate] = useState(false);
   const [newProfileId, setNewProfileId] = useState('');
   const [newProfileName, setNewProfileName] = useState('');
+  const [isOpeningBrowser, setIsOpeningBrowser] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [actionFeedback, setActionFeedback] = useState<string | null>(null);
 
   const selected = profiles.find((p) => p.profileId === selectedProfileId);
 
@@ -35,6 +40,35 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
     setShowCreate(false);
   };
 
+  const handleOpenBrowser = async () => {
+    if (!selectedProfileId) return;
+    setIsOpeningBrowser(true);
+    setActionFeedback(null);
+    try {
+      await flowApi.openProfileBrowser(selectedProfileId);
+      setActionFeedback('Browser launched for manual login.');
+    } catch (err: any) {
+      setActionFeedback(`Failed: ${err?.message || String(err)}`);
+    } finally {
+      setIsOpeningBrowser(false);
+    }
+  };
+
+  const handleRefreshStatus = async () => {
+    if (!selectedProfileId) return;
+    setIsRefreshing(true);
+    setActionFeedback(null);
+    try {
+      const status = await flowApi.refreshProfileStatus(selectedProfileId);
+      setActionFeedback(`Profile Status: ${status}`);
+      if (onRefreshProfiles) onRefreshProfiles();
+    } catch (err: any) {
+      setActionFeedback(`Check failed: ${err?.message || String(err)}`);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-2 p-4 bg-slate-900/60 border border-slate-800 rounded-xl">
       <div className="flex items-center justify-between">
@@ -46,7 +80,7 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
         <button
           type="button"
           onClick={() => setShowCreate(!showCreate)}
-          className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-indigo-300 hover:text-white bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-700/50 rounded-lg transition"
+          className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-indigo-300 hover:text-white bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-700/50 rounded-lg transition cursor-pointer"
         >
           <Plus className="w-3 h-3" />
           New Profile
@@ -83,14 +117,14 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
             <button
               type="submit"
               disabled={!newProfileId.trim()}
-              className="px-3 py-1 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded"
+              className="px-3 py-1 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded cursor-pointer"
             >
               Save Profile
             </button>
           </div>
         </form>
       ) : (
-        <div className="flex items-center gap-3">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
           <select
             value={selectedProfileId || ''}
             onChange={(e) => onSelectProfile(e.target.value)}
@@ -109,26 +143,54 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
           </select>
 
           {selected && (
-            <div className="flex items-center gap-1.5 text-xs font-medium">
+            <div className="flex items-center gap-2 flex-wrap">
               {selected.isLocked ? (
-                <span className="flex items-center gap-1 px-2.5 py-1 bg-amber-950/60 border border-amber-600/40 text-amber-300 rounded-lg">
+                <span className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-amber-950/60 border border-amber-600/40 text-amber-300 rounded-lg">
                   <Lock className="w-3.5 h-3.5" />
                   In Use
                 </span>
-              ) : selected.isAuthenticated ? (
-                <span className="flex items-center gap-1 px-2.5 py-1 bg-emerald-950/60 border border-emerald-600/40 text-emerald-300 rounded-lg">
+              ) : selected.status === 'READY' ? (
+                <span className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-emerald-950/60 border border-emerald-600/40 text-emerald-300 rounded-lg">
                   <ShieldCheck className="w-3.5 h-3.5" />
                   Ready
                 </span>
               ) : (
-                <span className="flex items-center gap-1 px-2.5 py-1 bg-slate-800 border border-slate-700 text-slate-300 rounded-lg">
+                <span className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-slate-800 border border-slate-700 text-amber-300 rounded-lg">
                   <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
-                  Check Auth
+                  {selected.status || 'Login Required'}
                 </span>
               )}
+
+              <button
+                type="button"
+                onClick={handleOpenBrowser}
+                disabled={isOpeningBrowser || selected.isLocked}
+                className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-indigo-300 hover:text-white bg-indigo-950/40 hover:bg-indigo-900/60 border border-indigo-700/40 rounded-lg transition disabled:opacity-50 cursor-pointer"
+                title="Launch headed Chromium browser to log into Google Flow manually"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                {isOpeningBrowser ? 'Opening...' : 'Open Browser / Login'}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleRefreshStatus}
+                disabled={isRefreshing || selected.isLocked}
+                className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition disabled:opacity-50 cursor-pointer"
+                title="Check auth readiness against Google Flow"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+                Refresh
+              </button>
             </div>
           )}
         </div>
+      )}
+
+      {actionFeedback && (
+        <span className="text-[11px] text-indigo-300 bg-indigo-950/40 px-2 py-1 rounded border border-indigo-800/40">
+          {actionFeedback}
+        </span>
       )}
 
       <span className="text-[11px] text-slate-500">

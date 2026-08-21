@@ -92,10 +92,10 @@ export const FlowJobProgress: React.FC<FlowJobProgressProps> = ({ job }) => {
         </div>
       )}
 
-      {job.finalOutputPath && (
+      {job.finalOutputReady && (
         <div className="flex items-center gap-2 p-3 bg-emerald-950/40 border border-emerald-800/50 rounded-lg text-xs text-emerald-300">
           <Video className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span className="truncate">Final Video: {job.finalOutputPath}</span>
+          <span>Final Video Ready (Seamlessly stitched with preserved original audio)</span>
         </div>
       )}
     </div>

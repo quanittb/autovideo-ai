@@ -2302,7 +2302,7 @@ pub fn clear_gemini_api_key() -> Result<(), String> {
 }
 
 #[command]
-pub fn list_flow_profiles() -> Vec<crate::ai::flow::FlowProfileInfo> {
+pub fn list_flow_profiles() -> Vec<crate::ai::flow::FlowProfileSnapshot> {
     let manager = crate::ai::flow::FlowProfileManager::new(
         crate::system::StoragePaths::default_paths().app_data_dir,
     );
@@ -2313,7 +2313,7 @@ pub fn list_flow_profiles() -> Vec<crate::ai::flow::FlowProfileInfo> {
 pub fn create_flow_profile(
     profile_id: String,
     name: String,
-) -> Result<crate::ai::flow::FlowProfileInfo, String> {
+) -> Result<crate::ai::flow::FlowProfileSnapshot, String> {
     let manager = crate::ai::flow::FlowProfileManager::new(
         crate::system::StoragePaths::default_paths().app_data_dir,
     );
@@ -2329,14 +2329,54 @@ pub fn delete_flow_profile(profile_id: String) -> Result<(), String> {
 }
 
 #[command]
+pub async fn open_flow_profile_browser(profile_id: String) -> Result<String, String> {
+    let paths = crate::system::StoragePaths::default_paths();
+    let manager = crate::ai::flow::FlowProfileManager::new(paths.app_data_dir);
+    let profile_dir = manager.get_profile_dir(&profile_id)?;
+    let bridge = crate::ai::flow::PlaywrightBridge::new();
+    bridge.open_headed_browser_for_login(&profile_dir).await
+}
+
+#[command]
+pub async fn refresh_flow_profile_status(profile_id: String) -> Result<String, String> {
+    let paths = crate::system::StoragePaths::default_paths();
+    let manager = crate::ai::flow::FlowProfileManager::new(paths.app_data_dir);
+    let profile_dir = manager.get_profile_dir(&profile_id)?;
+    let bridge = crate::ai::flow::PlaywrightBridge::new();
+    let is_auth = bridge.check_auth_status(&profile_dir).await?;
+    if is_auth {
+        Ok("READY".to_string())
+    } else {
+        Ok("LOGIN_REQUIRED".to_string())
+    }
+}
+
+#[command]
 pub async fn start_flow_generation(
     project_id: String,
     profile_id: String,
     prompt: String,
     prompt_source: Option<crate::ai::flow::PromptSource>,
-    source_video_path: String,
+    source_media_id: String,
 ) -> Result<crate::ai::flow::FlowJobSnapshot, String> {
     let paths = crate::system::StoragePaths::default_paths();
+    let project_dir = paths.projects_dir.join(&project_id);
+    let media_root = project_dir.join("media");
+
+    let candidate = if std::path::Path::new(&source_media_id).is_absolute() {
+        PathBuf::from(&source_media_id)
+    } else {
+        media_root.join(&source_media_id)
+    };
+
+    let canonical_source =
+        crate::ai::flow::PlaywrightBridge::validate_path_confinement(&candidate, &media_root)
+            .map_err(|e| format!("SOURCE_MEDIA_UNAUTHORIZED: {}", e))?;
+
+    if !canonical_source.exists() {
+        return Err(format!("SOURCE_MEDIA_NOT_FOUND: {:?}", canonical_source));
+    }
+
     let orchestrator = crate::ai::flow::FlowOrchestrator::new(paths);
     orchestrator
         .start_flow_generation(
@@ -2344,7 +2384,7 @@ pub async fn start_flow_generation(
             profile_id,
             prompt,
             prompt_source,
-            PathBuf::from(source_video_path),
+            canonical_source,
         )
         .await
 }

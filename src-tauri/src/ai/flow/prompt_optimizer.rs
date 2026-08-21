@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+use std::sync::RwLock;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -70,8 +71,6 @@ pub fn calculate_prompt_hash(prompt: &str) -> String {
 // Concrete Cross-Platform Encrypted Secret Store (OS Credential Manager)
 // -----------------------------------------------------------------------------
 
-use std::sync::RwLock;
-
 static MEMORY_KEY_STORE: RwLock<Option<String>> = RwLock::new(None);
 
 #[derive(Debug, Clone)]
@@ -90,17 +89,7 @@ impl SecretStore {
     }
 
     pub fn get_gemini_api_key(&self) -> Option<String> {
-        // 1. In-memory runtime store
-        if let Ok(guard) = MEMORY_KEY_STORE.read() {
-            if let Some(ref k) = *guard {
-                let trimmed = k.trim().to_string();
-                if !trimmed.is_empty() {
-                    return Some(trimmed);
-                }
-            }
-        }
-
-        // 2. Try OS Credential Manager (Windows Credential Manager / macOS Keychain / Linux Secret Service)
+        // 1. Try OS Credential Manager (Windows Credential Manager / macOS Keychain / Linux Secret Service)
         if let Ok(entry) = keyring::Entry::new(Self::SERVICE_NAME, Self::GEMINI_KEY_NAME) {
             if let Ok(password) = entry.get_password() {
                 let trimmed = password.trim().to_string();
@@ -110,15 +99,26 @@ impl SecretStore {
             }
         }
 
-        // 3. DEV fallback only: check environment variable
-        std::env::var("GEMINI_API_KEY").ok().and_then(|k| {
-            let trimmed = k.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
+        // 2. In-memory runtime mirror (for dev/test)
+        if let Ok(guard) = MEMORY_KEY_STORE.read() {
+            if let Some(ref k) = *guard {
+                let trimmed = k.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
             }
-        })
+        }
+
+        // 3. DEV fallback only (debug builds or explicit dev environment variable)
+        #[cfg(debug_assertions)]
+        if let Ok(k) = std::env::var("GEMINI_API_KEY") {
+            let trimmed = k.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+
+        None
     }
 
     pub fn set_gemini_api_key(&self, key: &str) -> Result<(), String> {
@@ -127,12 +127,32 @@ impl SecretStore {
             return self.clear_gemini_api_key();
         }
 
-        // Attempt OS credential manager
-        if let Ok(entry) = keyring::Entry::new(Self::SERVICE_NAME, Self::GEMINI_KEY_NAME) {
-            let _ = entry.set_password(trimmed);
+        // 1. Attempt OS credential manager
+        let entry_res = keyring::Entry::new(Self::SERVICE_NAME, Self::GEMINI_KEY_NAME);
+        let os_result = match entry_res {
+            Ok(entry) => entry.set_password(trimmed),
+            Err(e) => Err(e),
+        };
+
+        if let Err(e) = os_result {
+            // Check if in test environment, allow in-memory store for sandboxed CI/tests
+            #[cfg(test)]
+            {
+                let _ = e;
+                if let Ok(mut guard) = MEMORY_KEY_STORE.write() {
+                    *guard = Some(trimmed.to_string());
+                }
+                return Ok(());
+            }
+
+            #[cfg(not(test))]
+            return Err(format!(
+                "SECURE_STORAGE_UNAVAILABLE: Failed to store key in OS credential manager: {}",
+                e
+            ));
         }
 
-        // Store in secure process memory without touching disk
+        // Mirror in process memory for session caching
         if let Ok(mut guard) = MEMORY_KEY_STORE.write() {
             *guard = Some(trimmed.to_string());
         }
@@ -252,15 +272,17 @@ Avoid commentary or conversational filler. Output ONLY the optimized prompt text
             }
         });
 
+        // Use standard URL without query token; pass token via x-goog-api-key header
         let endpoint = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.model, api_key
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            self.model
         );
 
         let response = self
             .client
             .post(&endpoint)
             .header("Content-Type", "application/json")
+            .header("x-goog-api-key", &api_key)
             .json(&payload)
             .send()
             .await
@@ -268,15 +290,14 @@ Avoid commentary or conversational filler. Output ONLY the optimized prompt text
 
         if !response.status().is_success() {
             let status = response.status();
-            let err_body = response.text().await.unwrap_or_default();
             if status.as_u16() == 429 {
                 return Err(
                     "PROMPT_OPTIMIZATION_FAILED: Gemini quota exceeded (rate limited)".to_string(),
                 );
             }
             return Err(format!(
-                "PROMPT_OPTIMIZATION_FAILED: Gemini API returned status {} ({})",
-                status, err_body
+                "PROMPT_OPTIMIZATION_FAILED: Gemini API returned status {}",
+                status
             ));
         }
 

@@ -265,6 +265,7 @@ describe('Frontend Prompt UX Behavioral Tests (Phase 20A)', () => {
       totalSegments: 1,
       estimatedCredits: 40,
       completedGenerations: 0,
+      finalOutputReady: false,
       timestamps: {
         createdAt: '2026-08-21T00:00:00Z',
         updatedAt: '2026-08-21T00:00:00Z',

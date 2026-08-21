@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Film, Play, Sparkles, AlertCircle, Info, RefreshCw } from 'lucide-react';
+import { Play, Sparkles, AlertCircle, Info, RefreshCw, Folder } from 'lucide-react';
 import { useFlowJobStore } from '../../stores/flowJobStore';
+import { useProjectStore } from '../../stores/projectStore';
 import { usePromptOptimization } from './usePromptOptimization';
 import { FlowPromptEditor } from './FlowPromptEditor';
 import { FlowProfileSelector } from './FlowProfileSelector';
@@ -23,8 +24,10 @@ export const FlowGenPanel: React.FC = () => {
     pollJobStatus,
   } = useFlowJobStore();
 
-  const [sourceVideoPath, setSourceVideoPath] = useState<string>('');
-  const [projectId] = useState<string>('default_project');
+  const { activeProject } = useProjectStore();
+
+  const projectId = activeProject?.id || '';
+  const [selectedMediaId, setSelectedMediaId] = useState<string>('');
 
   const {
     prompt,
@@ -46,9 +49,17 @@ export const FlowGenPanel: React.FC = () => {
     loadGeminiStatus();
   }, [loadProfiles, loadGeminiStatus]);
 
+  useEffect(() => {
+    if (activeProject?.sourceAsset?.id) {
+      setSelectedMediaId(activeProject.sourceAsset.id);
+    } else if (activeProject?.sourceMedia?.sourcePath) {
+      setSelectedMediaId(activeProject.sourceMedia.sourcePath);
+    }
+  }, [activeProject]);
+
   // Polling active job
   useEffect(() => {
-    if (!activeJob) return;
+    if (!activeJob || !projectId) return;
     if (
       activeJob.state === 'COMPLETED' ||
       activeJob.state === 'FAILED' ||
@@ -66,16 +77,19 @@ export const FlowGenPanel: React.FC = () => {
   }, [activeJob, projectId, pollJobStatus]);
 
   const handleStartGeneration = async () => {
-    if (!selectedProfileId || !prompt.trim() || !sourceVideoPath.trim()) return;
+    if (!projectId || !selectedProfileId || !prompt.trim() || !selectedMediaId.trim()) return;
 
     await startFlowJob(
       projectId,
       selectedProfileId,
       prompt.trim(),
       promptSource,
-      sourceVideoPath.trim()
+      selectedMediaId.trim()
     );
   };
+
+  const selectedProfile = profiles.find((p) => p.profileId === selectedProfileId);
+  const isProfileLocked = selectedProfile?.isLocked ?? false;
 
   return (
     <div className="flex flex-col gap-6 max-w-5xl mx-auto p-6 text-slate-100">
@@ -98,106 +112,100 @@ export const FlowGenPanel: React.FC = () => {
             loadProfiles();
             loadGeminiStatus();
           }}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200 bg-slate-900 border border-slate-800 rounded-lg hover:border-slate-700 transition"
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200 bg-slate-900 border border-slate-800 rounded-lg hover:border-slate-700 transition cursor-pointer"
         >
-          <RefreshCw className="w-3.5 h-3.5" />
-          Refresh
+          <RefreshCw className={`w-3.5 h-3.5 ${isLoadingProfiles ? 'animate-spin' : ''}`} />
+          Refresh Status
         </button>
       </div>
 
       {storeError && (
-        <div className="flex items-center gap-2 p-3 bg-rose-950/40 border border-rose-800/50 rounded-lg text-xs text-rose-300">
-          <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+        <div className="flex items-center gap-2 p-3 text-xs bg-red-500/10 border border-red-500/20 text-red-300 rounded-xl">
+          <AlertCircle className="w-4 h-4 shrink-0" />
           <span>{storeError}</span>
         </div>
       )}
 
-      {/* Grid configuration */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 flex flex-col gap-4">
-          {/* Source video selection */}
-          <div className="flex flex-col gap-2 p-4 bg-slate-900/60 border border-slate-800 rounded-xl">
-            <div className="flex items-center gap-2">
-              <Film className="w-4 h-4 text-indigo-400" />
-              <label className="text-sm font-semibold text-slate-200">Source Video Path</label>
-            </div>
-            <input
-              type="text"
-              placeholder="e.g. C:\Users\quant\Dropbox\PC\Downloads\video_test.mp4"
-              value={sourceVideoPath}
-              onChange={(e) => setSourceVideoPath(e.target.value)}
-              className="w-full px-3 py-2 text-sm text-slate-100 bg-slate-950/70 border border-slate-700 rounded-lg focus:outline-none focus:border-indigo-500 font-mono"
-            />
-            <span className="text-[11px] text-slate-500">
-              Source video audio is preserved and muxed once into final output during stitch.
-            </span>
+      {/* Profile Selector */}
+      <FlowProfileSelector
+        profiles={profiles}
+        selectedProfileId={selectedProfileId}
+        isLoading={isLoadingProfiles}
+        onSelectProfile={selectProfile}
+        onCreateProfile={createProfile}
+        onRefreshProfiles={loadProfiles}
+      />
+
+      {/* Project Source Media Confinement Section */}
+      <div className="flex flex-col gap-2 p-4 bg-slate-900/60 border border-slate-800 rounded-xl">
+        <div className="flex items-center gap-2">
+          <Folder className="w-4 h-4 text-indigo-400" />
+          <span className="text-sm font-semibold text-slate-200">Project Source Media</span>
+        </div>
+
+        {!activeProject ? (
+          <div className="p-3 bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs rounded-lg">
+            No active project loaded. Please open or create a project to select source video.
           </div>
-
-          {/* Prompt Editor */}
-          <FlowPromptEditor
-            prompt={prompt}
-            promptSource={promptSource}
-            isOptimizing={isOptimizing}
-            canUndo={canUndo}
-            optimizationError={optimizationError}
-            geminiConfigured={geminiStatus?.isConfigured}
-            onPromptChange={handlePromptChange}
-            onGenPrompt={handleGenPrompt}
-            onUndo={handleUndo}
-          />
-
-          {/* Generation Action */}
-          <button
-            type="button"
-            onClick={handleStartGeneration}
-            disabled={
-              isStarting ||
-              !selectedProfileId ||
-              !prompt.trim() ||
-              !sourceVideoPath.trim()
-            }
-            className="flex items-center justify-center gap-2 py-3 px-6 text-sm font-semibold text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl shadow-lg shadow-indigo-950/50 transition"
-          >
-            {isStarting ? (
-              <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-            ) : (
-              <Play className="w-4 h-4 fill-current" />
+        ) : (
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between text-xs text-slate-400">
+              <span>Active Project: <strong className="text-slate-200">{activeProject.name}</strong> ({activeProject.id})</span>
+              <span>Source Media: <strong className="text-slate-200">{selectedMediaId || 'No media imported'}</strong></span>
+            </div>
+            {!selectedMediaId && (
+              <span className="text-xs text-amber-400">
+                Please import a video into this project before starting Google Flow generation.
+              </span>
             )}
-            Start Google Flow Generation
-          </button>
-        </div>
-
-        {/* Right Sidebar: Profile & Capabilities */}
-        <div className="flex flex-col gap-4">
-          <FlowProfileSelector
-            profiles={profiles}
-            selectedProfileId={selectedProfileId}
-            isLoading={isLoadingProfiles}
-            onSelectProfile={selectProfile}
-            onCreateProfile={createProfile}
-          />
-
-          <div className="flex flex-col gap-2 p-4 bg-slate-900/60 border border-slate-800 rounded-xl text-xs">
-            <div className="flex items-center gap-1.5 font-semibold text-slate-200">
-              <Info className="w-4 h-4 text-indigo-400" />
-              Capability & Policy (v1)
-            </div>
-            <ul className="flex flex-col gap-1 text-slate-400">
-              <li>• Max Segment Duration: 10.0s</li>
-              <li>• Estimated Credits / Seg: 40 Flow Credits (Omni Edit)</li>
-              <li>• Output Format: MP4 (H.264 + AAC)</li>
-              <li>• Crash Guard: Pre-click persistence active</li>
-            </ul>
           </div>
-        </div>
+        )}
       </div>
 
-      {/* Active Job Progress Display */}
-      {activeJob && (
-        <div className="mt-2">
-          <FlowJobProgress job={activeJob} />
+      {/* Prompt Editor */}
+      <FlowPromptEditor
+        prompt={prompt}
+        promptSource={promptSource}
+        isOptimizing={isOptimizing}
+        geminiConfigured={geminiStatus?.isConfigured ?? false}
+        optimizationError={optimizationError}
+        canUndo={canUndo}
+        disabled={isStarting || (activeJob !== null && activeJob.state !== 'COMPLETED' && activeJob.state !== 'FAILED')}
+        onPromptChange={handlePromptChange}
+        onGenPrompt={handleGenPrompt}
+        onUndo={handleUndo}
+      />
+
+      {/* Execution Guard & Action */}
+      <div className="flex items-center justify-between p-4 bg-slate-900/40 border border-slate-800 rounded-xl">
+        <div className="flex items-center gap-2 text-xs text-slate-400">
+          <Info className="w-4 h-4 text-indigo-400 shrink-0" />
+          <span>
+            Contract: <strong>OmniEditUploadedVideo (40 credits / segment generation)</strong>. Sequential execution with zero automatic retries.
+          </span>
         </div>
-      )}
+
+        <button
+          type="button"
+          onClick={handleStartGeneration}
+          disabled={
+            !projectId ||
+            !selectedProfileId ||
+            isProfileLocked ||
+            !prompt.trim() ||
+            !selectedMediaId ||
+            isStarting ||
+            (activeJob !== null && activeJob.state !== 'COMPLETED' && activeJob.state !== 'FAILED')
+          }
+          className="flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl shadow-lg transition cursor-pointer"
+        >
+          <Play className="w-4 h-4 fill-white" />
+          {isStarting ? 'Initiating Pipeline...' : 'Start Google Flow Generation'}
+        </button>
+      </div>
+
+      {/* Active Job Progress */}
+      {activeJob && <FlowJobProgress job={activeJob} />}
     </div>
   );
 };

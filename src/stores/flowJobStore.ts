@@ -19,7 +19,7 @@ interface FlowJobStoreState {
     profileId: string,
     prompt: string,
     promptSource: PromptSource,
-    sourceVideoPath: string
+    sourceMediaId: string
   ) => Promise<void>;
   pollJobStatus: (projectId: string, parentId: string) => Promise<void>;
   clearError: () => void;
@@ -76,7 +76,7 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
     }
   },
 
-  startFlowJob: async (projectId, profileId, prompt, promptSource, sourceVideoPath) => {
+  startFlowJob: async (projectId, profileId, prompt, promptSource, sourceMediaId) => {
     set({ isStarting: true, error: null });
     try {
       const job = await flowApi.startFlowGeneration(
@@ -84,7 +84,7 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
         profileId,
         prompt,
         promptSource,
-        sourceVideoPath
+        sourceMediaId
       );
       set({ activeJob: job, isStarting: false });
     } catch (err: any) {

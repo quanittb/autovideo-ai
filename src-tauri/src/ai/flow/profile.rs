@@ -1,9 +1,19 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::fs;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::fs::{self, OpenOptions};
+use std::path::{Path, PathBuf};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowProfileSnapshot {
+    pub profile_id: String,
+    pub name: String,
+    pub status: String, // "READY" | "LOGIN_REQUIRED" | "UNKNOWN"
+    pub is_locked: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,35 +27,52 @@ pub struct FlowProfileInfo {
     pub updated_at: String,
 }
 
+impl FlowProfileInfo {
+    pub fn to_snapshot(&self) -> FlowProfileSnapshot {
+        FlowProfileSnapshot {
+            profile_id: self.profile_id.clone(),
+            name: self.name.clone(),
+            status: if self.is_authenticated {
+                "READY".to_string()
+            } else {
+                "LOGIN_REQUIRED".to_string()
+            },
+            is_locked: self.is_locked,
+            created_at: self.created_at.clone(),
+            updated_at: self.updated_at.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LockMetadata {
+    pid: u32,
+    instance_id: String,
+    locked_at: String,
+}
+
 #[derive(Debug)]
 pub struct FlowProfileGuard {
-    profile_id: String,
     lock_file: PathBuf,
-    manager_locks: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Drop for FlowProfileGuard {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.lock_file);
-        if let Ok(mut locks) = self.manager_locks.lock() {
-            locks.remove(&self.profile_id);
-        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct FlowProfileManager {
     base_dir: PathBuf,
-    active_locks: Arc<Mutex<HashSet<String>>>,
 }
 
 impl FlowProfileManager {
-    pub fn new(base_dir: PathBuf) -> Self {
-        let profiles_dir = base_dir.join("flow_profiles");
+    pub fn new(app_data_dir: PathBuf) -> Self {
+        let profiles_dir = app_data_dir.join("flow_profiles");
         let _ = fs::create_dir_all(&profiles_dir);
         Self {
             base_dir: profiles_dir,
-            active_locks: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -71,12 +98,29 @@ impl FlowProfileManager {
     pub fn get_profile_dir(&self, profile_id: &str) -> Result<PathBuf, String> {
         let clean_id = Self::sanitize_profile_id(profile_id)?;
         let target = self.base_dir.join(&clean_id);
-        Ok(target)
+
+        let canonical_base = fs::canonicalize(&self.base_dir)
+            .map_err(|e| format!("Invalid base profiles directory: {}", e))?;
+
+        if target.exists() {
+            let canonical_target = fs::canonicalize(&target)
+                .map_err(|e| format!("Invalid profile directory: {}", e))?;
+            if !canonical_target.starts_with(&canonical_base) {
+                return Err("SECURITY_VIOLATION: Profile directory escapes base".to_string());
+            }
+            Ok(canonical_target)
+        } else {
+            Ok(target)
+        }
     }
 
-    pub fn create_profile(&self, profile_id: &str, name: &str) -> Result<FlowProfileInfo, String> {
+    pub fn create_profile(
+        &self,
+        profile_id: &str,
+        name: &str,
+    ) -> Result<FlowProfileSnapshot, String> {
         let clean_id = Self::sanitize_profile_id(profile_id)?;
-        let target_dir = self.get_profile_dir(&clean_id)?;
+        let target_dir = self.base_dir.join(&clean_id);
         fs::create_dir_all(&target_dir)
             .map_err(|e| format!("Failed to create profile directory: {}", e))?;
 
@@ -98,97 +142,119 @@ impl FlowProfileManager {
 
         let json = serde_json::to_string_pretty(&info)
             .map_err(|e| format!("Serialization error: {}", e))?;
-        fs::write(&meta_file, json).map_err(|e| format!("Failed to write profile meta: {}", e))?;
+        fs::write(meta_file, json)
+            .map_err(|e| format!("Failed to write profile metadata: {}", e))?;
 
-        Ok(info)
+        Ok(info.to_snapshot())
     }
 
-    pub fn list_profiles(&self) -> Vec<FlowProfileInfo> {
-        let mut profiles = Vec::new();
+    pub fn list_profiles(&self) -> Vec<FlowProfileSnapshot> {
+        let mut out = Vec::new();
         if let Ok(entries) = fs::read_dir(&self.base_dir) {
             for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let meta_file = path.join("profile_meta.json");
+                let p = entry.path();
+                if p.is_dir() {
+                    let meta_file = p.join("profile_meta.json");
                     if meta_file.exists() {
-                        if let Ok(data) = fs::read_to_string(&meta_file) {
-                            if let Ok(mut info) = serde_json::from_str::<FlowProfileInfo>(&data) {
-                                if let Ok(locks) = self.active_locks.lock() {
-                                    info.is_locked = locks.contains(&info.profile_id);
-                                }
-                                profiles.push(info);
+                        if let Ok(content) = fs::read_to_string(&meta_file) {
+                            if let Ok(mut info) = serde_json::from_str::<FlowProfileInfo>(&content)
+                            {
+                                info.is_locked = p.join(".session.lock").exists();
+                                out.push(info.to_snapshot());
                             }
                         }
                     }
                 }
             }
         }
-        profiles
+        out
     }
 
-    pub fn try_lock_profile(&self, profile_id: &str) -> Result<FlowProfileGuard, String> {
-        let clean_id = Self::sanitize_profile_id(profile_id)?;
-        let target_dir = self.get_profile_dir(&clean_id)?;
-        if !target_dir.exists() {
+    pub fn acquire_session_lock(&self, profile_id: &str) -> Result<FlowProfileGuard, String> {
+        let profile_dir = self.get_profile_dir(profile_id)?;
+        if !profile_dir.exists() {
             return Err(format!(
                 "PROFILE_NOT_FOUND: Profile {} does not exist",
-                clean_id
+                profile_id
             ));
         }
 
-        let mut locks = self
-            .active_locks
-            .lock()
-            .map_err(|_| "Lock poisoned".to_string())?;
-        if locks.contains(&clean_id) {
-            return Err(format!(
-                "PROFILE_IN_USE: Profile {} is currently locked by another operation",
-                clean_id
-            ));
+        let lock_file = profile_dir.join(".session.lock");
+
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_file)
+        {
+            Ok(mut file) => {
+                let meta = LockMetadata {
+                    pid: std::process::id(),
+                    instance_id: Uuid::new_v4().to_string(),
+                    locked_at: Utc::now().to_rfc3339(),
+                };
+                let _ = serde_json::to_writer(&mut file, &meta);
+                Ok(FlowProfileGuard { lock_file })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if Self::is_lock_stale(&lock_file) {
+                    let _ = fs::remove_file(&lock_file);
+                    let mut file = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&lock_file)
+                        .map_err(|_| {
+                            "PROFILE_IN_USE: Profile is currently locked by another active session"
+                                .to_string()
+                        })?;
+                    let meta = LockMetadata {
+                        pid: std::process::id(),
+                        instance_id: Uuid::new_v4().to_string(),
+                        locked_at: Utc::now().to_rfc3339(),
+                    };
+                    let _ = serde_json::to_writer(&mut file, &meta);
+                    Ok(FlowProfileGuard { lock_file })
+                } else {
+                    Err(
+                        "PROFILE_IN_USE: Profile is currently locked by another active session"
+                            .to_string(),
+                    )
+                }
+            }
+            Err(e) => Err(format!("Failed to acquire profile lock: {}", e)),
         }
-
-        let lock_file = target_dir.join(".session.lock");
-        if lock_file.exists() {
-            // Check if stale lock file (older than 1 hour) or active
-            let _ = fs::remove_file(&lock_file);
-        }
-
-        fs::write(&lock_file, Utc::now().to_rfc3339().as_bytes())
-            .map_err(|e| format!("Failed to create lock file: {}", e))?;
-
-        locks.insert(clean_id.clone());
-
-        Ok(FlowProfileGuard {
-            profile_id: clean_id,
-            lock_file,
-            manager_locks: self.active_locks.clone(),
-        })
     }
 
-    pub fn delete_profile(
-        &self,
-        profile_id: &str,
-        is_referenced_by_jobs: bool,
-    ) -> Result<(), String> {
-        if is_referenced_by_jobs {
-            return Err(format!("PROFILE_IN_USE: Cannot delete profile {} because it is referenced by active Flow jobs", profile_id));
-        }
-
-        let clean_id = Self::sanitize_profile_id(profile_id)?;
-        if let Ok(locks) = self.active_locks.lock() {
-            if locks.contains(&clean_id) {
-                return Err(format!(
-                    "PROFILE_IN_USE: Cannot delete profile {} while it is currently locked",
-                    clean_id
-                ));
+    fn is_lock_stale(lock_file: &Path) -> bool {
+        if let Ok(content) = fs::read_to_string(lock_file) {
+            if let Ok(meta) = serde_json::from_str::<LockMetadata>(&content) {
+                // If the process that created the lock is our own PID and instance crashed/restarted
+                // or if the lock is very old (> 12 hours)
+                if let Ok(locked_time) = chrono::DateTime::parse_from_rfc3339(&meta.locked_at) {
+                    let age = Utc::now().signed_duration_since(locked_time);
+                    if age.num_hours() > 12 {
+                        return true;
+                    }
+                }
             }
         }
+        false
+    }
 
-        let target_dir = self.get_profile_dir(&clean_id)?;
-        if target_dir.exists() {
-            fs::remove_dir_all(&target_dir)
-                .map_err(|e| format!("Failed to remove profile directory: {}", e))?;
+    pub fn delete_profile(&self, profile_id: &str, force: bool) -> Result<(), String> {
+        let profile_dir = self.get_profile_dir(profile_id)?;
+        if !profile_dir.exists() {
+            return Ok(());
         }
+
+        let lock_file = profile_dir.join(".session.lock");
+        if lock_file.exists() && !force {
+            return Err(
+                "PROFILE_LOCKED: Cannot delete profile currently in active use".to_string(),
+            );
+        }
+
+        fs::remove_dir_all(&profile_dir)
+            .map_err(|e| format!("Failed to delete profile directory: {}", e))?;
         Ok(())
     }
 }

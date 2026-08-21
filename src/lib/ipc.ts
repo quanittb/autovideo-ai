@@ -1031,15 +1031,16 @@ export interface GeminiStatusResponse {
   model: string;
 }
 
-export interface FlowProfileInfo {
+export interface FlowProfileSnapshot {
   profileId: string;
   name: string;
-  profileDir: string;
+  status: string; // "READY" | "LOGIN_REQUIRED" | "UNKNOWN"
   isLocked: boolean;
-  isAuthenticated: boolean;
   createdAt: string;
   updatedAt: string;
 }
+
+export type FlowProfileInfo = FlowProfileSnapshot;
 
 export interface FlowJobSnapshot {
   parentId: string;
@@ -1055,7 +1056,7 @@ export interface FlowJobSnapshot {
   estimatedCredits: number;
   observedCreditBalance?: number;
   completedGenerations: number;
-  finalOutputPath?: string;
+  finalOutputReady: boolean;
   errorMessage?: string;
   timestamps: {
     createdAt: string;
@@ -1078,28 +1079,34 @@ export const flowApi = {
   clearGeminiApiKey: (): Promise<void> =>
     invoke('clear_gemini_api_key'),
 
-  listProfiles: (): Promise<FlowProfileInfo[]> =>
+  listProfiles: (): Promise<FlowProfileSnapshot[]> =>
     invoke('list_flow_profiles'),
 
-  createProfile: (profileId: string, name: string): Promise<FlowProfileInfo> =>
+  createProfile: (profileId: string, name: string): Promise<FlowProfileSnapshot> =>
     invoke('create_flow_profile', { profileId, name }),
 
   deleteProfile: (profileId: string): Promise<void> =>
     invoke('delete_flow_profile', { profileId }),
+
+  openProfileBrowser: (profileId: string): Promise<string> =>
+    invoke('open_flow_profile_browser', { profileId }),
+
+  refreshProfileStatus: (profileId: string): Promise<string> =>
+    invoke('refresh_flow_profile_status', { profileId }),
 
   startFlowGeneration: (
     projectId: string,
     profileId: string,
     prompt: string,
     promptSource?: PromptSource,
-    sourceVideoPath?: string
+    sourceMediaId?: string
   ): Promise<FlowJobSnapshot> =>
     invoke('start_flow_generation', {
       projectId,
       profileId,
       prompt,
       promptSource,
-      sourceVideoPath,
+      sourceMediaId,
     }),
 
   getFlowJobStatus: (projectId: string, parentId: string): Promise<FlowJobSnapshot> =>

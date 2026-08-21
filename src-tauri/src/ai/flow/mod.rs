@@ -22,7 +22,7 @@ pub use mock_flow_server::{MockFlowServer, MockFlowServerHandle, MockScenario};
 pub use orchestrator::FlowOrchestrator;
 pub use output_validator::FlowOutputValidator;
 pub use playwright_bridge::{FlowPollResult, PlaywrightBridge};
-pub use profile::{FlowProfileGuard, FlowProfileInfo, FlowProfileManager};
+pub use profile::{FlowProfileGuard, FlowProfileInfo, FlowProfileManager, FlowProfileSnapshot};
 pub use prompt_optimizer::{
     calculate_prompt_hash, GeminiPromptOptimizer, GeminiStatusResponse, OptimizePromptRequest,
     OptimizePromptResponse, PromptSource, SecretStore,
