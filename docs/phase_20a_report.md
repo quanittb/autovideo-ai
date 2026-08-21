@@ -9,26 +9,49 @@
 
 ## 1. Mục Tiêu & Phạm Vi Triển Khai (Phase 20A)
 
-Triển khai hoàn chỉnh hệ thống **Google Flow Browser Driver & Gemini Prompt Refinement** theo tiêu chuẩn 12 điểm Delta Correction và Final Acceptance Micro-Fix:
-1. **Flow Credit Policy Authority**:
-   - `OMNI_EDIT_UPLOADED_VIDEO_CREDITS_PER_GENERATION = 40` (Gemini Omni Flash Edit Uploaded Video).
-   - Mode authority phân định rõ ràng `FlowGenerationMode::OmniVideoGenerate` (20 credits) vs `FlowGenerationMode::OmniEditUploadedVideo` (40 credits).
-   - Công thức dự toán chính xác: `estimatedCredits = segmentCount * outputsPerGeneration * creditsPerGeneration` (ví dụ: 5 segments = 200 credits).
-2. **10-Second Video Edit Limit & Largest Legal Split**:
-   - Phân đoạn video chính xác theo frame CFR (tối đa $\le 10.0s$ mỗi segment), bảo toàn luồng âm thanh gốc AAC trong các input segment tải lên Flow.
-   - Mux âm thanh gốc duy nhất 1 lần khi ghép nối đầu ra cuối cùng, loại bỏ toàn bộ child audio sinh bởi Flow để bảo đảm tính toàn vẹn âm thanh gốc.
-3. **OS-Protected SecretStore Credential Security**:
-   - Lưu trữ Gemini API key an toàn qua OS Credential Manager (Windows Credential Manager / macOS Keychain / Linux Secret Service) qua crate `keyring`.
-   - Cơ chế fallback `GEMINI_API_KEY` chỉ dành cho môi trường DEV. Tuyệt đối không ghi file plaintext lên đĩa hoặc rò rỉ token vào log, DTO, Tauri events hay manifests.
+Triển khai hoàn chỉnh hệ thống **Google Flow Browser Driver & Gemini Prompt Refinement** theo tiêu chuẩn 19 điểm Behavioral & Acceptance Corrections:
+
+1. **Wire Rust -> Real Node Playwright Sidecar Process**:
+   - Giao thức chuẩn line-delimited JSON-RPC qua `stdin`/`stdout` giữa tiến trình Rust và tiến trình con Node Playwright (`src-tauri/sidecars/flow-playwright/dist/index.js`).
+   - Quản lý lifecycle đầy đủ: spawn, call RPC với request ID, timeout, stderr sanitization, graceful close, và process crash detection.
+   - Mock mode kích hoạt trình duyệt Chromium thật điều khiển bởi Playwright để tương tác trực tiếp với `MockFlowServer` cục bộ.
+
+2. **Real Mock Playwright Chromium E2E Verification**:
+   - Test `test_phase20a_38_real_mock_playwright_chromium_e2e` khởi động `MockFlowServer` cục bộ, tạo profile Chromium tạm thời, spawn Node sidecar, khởi chạy Chromium thật, điều hướng tới Mock Flow, tải tệp MP4 tổng hợp, điền prompt, click Generate thật đúng 1 lần (xác thực qua counter), poll tiến độ, tải video đầu ra và xác thực tệp tải về thành công.
+
+3. **Fail-Closed Flow UI Adapter**:
+   - Bắt lỗi nghiêm ngặt khi thiếu selector: `FLOW_UI_CHANGED: prompt textarea missing`, `FLOW_UI_CHANGED: file input missing`, `FLOW_UI_CHANGED: generate button missing/disabled`.
+   - Lưu trữ bằng chứng sinh video ngữ nghĩa (`localSubmissionAttemptId`, page fingerprint, post-click state transition, `submittedAt`).
+   - Loại bỏ cờ stealth `--disable-blink-features=AutomationControlled`.
+   - `checkAuthStatus` chỉ trả về `READY`, `LOGIN_REQUIRED`, `UNKNOWN` (UNKNOWN kích hoạt fail-closed).
+
 4. **Crash-Safe Pre-Click State Machine & Ambiguous Recovery**:
-   - Chuyển trạng thái `AttemptPersisted` xuống đĩa trước khi bấm nút Generate trên browser.
-   - Chuyển `GenerationAmbiguous` nếu xảy ra sự cố trong cửa sổ gửi lệnh; tuân thủ nghiêm ngặt quy tắc **ZERO automatic resubmit**.
-5. **Node/TypeScript Playwright Sidecar**:
-   - Sidecar độc lập tại `src-tauri/sidecars/flow-playwright` biên dịch độc lập qua `npm run build` (tsc) với 0 lỗi.
-   - Xử lý 10 kịch bản mock: `READY`, `LOGGED_OUT`, `CREDITS_REQUIRED`, `GENERATION_PENDING`, `GENERATION_COMPLETE`, `GENERATION_ERROR`, `UI_CHANGED`, `CORRUPT_DOWNLOAD`, `WRONG_DOWNLOAD`, `DELAY_AFTER_GENERATE_CLICK`.
-6. **Frontend Studio & Prompt UX Suite**:
-   - Giao diện React `FlowGenPanel` tích hợp `FlowPromptEditor`, `FlowProfileSelector`, `FlowJobProgress`.
-   - 12 hành vi UX cốt lõi (debounce, double-click guard, stale response protection, undo stack, provenance transition) được kiểm thử toàn diện với 100% test pass.
+   - Trước khi thực hiện bất kỳ submit nào: kiểm tra `child.submission_state`.
+   - `NEVER_ATTEMPTED`: ghi `ATTEMPT_PERSISTED` xuống đĩa -> thực hiện submit đúng 1 lần.
+   - `ATTEMPT_PERSISTED` / `AMBIGUOUS`: **ZERO automatic resubmit**, chuyển trạng thái `GENERATION_AMBIGUOUS` yêu cầu người dùng xác nhận hoặc đối soát UI.
+   - `PROVEN_SUBMITTED`: **ZERO resubmit**, tiếp tục poll bằng `submission_evidence` đã lưu.
+   - `PROVEN_COMPLETED`: tái sử dụng artifact đã qua validation, **ZERO resubmit**.
+   - Test `test_phase20a_34_restart_recovery_zero_additional_generate_clicks` xác thực số lần click Generate giữ nguyên đúng 0 lần click mới sau sự cố.
+
+5. **Cross-Instance Atomic Profile File Lock**:
+   - Cơ chế khóa file `.session.lock` đa tiến trình/đa instance sử dụng `create_new(true)`.
+   - Instance thứ 2 cố truy cập profile đang chạy lập tức nhận lỗi `PROFILE_IN_USE`.
+
+6. **Source Media & Path Confinement**:
+   - Backend chuẩn hóa và kiểm tra đường dẫn canonical `candidate.starts_with(canonical_root)`.
+   - Lệnh `start_flow_generation` ràng buộc source video từ thư mục media của dự án `<project>/media/`, loại bỏ ô nhập đường dẫn tự do trên giao diện.
+
+7. **Fail-Closed SecretStore & Gemini Header Authentication**:
+   - Lưu trữ Gemini API key vào OS Credential Manager (Windows Credential Manager / macOS Keychain / Linux Secret Service).
+   - Gọi Gemini API qua header `x-goog-api-key` (không đưa key vào URL query parameter).
+   - Sanitize toàn bộ lỗi mạng từ Gemini, không bao giờ serialize authorization header hoặc api key ra log hay UI.
+
+8. **Sanitized Public DTO Snapshots**:
+   - `FlowProfileSnapshot`: `{ profileId, name, status, isLocked, createdAt, updatedAt }` (loại bỏ `profile_dir`).
+   - `FlowJobSnapshot`: `{ ... finalOutputReady: bool ... }` (loại bỏ `final_output_path` đường dẫn thô).
+
+9. **Flow Credit Policy Authority**:
+   - `OMNI_EDIT_UPLOADED_VIDEO_CREDITS_PER_GENERATION = 40` (40 credits / segment generation, 0 automatic retries).
 
 ---
 
@@ -36,8 +59,7 @@ Triển khai hoàn chỉnh hệ thống **Google Flow Browser Driver & Gemini Pr
 
 | Tiêu chí / Acceptance Flag | Giá trị công bố | Ghi chú |
 | :--- | :---: | :--- |
-| **OMNI_EDIT_UPLOADED_VIDEO_CREDITS_PER_GENERATION** | **40** | Chuẩn contract Flow Video Edit |
-| **MOCK_PLAYWRIGHT_CHROMIUM_VERIFIED** | **YES** | Đã xác thực qua mock server & sidecar |
+| **MOCK_PLAYWRIGHT_CHROMIUM_VERIFIED** | **YES** | Đã xác thực qua Real Sidecar + Real Playwright + Real Chromium + Local Mock Server |
 | **FLOW_REAL_BROWSER_VERIFIED** | **NO** | Chưa kết nối live Google Flow (tuân thủ Phase 20A mock scope) |
 | **FLOW_REAL_GENERATION_VERIFIED** | **NO** | Chưa sinh video thật trên Google Flow |
 | **PREVIEW_RUNTIME_VERIFIED** | **NO** | Kế thừa từ Phase 19 |
@@ -68,24 +90,24 @@ Exit code: 0
 > tsc && vite build
 vite v7.3.6 building client environment for production...
 ✓ 1865 modules transformed.
-dist/index.html                   0.49 kB │ gzip:   0.32 kB
-dist/assets/index-B59G3199.css   93.23 kB │ gzip:  12.92 kB
-dist/assets/window-Ajdedgbu.js   13.92 kB │ gzip:   3.43 kB
-dist/assets/index-C6It6p1Z.js   489.71 kB │ gzip: 123.25 kB
-✓ built in 5.86s
+dist/index.html                   0.49 kB │ gzip:   0.31 kB
+dist/assets/index-C8VDbSTs.css   94.71 kB │ gzip:  13.06 kB
+dist/assets/window-DlQUgftK.js   13.92 kB │ gzip:   3.43 kB
+dist/assets/index-JklCOE5h.js   495.35 kB │ gzip: 124.64 kB
+✓ built in 6.07s
 ```
 **Kết quả**: ✅ **0 lỗi TypeScript, 0 lỗi Vite bundle.**
 
 ### 3.3. Frontend Vitest Tests (`npm test -- --run`)
 ```text
- ✓ src/stores/__tests__/cloudJobStore.test.ts (12 tests) 8ms
+ ✓ src/stores/__tests__/cloudJobStore.test.ts (12 tests) 6ms
  ✓ src/stores/__tests__/segmentedCloudJobStore.test.ts (8 tests) 6ms
- ✓ src/stores/__tests__/flowJobStore.test.ts (4 tests) 8ms
- ✓ src/features/flow/__tests__/flowPromptUx.test.ts (12 tests) 11ms
+ ✓ src/stores/__tests__/flowJobStore.test.ts (4 tests) 5ms
+ ✓ src/features/flow/__tests__/flowPromptUx.test.ts (12 tests) 10ms
 
  Test Files  4 passed (4)
       Tests  36 passed (36)
-   Duration  363ms
+   Duration  340ms
 ```
 **Kết quả**: ✅ **4 test files, 36/36 tests PASSED (100%).**
 
@@ -99,13 +121,16 @@ Exit code: 0
 ### 3.5. Rust Type Check (`cargo check --all-targets`)
 ```text
 cargo check --all-targets --manifest-path src-tauri/Cargo.toml
-Finished `dev` profile in 36.97s
+Finished `dev` profile in 10.03s
 Exit code: 0
 ```
 **Kết quả**: ✅ **0 compile errors, 0 warnings.**
 
 ### 3.6. Rust Test Regression Suites (Serial Execution)
 - `cargo test --lib -- tests_phase20a`: **44/44 passed (100%)**
+  - Bao gồm `test_phase20a_38_real_mock_playwright_chromium_e2e` với real Chromium execution.
+  - Bao gồm `test_phase20a_34_restart_recovery_zero_additional_generate_clicks` với crash window assertion.
+  - Bao gồm `test_phase20a_28_same_profile_concurrency_lock` cross-instance file lock.
 - `cargo test --lib -- tests_phase19`: **29/29 passed (100%)**
 - `cargo test --lib -- tests_phase18`: **13/13 passed (100%)**
 - `cargo test --lib -- tests_phase17`: **56/56 passed (100%)**
@@ -118,49 +143,8 @@ Exit code: 0
 
 ---
 
-## 4. Danh Sách Tệp Đã Thay Đổi / Bổ Sung Trong Phase 20A
-
-### Backend (`src-tauri`):
-- `src-tauri/Cargo.toml`: Thêm dependency `keyring = "3"`.
-- `src-tauri/src/ai/flow/mod.rs`: Re-export các kiểu dữ liệu và policy authority.
-- `src-tauri/src/ai/flow/capability.rs`: `FlowCapabilityPolicy` (40 credits / gen), `FlowGenerationMode`.
-- `src-tauri/src/ai/flow/prompt_optimizer.rs`: Gemini client và `SecretStore` kết nối OS credential store.
-- `src-tauri/src/ai/flow/manifest.rs`: Schema 21-state machine và DTOs.
-- `src-tauri/src/ai/flow/profile.rs`: Chrome profile manager và session concurrency lock.
-- `src-tauri/src/ai/flow/segment.rs`: Largest legal 10s video segmenter và AAC source audio preservation.
-- `src-tauri/src/ai/flow/playwright_bridge.rs`: RPC bridge và URL/path validation.
-- `src-tauri/src/ai/flow/mock_flow_server.rs`: Mock HTTP server hỗ trợ 10 scenarios.
-- `src-tauri/src/ai/flow/output_validator.rs`: Video probe và duration drift validator.
-- `src-tauri/src/ai/flow/stitcher.rs`: Segment concat và single audio muxer.
-- `src-tauri/src/ai/flow/store.rs`: Atomic CAS manifest storage.
-- `src-tauri/src/ai/flow/orchestrator.rs`: Crash-safe orchestrator worker.
-- `src-tauri/src/commands/mod.rs` & `src-tauri/src/lib.rs`: 9 Flow Tauri IPC commands.
-- `src-tauri/src/ai/tests_phase20a/*`: 4 sub-modules test suite (44 tests).
-
-### Sidecar (`flow-playwright`):
-- `src-tauri/sidecars/flow-playwright/package.json`
-- `src-tauri/sidecars/flow-playwright/tsconfig.json`
-- `src-tauri/sidecars/flow-playwright/src/flow_adapter.ts`
-- `src-tauri/sidecars/flow-playwright/src/bridge.ts`
-- `src-tauri/sidecars/flow-playwright/src/index.ts`
-
-### Frontend (`src`):
-- `src/types/index.ts`: Bổ sung tab `'flow'`.
-- `src/lib/ipc.ts`: Flow API IPC contracts.
-- `src/features/flow/usePromptOptimization.ts`: Prompt hook và undo stack.
-- `src/stores/flowJobStore.ts`: Zustand store.
-- `src/features/flow/FlowPromptEditor.tsx`: Editor UI.
-- `src/features/flow/FlowProfileSelector.tsx`: Profile selector UI.
-- `src/features/flow/FlowJobProgress.tsx`: 21-state progress visualizer.
-- `src/features/flow/FlowGenPanel.tsx`: Flow Gen Studio Panel (cập nhật 40 credits).
-- `src/components/layout/Sidebar.tsx` & `src/app/App.tsx`: Navigation & routing.
-- `src/stores/__tests__/flowJobStore.test.ts`: Store unit tests.
-- `src/features/flow/__tests__/flowPromptUx.test.ts`: 12 UX behavioral tests.
-
----
-
-## 5. Hạn Chế Còn Lại & Khuyến Nghị Tiếp Theo
+## 4. Hạn Chế Còn Lại & Khuyến Nghị Tiếp Theo
 
 1. Chưa thực hiện live authentication hoặc live video generation trên hạ tầng Google Flow thật.
-2. Quá trình ghép nối video và chất lượng hình ảnh ở ranh giới segment (`FLOW_SEGMENT_BOUNDARY_VISUAL_QUALITY`) sẽ cần được kiểm chứng khi thực hiện các phase live tiếp theo.
-3. Hoàn tất toàn bộ Phase 20A và **DỪNG LẠI**, không bắt đầu Phase 20B khi chưa có chỉ thị.
+2. Quá trình ghép nối video và chất lượng hình ảnh ở ranh giới segment (`FLOW_SEGMENT_BOUNDARY_VISUAL_QUALITY`) sẽ được kiểm chứng khi kết nối live Google Flow trong các phase tiếp theo.
+3. Hoàn tất toàn bộ Phase 20A và **DỪNG LẠI**, tuyệt đối không bắt đầu Phase 20B khi chưa có chỉ thị.
