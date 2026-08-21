@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::Arc;
-use tauri::{command, AppHandle, Emitter};
+use tauri::{command, AppHandle, Emitter, Manager};
 
 use crate::ai::generative::backend::GenerativeBackend;
 use crate::ai::runtime::AiRuntime;
@@ -1747,4 +1748,340 @@ pub async fn cancel_cloud_generation(
     }
 
     Err("JOB_NOT_FOUND: Cannot cancel unknown cloud job".to_string())
+}
+
+#[command]
+pub fn preflight_cloud_transformation(
+    request: crate::ai::cloud::CloudJobRequest,
+    max_cost: Option<f64>,
+) -> Result<crate::ai::cloud::CloudSubmissionPreflight, String> {
+    let registry = crate::ai::cloud::ProviderRegistry::new();
+    let eval = crate::ai::cloud::evaluate_cloud_submission_preflight(&request, max_cost, &registry)
+        .map_err(|e| format!("{}", e))?;
+    Ok(crate::ai::cloud::CloudSubmissionPreflight {
+        task_class: eval.task_class,
+        routing_decision: eval.routing_decision,
+        source_facts: eval.source_facts,
+        budget_limit: eval.budget_limit,
+        budget_approved: eval.budget_approved,
+        submittable: eval.submittable,
+        blocking_code: eval.blocking_code,
+    })
+}
+
+#[command]
+pub async fn start_cloud_transformation(
+    request: crate::ai::cloud::CloudJobRequest,
+    max_cost: Option<f64>,
+    lifecycle: tauri::State<'_, Arc<crate::ai::cloud::CloudJobLifecycleService>>,
+) -> Result<crate::ai::cloud::CloudJobEventPayload, String> {
+    let service = lifecycle.inner().clone();
+    let job = service
+        .start_cloud_generation(request, max_cost)
+        .await
+        .map_err(|e| format!("{}", e))?;
+    Ok(job.to_event_payload())
+}
+
+#[command]
+pub fn list_cloud_jobs(
+    project_id: String,
+    lifecycle: tauri::State<'_, Arc<crate::ai::cloud::CloudJobLifecycleService>>,
+) -> Result<Vec<crate::ai::cloud::CloudJobEventPayload>, String> {
+    let store = lifecycle.store();
+    let jobs = store
+        .list_jobs_in_project(&project_id)
+        .map_err(|e| format!("{}", e))?;
+    Ok(jobs.into_iter().map(|j| j.to_event_payload()).collect())
+}
+
+#[command]
+pub fn authorize_preview_asset(
+    project_id: String,
+    asset_kind: crate::ai::cloud::PreviewAssetKind,
+    internal_job_id: Option<String>,
+    app: AppHandle,
+    lifecycle: tauri::State<'_, Arc<crate::ai::cloud::CloudJobLifecycleService>>,
+) -> Result<crate::ai::cloud::AuthorizedAssetPreview, String> {
+    crate::ai::cloud::validate_identifier(&project_id, "projectId")
+        .map_err(|e| format!("{}", e))?;
+
+    match asset_kind {
+        crate::ai::cloud::PreviewAssetKind::ProjectSource => {
+            let manager = ProjectManager::new(StoragePaths::default_paths());
+            let project = manager
+                .get_project(&project_id)
+                .map_err(|e| format!("{}", e))?;
+            let source_media = project.source_media.ok_or_else(|| {
+                "PROJECT_HAS_NO_SOURCE_MEDIA: Project does not have imported source media"
+                    .to_string()
+            })?;
+
+            let raw_path = PathBuf::from(&source_media.source_path);
+            let candidate = if raw_path.is_file() {
+                raw_path
+            } else {
+                let fallback = StoragePaths::default_paths()
+                    .projects_dir
+                    .join(&project_id)
+                    .join("media")
+                    .join(&source_media.original_file_name);
+                if fallback.is_file() {
+                    fallback
+                } else {
+                    return Err(format!(
+                        "SOURCE_FILE_NOT_FOUND: Source media file could not be found at {}",
+                        source_media.source_path.display()
+                    ));
+                }
+            };
+
+            let canonical_file = candidate
+                .canonicalize()
+                .map_err(|e| format!("CANONICALIZE_FAILED: {}", e))?;
+            let project_dir = StoragePaths::default_paths().projects_dir.join(&project_id);
+            let canonical_project_dir = project_dir
+                .canonicalize()
+                .map_err(|e| format!("PROJECT_DIR_NOT_FOUND: {}", e))?;
+
+            if !canonical_file.starts_with(&canonical_project_dir) {
+                return Err(
+                    "SECURITY_VIOLATION: Source media file is not inside project directory"
+                        .to_string(),
+                );
+            }
+            if !canonical_file.is_file() {
+                return Err("INVALID_TARGET: Source media path is not a regular file".to_string());
+            }
+
+            let _ = app.asset_protocol_scope().allow_file(&canonical_file);
+
+            Ok(crate::ai::cloud::AuthorizedAssetPreview {
+                local_path: canonical_file.to_string_lossy().to_string(),
+                container: source_media.container,
+                video_codec: source_media.video_codec,
+                alpha_validated: false,
+                audio_required: false,
+                actual_has_audio: Some(source_media.has_audio),
+            })
+        }
+        crate::ai::cloud::PreviewAssetKind::CloudArtifact => {
+            let jid = internal_job_id.ok_or_else(|| {
+                "INTERNAL_JOB_ID_REQUIRED: internal_job_id is required for CloudArtifact preview"
+                    .to_string()
+            })?;
+            crate::ai::cloud::validate_identifier(&jid, "internalJobId")
+                .map_err(|e| format!("{}", e))?;
+
+            let job = lifecycle
+                .store()
+                .load_job(&project_id, &jid)
+                .map_err(|e| format!("{}", e))?;
+
+            if job.state != crate::ai::cloud::CloudJobState::Completed {
+                return Err(format!(
+                    "PREVIEW_NOT_ELIGIBLE: Cloud job {} is in state {:?}, completed state required for preview",
+                    jid, job.state
+                ));
+            }
+
+            let final_path = job.output.final_path.ok_or_else(|| {
+                "NO_FINAL_PATH: Job output has no final artifact path".to_string()
+            })?;
+
+            if !final_path.is_file() {
+                return Err(format!(
+                    "ARTIFACT_NOT_FOUND: Artifact file does not exist at {}",
+                    final_path.display()
+                ));
+            }
+
+            let canonical_file = final_path
+                .canonicalize()
+                .map_err(|e| format!("CANONICALIZE_FAILED: {}", e))?;
+            let artifacts_root = lifecycle
+                .store()
+                .project_cloud_jobs_dir(&project_id)
+                .map_err(|e| format!("{}", e))?;
+            let canonical_artifacts_root = artifacts_root
+                .canonicalize()
+                .map_err(|e| format!("ARTIFACTS_ROOT_NOT_FOUND: {}", e))?;
+
+            if !canonical_file.starts_with(&canonical_artifacts_root) {
+                return Err(
+                    "SECURITY_VIOLATION: Artifact file is outside project cloud artifacts directory"
+                        .to_string(),
+                );
+            }
+
+            let _ = app.asset_protocol_scope().allow_file(&canonical_file);
+
+            let (container, video_codec, alpha_val, audio_req) = match &job.artifact_descriptor {
+                Some(desc) => (
+                    desc.container.extension().to_string(),
+                    match desc.video_codec {
+                        crate::ai::cloud::ArtifactVideoCodec::H264 => "h264".to_string(),
+                        crate::ai::cloud::ArtifactVideoCodec::Vp9 => "vp9".to_string(),
+                    },
+                    desc.require_alpha && job.state == crate::ai::cloud::CloudJobState::Completed,
+                    desc.require_audio,
+                ),
+                None => ("mp4".to_string(), "h264".to_string(), false, false),
+            };
+
+            Ok(crate::ai::cloud::AuthorizedAssetPreview {
+                local_path: canonical_file.to_string_lossy().to_string(),
+                container,
+                video_codec,
+                alpha_validated: alpha_val,
+                audio_required: audio_req,
+                actual_has_audio: None,
+            })
+        }
+    }
+}
+
+#[command]
+pub fn revoke_preview_asset(
+    project_id: String,
+    asset_kind: crate::ai::cloud::PreviewAssetKind,
+    internal_job_id: Option<String>,
+    app: AppHandle,
+    lifecycle: tauri::State<'_, Arc<crate::ai::cloud::CloudJobLifecycleService>>,
+) -> Result<(), String> {
+    crate::ai::cloud::validate_identifier(&project_id, "projectId")
+        .map_err(|e| format!("{}", e))?;
+
+    match asset_kind {
+        crate::ai::cloud::PreviewAssetKind::ProjectSource => {
+            let manager = ProjectManager::new(StoragePaths::default_paths());
+            if let Ok(project) = manager.get_project(&project_id) {
+                if let Some(source_media) = project.source_media {
+                    let raw_path = PathBuf::from(&source_media.source_path);
+                    if let Ok(canonical) = raw_path.canonicalize() {
+                        let _ = app.asset_protocol_scope().forbid_file(&canonical);
+                    }
+                }
+            }
+        }
+        crate::ai::cloud::PreviewAssetKind::CloudArtifact => {
+            if let Some(ref jid) = internal_job_id {
+                if crate::ai::cloud::validate_identifier(jid, "internalJobId").is_ok() {
+                    if let Ok(job) = lifecycle.store().load_job(&project_id, jid) {
+                        if let Some(final_path) = job.output.final_path {
+                            if let Ok(canonical) = final_path.canonicalize() {
+                                let _ = app.asset_protocol_scope().forbid_file(&canonical);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[command]
+pub fn open_cloud_artifact(
+    project_id: String,
+    internal_job_id: String,
+    lifecycle: tauri::State<'_, Arc<crate::ai::cloud::CloudJobLifecycleService>>,
+) -> Result<(), String> {
+    crate::ai::cloud::validate_identifier(&project_id, "projectId")
+        .map_err(|e| format!("{}", e))?;
+    crate::ai::cloud::validate_identifier(&internal_job_id, "internalJobId")
+        .map_err(|e| format!("{}", e))?;
+
+    let job = lifecycle
+        .store()
+        .load_job(&project_id, &internal_job_id)
+        .map_err(|e| format!("{}", e))?;
+
+    if job.state != crate::ai::cloud::CloudJobState::Completed {
+        return Err(format!(
+            "CANNOT_OPEN: Job {} is not in COMPLETED state (state: {:?})",
+            internal_job_id, job.state
+        ));
+    }
+
+    let final_path = job
+        .output
+        .final_path
+        .ok_or_else(|| "NO_FINAL_PATH: Job output has no final artifact path".to_string())?;
+
+    if !final_path.is_file() {
+        return Err(format!(
+            "FILE_NOT_FOUND: Artifact file not found at {}",
+            final_path.display()
+        ));
+    }
+
+    let canonical = final_path
+        .canonicalize()
+        .map_err(|e| format!("CANONICALIZE_FAILED: {}", e))?;
+    let artifacts_root = lifecycle
+        .store()
+        .project_cloud_jobs_dir(&project_id)
+        .map_err(|e| format!("{}", e))?
+        .canonicalize()
+        .map_err(|e| format!("ROOT_NOT_FOUND: {}", e))?;
+
+    if !canonical.starts_with(&artifacts_root) {
+        return Err("SECURITY_VIOLATION: Path outside project cloud directory".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = StdCommand::new("explorer").arg(&canonical).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = StdCommand::new("open").arg(&canonical).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = StdCommand::new("xdg-open").arg(&canonical).spawn();
+    }
+
+    Ok(())
+}
+
+#[command]
+pub fn open_cloud_artifact_folder(
+    project_id: String,
+    internal_job_id: String,
+    lifecycle: tauri::State<'_, Arc<crate::ai::cloud::CloudJobLifecycleService>>,
+) -> Result<(), String> {
+    crate::ai::cloud::validate_identifier(&project_id, "projectId")
+        .map_err(|e| format!("{}", e))?;
+    crate::ai::cloud::validate_identifier(&internal_job_id, "internalJobId")
+        .map_err(|e| format!("{}", e))?;
+
+    let artifacts_root = lifecycle
+        .store()
+        .project_artifacts_dir(&project_id)
+        .map_err(|e| format!("{}", e))?;
+
+    if !artifacts_root.exists() {
+        let _ = fs::create_dir_all(&artifacts_root);
+    }
+
+    let canonical = artifacts_root
+        .canonicalize()
+        .map_err(|e| format!("CANONICALIZE_FAILED: {}", e))?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = StdCommand::new("explorer").arg(&canonical).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = StdCommand::new("open").arg(&canonical).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = StdCommand::new("xdg-open").arg(&canonical).spawn();
+    }
+
+    Ok(())
 }

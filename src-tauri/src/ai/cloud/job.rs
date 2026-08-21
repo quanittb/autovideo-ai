@@ -1,6 +1,8 @@
 use super::cost::{CostConfidence, CostEstimate, LatencyTelemetry};
 use super::error::CloudProviderError;
 use super::registry::ExecutionClass;
+use super::router::{RoutingDecision, TaskClass};
+use super::spec::SourceMediaFacts;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -484,6 +486,8 @@ impl PersistentCloudJob {
             cancellation_requested: self.cancellation_requested,
             progress_pct: self.progress_pct,
             remote_status: self.remote_status.clone(),
+            state_revision: self.state_revision,
+            artifact_descriptor: self.artifact_descriptor.clone(),
         }
     }
 
@@ -504,7 +508,7 @@ impl PersistentCloudJob {
 }
 
 // -----------------------------------------------------------------------------
-// 5. Safe Frontend Event Payload
+// 5. Safe Frontend Event Payload & DTOs
 // -----------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -533,6 +537,40 @@ pub struct CloudJobEventPayload {
     pub cancellation_requested: bool,
     pub progress_pct: Option<f64>,
     pub remote_status: Option<String>,
+    #[serde(default)]
+    pub state_revision: u64,
+    #[serde(default)]
+    pub artifact_descriptor: Option<ArtifactDescriptor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSubmissionPreflight {
+    pub task_class: TaskClass,
+    pub routing_decision: RoutingDecision,
+    pub source_facts: Option<SourceMediaFacts>,
+    pub budget_limit: f64,
+    pub budget_approved: bool,
+    pub submittable: bool,
+    pub blocking_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PreviewAssetKind {
+    ProjectSource,
+    CloudArtifact,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorizedAssetPreview {
+    pub local_path: String,
+    pub container: String,
+    pub video_codec: String,
+    pub alpha_validated: bool,
+    pub audio_required: bool,
+    pub actual_has_audio: Option<bool>,
 }
 
 // -----------------------------------------------------------------------------

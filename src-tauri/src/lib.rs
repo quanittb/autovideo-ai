@@ -131,6 +131,13 @@ pub fn run() {
             start_cloud_generation,
             get_cloud_job_status,
             cancel_cloud_generation,
+            preflight_cloud_transformation,
+            start_cloud_transformation,
+            list_cloud_jobs,
+            authorize_preview_asset,
+            revoke_preview_asset,
+            open_cloud_artifact,
+            open_cloud_artifact_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

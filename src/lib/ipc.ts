@@ -673,6 +673,24 @@ export interface CloudJobStatus {
   actualCost?: number;
 }
 
+export interface SourceMediaFacts {
+  durationSec: number;
+  width: number;
+  height: number;
+  fps: number;
+  hasAudio: boolean;
+}
+
+export type ArtifactContainer = 'mp4' | 'webm';
+export type ArtifactVideoCodec = 'h264' | 'vp9';
+
+export interface ArtifactDescriptor {
+  container: ArtifactContainer;
+  videoCodec: ArtifactVideoCodec;
+  requireAlpha: boolean;
+  requireAudio: boolean;
+}
+
 export interface CloudJobEventPayload {
   jobId: string;
   internalJobId: string;
@@ -697,6 +715,29 @@ export interface CloudJobEventPayload {
   cancellationRequested: boolean;
   progressPct?: number;
   remoteStatus?: string;
+  stateRevision: number;
+  artifactDescriptor?: ArtifactDescriptor;
+}
+
+export interface CloudSubmissionPreflight {
+  taskClass: string;
+  routingDecision: RoutingDecision;
+  sourceFacts?: SourceMediaFacts | null;
+  budgetLimit: number;
+  budgetApproved: boolean;
+  submittable: boolean;
+  blockingCode?: string | null;
+}
+
+export type PreviewAssetKind = 'projectSource' | 'cloudArtifact';
+
+export interface AuthorizedAssetPreview {
+  localPath: string;
+  container: string;
+  videoCodec: string;
+  alphaValidated: boolean;
+  audioRequired: boolean;
+  actualHasAudio?: boolean | null;
 }
 
 export interface RoutingDecision {
@@ -732,6 +773,48 @@ export const cloudApi = {
 
   cancelCloudGeneration: async (jobId?: string, projectId?: string, remoteId?: string): Promise<void> => {
     return await invoke('cancel_cloud_generation', { jobId, projectId, remoteId });
+  },
+
+  preflightCloudTransformation: async (
+    request: CloudJobRequest,
+    maxCost?: number
+  ): Promise<CloudSubmissionPreflight> => {
+    return await invoke('preflight_cloud_transformation', { request, maxCost });
+  },
+
+  startCloudTransformation: async (
+    request: CloudJobRequest,
+    maxCost?: number
+  ): Promise<CloudJobEventPayload> => {
+    return await invoke('start_cloud_transformation', { request, maxCost });
+  },
+
+  listCloudJobs: async (projectId: string): Promise<CloudJobEventPayload[]> => {
+    return await invoke('list_cloud_jobs', { projectId });
+  },
+
+  authorizePreviewAsset: async (
+    projectId: string,
+    assetKind: PreviewAssetKind,
+    internalJobId?: string
+  ): Promise<AuthorizedAssetPreview> => {
+    return await invoke('authorize_preview_asset', { projectId, assetKind, internalJobId });
+  },
+
+  revokePreviewAsset: async (
+    projectId: string,
+    assetKind: PreviewAssetKind,
+    internalJobId?: string
+  ): Promise<void> => {
+    return await invoke('revoke_preview_asset', { projectId, assetKind, internalJobId });
+  },
+
+  openCloudArtifact: async (projectId: string, internalJobId: string): Promise<void> => {
+    return await invoke('open_cloud_artifact', { projectId, internalJobId });
+  },
+
+  openCloudArtifactFolder: async (projectId: string, internalJobId: string): Promise<void> => {
+    return await invoke('open_cloud_artifact_folder', { projectId, internalJobId });
   },
 };
 
