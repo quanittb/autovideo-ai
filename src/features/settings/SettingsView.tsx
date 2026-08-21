@@ -9,11 +9,13 @@ import {
   Zap, 
   CheckCircle2,
   Trash2,
-  RotateCw
+  RotateCw,
+  Key,
+  ShieldCheck
 } from 'lucide-react';
 import { useHardwareProfile } from '../../hooks/useHardwareProfile';
 import { useAppInfo } from '../../hooks/useAppInfo';
-import { api } from '../../lib/ipc';
+import { api, flowApi, GeminiStatusResponse } from '../../lib/ipc';
 import { StorageUsageReport } from '../../types/contracts';
 
 export const SettingsView: React.FC = () => {
@@ -25,6 +27,50 @@ export const SettingsView: React.FC = () => {
   const [isClearingCache, setIsClearingCache] = useState<boolean>(false);
   const [isCleaningTemp, setIsCleaningTemp] = useState<boolean>(false);
   const [storageActionMessage, setStorageActionMessage] = useState<string | null>(null);
+
+  const [geminiStatus, setGeminiStatus] = useState<GeminiStatusResponse | null>(null);
+  const [geminiKeyInput, setGeminiKeyInput] = useState<string>('');
+  const [isSavingGeminiKey, setIsSavingGeminiKey] = useState<boolean>(false);
+  const [geminiMessage, setGeminiMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const fetchGeminiStatus = async () => {
+    try {
+      const status = await flowApi.getGeminiStatus();
+      setGeminiStatus(status);
+    } catch (err) {
+      console.error('Failed to get Gemini status:', err);
+    }
+  };
+
+  const handleSaveGeminiKey = async () => {
+    if (!geminiKeyInput.trim()) return;
+    setIsSavingGeminiKey(true);
+    setGeminiMessage(null);
+    try {
+      await flowApi.setGeminiApiKey(geminiKeyInput.trim());
+      setGeminiMessage({ type: 'success', text: 'Gemini API Key securely stored in OS Credential Manager.' });
+      setGeminiKeyInput('');
+      await fetchGeminiStatus();
+    } catch (err: any) {
+      setGeminiMessage({ type: 'error', text: typeof err === 'string' ? err : err?.message || 'Failed to save Gemini key' });
+    } finally {
+      setIsSavingGeminiKey(false);
+    }
+  };
+
+  const handleClearGeminiKey = async () => {
+    setIsSavingGeminiKey(true);
+    setGeminiMessage(null);
+    try {
+      await flowApi.clearGeminiApiKey();
+      setGeminiMessage({ type: 'success', text: 'Gemini API Key removed from secure storage.' });
+      await fetchGeminiStatus();
+    } catch (err: any) {
+      setGeminiMessage({ type: 'error', text: typeof err === 'string' ? err : err?.message || 'Failed to clear Gemini key' });
+    } finally {
+      setIsSavingGeminiKey(false);
+    }
+  };
 
   const fetchStorageUsage = async () => {
     setIsLoadingStorage(true);
@@ -41,6 +87,8 @@ export const SettingsView: React.FC = () => {
   useEffect(() => {
     if (activeTab === 'storage') {
       fetchStorageUsage();
+    } else if (activeTab === 'models') {
+      fetchGeminiStatus();
     }
   }, [activeTab]);
 
@@ -151,20 +199,89 @@ export const SettingsView: React.FC = () => {
 
           {/* Tab 2: AI Models */}
           {activeTab === 'models' && (
-            <div className="space-y-4">
-              <h3 className="text-base font-bold text-slate-200">AI Model Directory & Provider</h3>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                AutoVideo AI maintains local neural model weights on disk. You can configure download servers and verify checksum integrity.
-              </p>
-              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs">
-                <span className="text-slate-400 block font-semibold">Model Provider Strategy:</span>
-                <div className="flex items-center gap-2">
-                  <span className="px-2.5 py-1 rounded-lg bg-indigo-950/60 border border-indigo-500/40 text-indigo-300 font-mono">
-                    Local-First ONNX / DirectML Provider
+            <div className="space-y-6">
+              <div className="space-y-4">
+                <h3 className="text-base font-bold text-slate-200">AI Model Directory & Provider</h3>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  AutoVideo AI maintains local neural model weights on disk. You can configure download servers and verify checksum integrity.
+                </p>
+                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs">
+                  <span className="text-slate-400 block font-semibold">Model Provider Strategy:</span>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2.5 py-1 rounded-lg bg-indigo-950/60 border border-indigo-500/40 text-indigo-300 font-mono">
+                      Local-First ONNX / DirectML Provider
+                    </span>
+                    <span className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-500 font-mono">
+                      Future Cloud Adapter (Ready)
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Gemini API Key Configuration Card */}
+              <div className="p-5 rounded-2xl bg-slate-950 border border-slate-800 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Key className="w-4 h-4 text-indigo-400" />
+                    <h4 className="text-sm font-bold text-slate-200">Google Gemini API Key (Flow Prompt Refinement)</h4>
+                  </div>
+                  <span
+                    className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border flex items-center gap-1 ${
+                      geminiStatus?.isConfigured
+                        ? 'bg-emerald-950/80 border-emerald-500/30 text-emerald-400'
+                        : 'bg-slate-900 border-slate-700 text-slate-400'
+                    }`}
+                  >
+                    {geminiStatus?.isConfigured && <ShieldCheck className="w-3 h-3" />}
+                    {geminiStatus?.isConfigured ? 'Configured (Encrypted in OS Keychain)' : 'Not Configured (Optional)'}
                   </span>
-                  <span className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-500 font-mono">
-                    Future Cloud Adapter (Ready)
-                  </span>
+                </div>
+
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Gemini API key is used exclusively for <strong>user-initiated prompt optimization</strong> in Google Flow ({geminiStatus?.model || 'gemini-2.5-flash-lite'}). Keys are securely stored in the <strong>OS Credential Manager / Keychain</strong> and are never written to disk or sent to logs.
+                </p>
+
+                {geminiMessage && (
+                  <div
+                    className={`p-3 rounded-xl text-xs flex items-center gap-2 ${
+                      geminiMessage.type === 'success'
+                        ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-300'
+                        : 'bg-red-500/10 border border-red-500/20 text-red-300'
+                    }`}
+                  >
+                    <Info className="w-4 h-4 shrink-0" />
+                    <span>{geminiMessage.text}</span>
+                  </div>
+                )}
+
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                  <input
+                    type="password"
+                    value={geminiKeyInput}
+                    onChange={(e) => setGeminiKeyInput(e.target.value)}
+                    placeholder="Enter Gemini API Key (e.g. AIzaSy...)"
+                    className="flex-1 px-3 py-2 text-xs font-mono text-slate-100 bg-slate-900 border border-slate-700 rounded-xl focus:outline-none focus:border-indigo-500 transition"
+                  />
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleSaveGeminiKey}
+                      disabled={isSavingGeminiKey || !geminiKeyInput.trim()}
+                      className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl shadow transition cursor-pointer"
+                    >
+                      {isSavingGeminiKey ? 'Saving...' : 'Save API Key'}
+                    </button>
+                    {geminiStatus?.isConfigured && (
+                      <button
+                        type="button"
+                        onClick={handleClearGeminiKey}
+                        disabled={isSavingGeminiKey}
+                        className="px-3 py-2 text-xs font-semibold text-red-400 hover:text-red-300 bg-red-950/40 hover:bg-red-900/40 border border-red-800/40 rounded-xl transition cursor-pointer"
+                      >
+                        Remove Key
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
