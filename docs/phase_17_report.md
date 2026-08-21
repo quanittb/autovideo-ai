@@ -7,6 +7,7 @@ The integration adheres strictly to the project's zero-fake, cost-guarded, fail-
 
 - **Starting Base / Remote HEAD**: `0925d7a91298f717b8dbb6b7ec6b20e9e2553217`
 - **Initial Implementation SHA**: `92771337408446bf4610fcb0650550ee271292f7`
+- **Post-Acceptance Invariant Fix SHA**: `1d69bd9161921458de9b34a34095c12002196e6a`
 - **Zero-Live-Cost Policy**: Fully observed ($0.00 live cost, 0 real predictions, 0 real uploads)
 - **Live Quality Verification**: `LIVE QUALITY VERIFIED: NO` (Edge matting fidelity, hair detail, and temporal consistency are evaluated under Phase 20)
 
