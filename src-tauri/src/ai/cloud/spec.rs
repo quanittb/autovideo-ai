@@ -118,25 +118,11 @@ impl BackgroundRemovalSpec {
         project: &Project,
         plan: &ValidatedSubmissionPlan,
     ) -> Result<Self, CloudProviderError> {
-        let source_video = match &request.source_video {
-            Some(p) if p.is_file() => p.clone(),
-            Some(p) => {
-                return Err(CloudProviderError::RequestInvalid(format!(
-                    "Source video not found or invalid: {}",
-                    p.display()
-                )));
-            }
-            None => {
-                return Err(CloudProviderError::RequestInvalid(
-                    "Source video is required for background removal".to_string(),
-                ));
-            }
-        };
-
-        let source_facts = match &plan.source_facts {
-            Some(facts) => facts.clone(),
-            None => SourceMediaProbe::probe_file(&source_video)?,
-        };
+        let source_facts = plan.source_facts.clone().ok_or_else(|| {
+            CloudProviderError::RequestInvalid(
+                "SOURCE_FACTS_REQUIRED: Background removal requires pre-probed source facts in submission plan".to_string(),
+            )
+        })?;
 
         Self::build_with_facts(request, project, plan, source_facts)
     }

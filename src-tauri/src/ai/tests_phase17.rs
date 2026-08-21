@@ -1253,6 +1253,63 @@ mod tests {
         assert!(spec.preserve_audio);
     }
 
+    #[test]
+    fn test_phase17_56_spec_build_fails_closed_when_source_facts_missing_without_probing() {
+        let temp = tempdir().unwrap();
+        let video_path = temp.path().join("source.mp4");
+        // Write raw non-media content that would fail ffprobe if ffprobe were called
+        std::fs::write(&video_path, b"not_a_valid_mp4_header").unwrap();
+
+        let plan = ValidatedSubmissionPlan {
+            task_class: TaskClass::BackgroundRemoval,
+            routing_decision: crate::ai::cloud::router::RoutingDecision {
+                target: crate::ai::cloud::router::RoutingTarget::Cloud,
+                provider_id: "replicate".to_string(),
+                model_id: "bria/video-remove-background".to_string(),
+                execution_class: ExecutionClass::UtilityCloud,
+                task: TaskClass::BackgroundRemoval,
+                mode: RoutingPreference::CostSaving,
+                reason: "test".to_string(),
+                cost_breakdown: crate::ai::cloud::cost::CostBreakdown::default(),
+                estimated_cost: crate::ai::cloud::cost::CostEstimate {
+                    provider: "replicate".to_string(),
+                    model: "bria/video-remove-background".to_string(),
+                    estimated_usd: Some(0.042),
+                    min_usd: None,
+                    max_usd: None,
+                    confidence: 0.85,
+                    currency: "USD".to_string(),
+                    status: CostConfidence::Estimated,
+                    breakdown: "test".to_string(),
+                },
+                fallback_available: false,
+                auto_submit_allowed: true,
+            },
+            budget_limit: 3.0,
+            provider_key: ProviderKey::new("replicate", "bria/video-remove-background"),
+            source_facts: None, // Missing pre-probed facts
+        };
+
+        let mut req = make_bg_removal_request("no_facts_test", 5.0);
+        req.source_video = Some(video_path);
+
+        let project = Project::new("proj1");
+
+        let result = BackgroundRemovalSpec::build(&req, &project, &plan);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("SOURCE_FACTS_REQUIRED"),
+            "Expected SOURCE_FACTS_REQUIRED error, got: {}",
+            err_msg
+        );
+        assert!(
+            !err_msg.contains("SOURCE_PROBE_FAILED"),
+            "Must NOT attempt ffprobe fallback or return SOURCE_PROBE_FAILED, got: {}",
+            err_msg
+        );
+    }
+
     // =========================================================================
     // 26. NORMALIZED CONFIGURATION HASH INVARIANT TESTS
     // =========================================================================
