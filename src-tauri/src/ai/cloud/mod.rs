@@ -39,7 +39,8 @@ pub use live_execution_guard::{
     EnvLiveExecutionPolicy, LiveExecutionPolicy, MockLiveExecutionPolicy, PaidLiveExecutionGuard,
 };
 pub use manifest::{
-    SegmentBoundary, SegmentChildRecord, SegmentPlan, SegmentedCloudJobManifest, SegmentedJobState,
+    FinalAudioPolicy, SegmentBoundary, SegmentChildRecord, SegmentPlan, SegmentedChildSnapshot,
+    SegmentedCloudJobManifest, SegmentedCloudJobSnapshot, SegmentedJobState,
 };
 pub use orchestrator::{SegmentedCloudJobOrchestrator, SegmentedCloudSubmissionPreflight};
 pub use provider::{
@@ -56,7 +57,7 @@ pub use router::{
     RoutingTarget, TaskClass, UserExecutionMode,
 };
 pub use segment::{
-    FinalAudioMuxer, SegmentPlanner, SegmentSplitter, SegmentStitcher, SplitEncodingPolicy,
+    FinalAudioMuxer, SegmentPlanner, SegmentSplitter, SegmentStitcher,
     DEFAULT_MAX_SEGMENT_DURATION_SEC, SEGMENTATION_POLICY_VERSION, SPLIT_ENCODING_POLICY_VERSION,
 };
 pub use spec::{

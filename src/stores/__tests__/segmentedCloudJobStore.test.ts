@@ -90,10 +90,7 @@ function makeMockSegmentedManifest(
       {
         segmentIndex: 0,
         clientJobId: 'segjob:seg-test-1234:0:hash_abc123:v1',
-        internalJobId: 'internal_seg_0',
-        inputSegmentPath: '/path/to/seg0.mp4',
         state: 'COMPLETED',
-        outputArtifactPath: '/path/to/out0.webm',
         durationSec: 46.667,
         costUsd: 0.196,
         updatedAt: '2026-08-21T00:00:10Z',
@@ -101,10 +98,7 @@ function makeMockSegmentedManifest(
       {
         segmentIndex: 1,
         clientJobId: 'segjob:seg-test-1234:1:hash_abc123:v1',
-        internalJobId: 'internal_seg_1',
-        inputSegmentPath: '/path/to/seg1.mp4',
         state: 'COMPLETED',
-        outputArtifactPath: '/path/to/out1.webm',
         durationSec: 46.667,
         costUsd: 0.196,
         updatedAt: '2026-08-21T00:00:20Z',
@@ -112,10 +106,7 @@ function makeMockSegmentedManifest(
       {
         segmentIndex: 2,
         clientJobId: 'segjob:seg-test-1234:2:hash_abc123:v1',
-        internalJobId: 'internal_seg_2',
-        inputSegmentPath: '/path/to/seg2.mp4',
         state: 'COMPLETED',
-        outputArtifactPath: '/path/to/out2.webm',
         durationSec: 46.667,
         costUsd: 0.196,
         updatedAt: '2026-08-21T00:00:30Z',
@@ -124,14 +115,10 @@ function makeMockSegmentedManifest(
     budgetLimit: 5.0,
     provisionalEstimateUsd: 0.588,
     actualBatchBaseEstimateUsd: 0.588,
-    finalOutput: {
-      temporaryPath: null,
-      finalPath: '/path/to/artifacts/seg-test-1234.webm',
-      artifactHash: null,
-      width: 1920,
-      height: 1080,
-      durationSec: 140.0,
-      fps: 30.0,
+    finalOutputReady: true,
+    finalAudioPolicy: {
+      preserveOriginalAudio: true,
+      codec: 'opus',
     },
     timestamps: {
       createdAt: '2026-08-21T00:00:00Z',

@@ -155,6 +155,23 @@ pub enum RoutingBlockCode {
     InvalidReferenceInputs,
 }
 
+impl RoutingBlockCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ProviderDurationLimit => "PROVIDER_DURATION_LIMIT",
+            Self::ProviderResolutionLimit => "PROVIDER_RESOLUTION_LIMIT",
+            Self::ProviderFpsLimit => "PROVIDER_FPS_LIMIT",
+            Self::UnsupportedTask => "UNSUPPORTED_TASK",
+            Self::ProviderUnavailable => "PROVIDER_UNAVAILABLE",
+            Self::CostUnknown => "COST_UNKNOWN",
+            Self::CostBudgetExceeded => "COST_BUDGET_EXCEEDED",
+            Self::MissingProviderCredentials => "MISSING_PROVIDER_CREDENTIALS",
+            Self::MissingSourceMedia => "MISSING_SOURCE_MEDIA",
+            Self::InvalidReferenceInputs => "INVALID_REFERENCE_INPUTS",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutingDecision {

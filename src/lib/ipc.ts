@@ -835,18 +835,18 @@ export const cloudApi = {
   startSegmentedTransformation: async (
     request: CloudJobRequest,
     maxCost?: number
-  ): Promise<SegmentedCloudJobManifest> => {
+  ): Promise<SegmentedCloudJobSnapshot> => {
     return await invoke('start_segmented_cloud_transformation', { request, maxCost });
   },
 
-  listSegmentedJobs: async (projectId: string): Promise<SegmentedCloudJobManifest[]> => {
+  listSegmentedJobs: async (projectId: string): Promise<SegmentedCloudJobSnapshot[]> => {
     return await invoke('list_segmented_cloud_jobs', { projectId });
   },
 
   cancelSegmentedJob: async (
     projectId: string,
     parentId: string
-  ): Promise<SegmentedCloudJobManifest> => {
+  ): Promise<SegmentedCloudJobSnapshot> => {
     return await invoke('cancel_segmented_cloud_job', { projectId, parentId });
   },
 
@@ -854,7 +854,7 @@ export const cloudApi = {
     projectId: string,
     parentId: string,
     maxCost: number
-  ): Promise<SegmentedCloudJobManifest> => {
+  ): Promise<SegmentedCloudJobSnapshot> => {
     return await invoke('approve_segmented_cloud_budget', { projectId, parentId, maxCost });
   },
 
@@ -920,29 +920,21 @@ export interface SegmentPlan {
   totalSourceDurationSec: number;
 }
 
-export interface SegmentChildRecord {
+export interface FinalAudioPolicy {
+  preserveOriginalAudio: boolean;
+  codec: string;
+}
+
+export interface SegmentedChildSnapshot {
   segmentIndex: number;
   clientJobId: string;
-  internalJobId?: string | null;
-  inputSegmentPath?: string | null;
   state?: CloudJobState | null;
-  outputArtifactPath?: string | null;
   durationSec: number;
   costUsd?: number | null;
   updatedAt: string;
 }
 
-export interface OutputArtifactRecord {
-  temporaryPath?: string | null;
-  finalPath?: string | null;
-  artifactHash?: string | null;
-  width?: number | null;
-  height?: number | null;
-  durationSec?: number | null;
-  fps?: number | null;
-}
-
-export interface SegmentedCloudJobManifest {
+export interface SegmentedCloudJobSnapshot {
   schemaVersion: number;
   stateRevision: number;
   parentId: string;
@@ -956,11 +948,12 @@ export interface SegmentedCloudJobManifest {
   sourceFacts: SourceMediaFacts;
   timingFacts: DetailedTimingFacts;
   segmentPlan: SegmentPlan;
-  childJobs: SegmentChildRecord[];
+  childJobs: SegmentedChildSnapshot[];
   budgetLimit?: number | null;
   provisionalEstimateUsd: number;
   actualBatchBaseEstimateUsd?: number | null;
-  finalOutput?: OutputArtifactRecord | null;
+  finalOutputReady: boolean;
+  finalAudioPolicy: FinalAudioPolicy;
   timestamps: {
     createdAt: string;
     updatedAt: string;
@@ -969,8 +962,10 @@ export interface SegmentedCloudJobManifest {
   };
   cancellationRequested: boolean;
   progressPct?: number | null;
-  error?: JobErrorRecord | null;
+  error?: string | null;
 }
+
+export type SegmentedCloudJobManifest = SegmentedCloudJobSnapshot;
 
 export interface SegmentedCloudSubmissionPreflight {
   taskClass: string;

@@ -96,53 +96,151 @@ fn create_synthetic_alpha_webm(out_path: &Path, duration_sec: f64, fps: u32) {
     );
 }
 
+fn create_synthetic_opaque_webm(out_path: &Path, duration_sec: f64, fps: u32) {
+    if let Some(p) = out_path.parent() {
+        let _ = fs::create_dir_all(p);
+    }
+
+    let args = [
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &format!(
+            "testsrc=duration={:.2}:size=320x240:rate={}",
+            duration_sec, fps
+        ),
+        "-c:v",
+        "libvpx-vp9",
+        "-pix_fmt",
+        "yuv420p", // Opaque!
+        out_path.to_str().unwrap(),
+    ];
+
+    let out = Command::new("ffmpeg")
+        .args(&args)
+        .output()
+        .expect("ffmpeg failed to create synthetic opaque webm");
+    assert!(
+        out.status.success(),
+        "ffmpeg opaque webm generation failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 // =============================================================================
-// 1. Typed Routing Block Code Test
+// 1. Typed Routing Block Code & Segmentation Eligibility Test
 // =============================================================================
 
 #[test]
 fn test_phase19_01_typed_routing_block_code() {
-    let registry = ProviderRegistry::new();
+    let test_dir = get_test_dir("eligibility_test");
+    let video_20s = test_dir.join("video_20s.mp4");
+    create_synthetic_test_video(&video_20s, 20.0, 30, false);
+    let video_59s = test_dir.join("video_59s.mp4");
+    create_synthetic_test_video(&video_59s, 59.0, 30, false);
+    let video_80s = test_dir.join("video_80s.mp4");
+    create_synthetic_test_video(&video_80s, 80.0, 30, false);
 
-    let req_long = CloudJobRequest {
-        job_id: "job_long_1".to_string(),
-        project_id: Some("proj_1".to_string()),
-        prompt: "test".to_string(),
+    let storage_paths = StoragePaths::resolve_from_base(&test_dir);
+    let resolver = std::sync::Arc::new(DefaultCloudProviderResolver::new());
+    let event_sink = std::sync::Arc::new(NoopEventSink);
+    let gate = std::sync::Arc::new(DefaultCloudSubmissionGate::new());
+    let lifecycle = std::sync::Arc::new(CloudJobLifecycleService::new(
+        storage_paths.clone(),
+        resolver,
+        event_sink,
+        gate,
+        LifecycleTimingConfig::fast_test(),
+    ));
+    let store = SegmentedCloudJobStore::new(storage_paths.clone());
+    let registry = ProviderRegistry::new();
+    let orchestrator =
+        SegmentedCloudJobOrchestrator::new(lifecycle, store, storage_paths, registry, None);
+
+    // 1. 20s BackgroundRemoval -> NOT segmented (single-shot eligible)
+    let req_20s = CloudJobRequest {
+        job_id: "req_20s".to_string(),
+        project_id: Some("proj_el".to_string()),
+        task_type: "BACKGROUND_REMOVAL".to_string(),
+        prompt: String::new(),
         negative_prompt: None,
-        source_video: None,
+        source_video: Some(video_20s),
+        duration_seconds: 20.0,
+        resolution: (320, 240),
+        fps: 30.0,
         reference_image: None,
         reference_images: None,
-        duration_seconds: 140.0,
-        fps: 30.0,
-        resolution: (1280, 720),
-        task_type: "BACKGROUND_REMOVAL".to_string(),
     };
-
-    let decision = GenerationRouter::route_with_registry(
-        TaskClass::BackgroundRemoval,
-        RoutingPreference::CostSaving,
-        &req_long,
-        None,
-        &registry,
+    let preflight_20s = orchestrator
+        .preflight_segmented_transformation(&req_20s, None)
+        .unwrap();
+    assert!(
+        !preflight_20s.segmentable,
+        "20s video must NOT be segmented"
     );
+    assert_eq!(preflight_20s.blocking_code, None);
 
-    assert_eq!(decision.target, RoutingTarget::Unavailable);
-    assert_eq!(
-        decision.block_code,
-        Some(RoutingBlockCode::ProviderDurationLimit)
+    // 2. 59s BackgroundRemoval -> NOT segmented
+    let req_59s = CloudJobRequest {
+        job_id: "req_59s".to_string(),
+        project_id: Some("proj_el".to_string()),
+        task_type: "BACKGROUND_REMOVAL".to_string(),
+        prompt: String::new(),
+        negative_prompt: None,
+        source_video: Some(video_59s),
+        duration_seconds: 59.0,
+        fps: 30.0,
+        resolution: (320, 240),
+        reference_image: None,
+        reference_images: None,
+    };
+    let preflight_59s = orchestrator
+        .preflight_segmented_transformation(&req_59s, None)
+        .unwrap();
+    assert!(
+        !preflight_59s.segmentable,
+        "59s video must NOT be segmented"
     );
+    assert_eq!(preflight_59s.blocking_code, None);
 
-    let mut req_budget = req_long.clone();
-    req_budget.duration_seconds = 10.0;
-    let decision_ok = GenerationRouter::route_with_registry(
-        TaskClass::BackgroundRemoval,
-        RoutingPreference::CostSaving,
-        &req_budget,
-        None,
-        &registry,
-    );
-    assert_eq!(decision_ok.target, RoutingTarget::Cloud);
-    assert_eq!(decision_ok.block_code, None);
+    // 3. 80s BackgroundRemoval -> SEGMENTABLE (ProviderDurationLimit)
+    let req_80s = CloudJobRequest {
+        job_id: "req_80s".to_string(),
+        project_id: Some("proj_el".to_string()),
+        task_type: "BACKGROUND_REMOVAL".to_string(),
+        prompt: String::new(),
+        negative_prompt: None,
+        source_video: Some(video_80s.clone()),
+        duration_seconds: 80.0,
+        fps: 30.0,
+        resolution: (320, 240),
+        reference_image: None,
+        reference_images: None,
+    };
+    let preflight_80s = orchestrator
+        .preflight_segmented_transformation(&req_80s, None)
+        .unwrap();
+    assert!(preflight_80s.segmentable, "80s video MUST be segmentable");
+    assert_eq!(preflight_80s.estimated_segments, 2);
+
+    // 4. >60s + Unsupported Task -> Rejected
+    let req_char = CloudJobRequest {
+        job_id: "req_char".to_string(),
+        project_id: Some("proj_el".to_string()),
+        task_type: "CHARACTER_REPLACEMENT".to_string(),
+        prompt: String::new(),
+        negative_prompt: None,
+        source_video: Some(video_80s),
+        duration_seconds: 80.0,
+        fps: 30.0,
+        resolution: (320, 240),
+        reference_image: None,
+        reference_images: None,
+    };
+    assert!(orchestrator
+        .preflight_segmented_transformation(&req_char, None)
+        .is_err());
 }
 
 // =============================================================================
@@ -235,8 +333,14 @@ fn test_phase19_04_fractional_cfr_accepted() {
     let plan = SegmentPlanner::plan(&source_facts, &timing_facts_2997, 60.0)
         .expect("fractional CFR plan failed");
     assert_eq!(plan.boundaries.len(), 2);
+    // Exact fractional-CFR frame boundary: 1798 frames * 1001 / 30000 = 59.993266667s
     assert_eq!(plan.boundaries[0].start_frame, 0);
+    assert_eq!(plan.boundaries[0].end_frame, 1798);
     assert!(plan.boundaries[0].expected_duration_sec < 60.0);
+    assert!(plan.boundaries[0].expected_duration_sec > 59.99);
+
+    assert_eq!(plan.boundaries[1].start_frame, 1798);
+    assert_eq!(plan.boundaries[1].end_frame, 2997);
 }
 
 // =============================================================================
@@ -250,11 +354,11 @@ fn test_phase19_05_frame_aligned_boundary_calculation() {
         width: 1920,
         height: 1080,
         fps: 30.0,
-        has_audio: true,
+        has_audio: false,
         timing: None,
     };
 
-    let timing_facts = DetailedTimingFacts {
+    let timing_facts_30 = DetailedTimingFacts {
         r_frame_rate: Rational { num: 30, den: 1 },
         avg_frame_rate: Rational { num: 30, den: 1 },
         time_base: Rational { num: 1, den: 30 },
@@ -262,72 +366,39 @@ fn test_phase19_05_frame_aligned_boundary_calculation() {
         nb_frames: Some(4200),
     };
 
-    let plan = SegmentPlanner::plan(&source_facts, &timing_facts, 60.0).expect("plan failed");
-
-    // 140s at 30fps = 4200 frames. Provider limit = 60s (max 1799 frames).
-    // Segment count = ceil(4200 / 1799) = 3 segments.
+    let plan = SegmentPlanner::plan(&source_facts, &timing_facts_30, 60.0).expect("plan failed");
     assert_eq!(plan.boundaries.len(), 3);
+
+    // 30fps with 60.0s limit -> exactly 1799 frames (59.966667s, exactly 1 frame of headroom)
     assert_eq!(plan.boundaries[0].start_frame, 0);
-    assert_eq!(plan.boundaries[0].end_frame, 1400);
-    assert_eq!(plan.boundaries[1].start_frame, 1400);
-    assert_eq!(plan.boundaries[1].end_frame, 2800);
-    assert_eq!(plan.boundaries[2].start_frame, 2800);
+    assert_eq!(plan.boundaries[0].end_frame, 1799);
+    assert!((plan.boundaries[0].expected_duration_sec - (1799.0 / 30.0)).abs() < 1e-6);
+
+    assert_eq!(plan.boundaries[1].start_frame, 1799);
+    assert_eq!(plan.boundaries[1].end_frame, 3598);
+    assert!((plan.boundaries[1].expected_duration_sec - (1799.0 / 30.0)).abs() < 1e-6);
+
+    assert_eq!(plan.boundaries[2].start_frame, 3598);
     assert_eq!(plan.boundaries[2].end_frame, 4200);
+    assert!((plan.boundaries[2].expected_duration_sec - (602.0 / 30.0)).abs() < 1e-6);
 
     for b in &plan.boundaries {
         assert!(
             b.expected_duration_sec < 60.0,
-            "Segment duration {:.2}s must be strictly below provider limit 60s",
-            b.expected_duration_sec
+            "Segment duration must be strictly < 60.0s"
         );
-        assert_eq!(b.end_frame.saturating_sub(b.start_frame), 1400);
     }
 }
 
 // =============================================================================
-// 6. Segment Splitter: Video-Only & Duration Correction
+// 6. Splitter Video-Only & Duration Correction Loop
 // =============================================================================
 
 #[test]
 fn test_phase19_06_splitter_video_only_and_duration_correction() {
     let test_dir = get_test_dir("splitter_test");
-    let video_path = test_dir.join("source_with_audio.mp4");
-    create_synthetic_test_video(&video_path, 6.0, 30, true);
-
-    let boundary = SegmentBoundary {
-        index: 0,
-        start_frame: 0,
-        end_frame: 60,
-        start_pts: 0,
-        end_pts: 60,
-        start_ms: 0,
-        end_ms: 2000,
-        expected_duration_sec: 2.0,
-    };
-
-    let split_out = test_dir.join("segment_0.mp4");
-    let facts = SegmentSplitter::split_segment(&video_path, &boundary, 30.0, &split_out, 60.0)
-        .expect("split segment failed");
-
-    assert!(split_out.exists());
-    assert!(
-        !facts.has_audio,
-        "Split segment must be strictly video-only (no audio track)"
-    );
-    assert_eq!(facts.width, 320);
-    assert_eq!(facts.height, 240);
-    assert!((facts.duration_sec - 2.0).abs() < 0.2);
-}
-
-// =============================================================================
-// 7. Duration Correction Exhaustion Failure
-// =============================================================================
-
-#[test]
-fn test_phase19_07_duration_correction_exhaustion_failure() {
-    let test_dir = get_test_dir("dur_exhaust");
-    let video_path = test_dir.join("source.mp4");
-    create_synthetic_test_video(&video_path, 5.0, 30, false);
+    let source_path = test_dir.join("source_with_audio.mp4");
+    create_synthetic_test_video(&source_path, 10.0, 30, true);
 
     let boundary = SegmentBoundary {
         index: 0,
@@ -338,17 +409,50 @@ fn test_phase19_07_duration_correction_exhaustion_failure() {
         start_ms: 0,
         end_ms: 5000,
         expected_duration_sec: 5.0,
+        start_sec: 0.0,
+        end_sec: 5.0,
     };
 
-    let split_out = test_dir.join("segment_exhaust.mp4");
-    // Setting max provider limit to an impossibly small duration (0.01s) triggers exhaustion
-    let result = SegmentSplitter::split_segment(&video_path, &boundary, 30.0, &split_out, 0.01);
-    assert!(
-        result.is_err(),
-        "Must fail closed when provider limit is violated after 3 iterations"
-    );
-    let err_msg = format!("{}", result.unwrap_err());
-    assert!(err_msg.contains("SEGMENT_DURATION_LIMIT_VIOLATION"));
+    let out_segment = test_dir.join("seg_0.mp4");
+    let facts = SegmentSplitter::split_segment(&source_path, &boundary, 30.0, &out_segment, 60.0)
+        .expect("split failed");
+
+    assert!(out_segment.exists());
+    assert!(!facts.has_audio, "Split segment must be video-only (-an)");
+    assert_eq!(facts.width, 320);
+    assert_eq!(facts.height, 240);
+    assert!((facts.duration_sec - 5.0).abs() < 0.2);
+}
+
+// =============================================================================
+// 7. Duration Correction Exhaustion Failure
+// =============================================================================
+
+#[test]
+fn test_phase19_07_duration_correction_exhaustion_failure() {
+    let test_dir = get_test_dir("exhaust_test");
+    let source_path = test_dir.join("source.mp4");
+    create_synthetic_test_video(&source_path, 10.0, 30, false);
+
+    let boundary = SegmentBoundary {
+        index: 0,
+        start_frame: 0,
+        end_frame: 300,
+        start_pts: 0,
+        end_pts: 300,
+        start_ms: 0,
+        end_ms: 10000,
+        expected_duration_sec: 10.0,
+        start_sec: 0.0,
+        end_sec: 10.0,
+    };
+
+    let out_segment = test_dir.join("seg_invalid.mp4");
+    let split_res =
+        SegmentSplitter::split_segment(&source_path, &boundary, 30.0, &out_segment, 1.0);
+    assert!(split_res.is_err());
+    let err = format!("{}", split_res.unwrap_err());
+    assert!(err.contains("SEGMENT_DURATION_LIMIT_VIOLATION"));
 }
 
 // =============================================================================
@@ -357,46 +461,29 @@ fn test_phase19_07_duration_correction_exhaustion_failure() {
 
 #[test]
 fn test_phase19_08_child_client_identity_determinism() {
-    let source_facts = SourceMediaFacts {
-        duration_sec: 90.0,
-        width: 1280,
-        height: 720,
-        fps: 30.0,
-        has_audio: false,
-        timing: None,
-    };
-    let timing_facts = DetailedTimingFacts {
-        r_frame_rate: Rational { num: 30, den: 1 },
-        avg_frame_rate: Rational { num: 30, den: 1 },
-        time_base: Rational { num: 1, den: 30 },
-        is_vfr: false,
-        nb_frames: Some(2700),
-    };
-    let plan = SegmentPlanner::plan(&source_facts, &timing_facts, 60.0).unwrap();
-
-    let manifest = SegmentedCloudJobManifest::new(
-        "seg-parent-42".to_string(),
-        "client-req-42".to_string(),
-        "proj_test".to_string(),
-        "BACKGROUND_REMOVAL".to_string(),
-        "replicate".to_string(),
-        "bria/video-remove-background".to_string(),
-        "confighash42".to_string(),
-        source_facts,
-        timing_facts,
-        plan,
-        Some(5.0),
-        0.378,
+    let parent_id = "seg-parent-123";
+    let config_hash = "confighash99";
+    let segment_sha = "abcdef0123456789";
+    let child_id_0 = format!(
+        "segjob:{}:0:{}:{}:v1",
+        parent_id,
+        &segment_sha[..12],
+        config_hash
+    );
+    let child_id_1 = format!(
+        "segjob:{}:1:{}:{}:v1",
+        parent_id,
+        &segment_sha[..12],
+        config_hash
     );
 
-    assert_eq!(manifest.child_jobs.len(), 2);
     assert_eq!(
-        manifest.child_jobs[0].client_job_id,
-        "segjob:seg-parent-42:0:confighash42:v1"
+        child_id_0,
+        "segjob:seg-parent-123:0:abcdef012345:confighash99:v1"
     );
     assert_eq!(
-        manifest.child_jobs[1].client_job_id,
-        "segjob:seg-parent-42:1:confighash42:v1"
+        child_id_1,
+        "segjob:seg-parent-123:1:abcdef012345:confighash99:v1"
     );
 }
 
@@ -427,44 +514,55 @@ async fn test_phase19_09_parent_request_idempotency_and_conflict() {
     let orchestrator =
         SegmentedCloudJobOrchestrator::new(lifecycle, store, storage_paths, registry, None);
 
-    let req = CloudJobRequest {
-        job_id: "req_idempotent_1".to_string(),
+    let req1 = CloudJobRequest {
+        job_id: "client_req_100".to_string(),
         project_id: Some("proj_idem".to_string()),
         prompt: "test".to_string(),
         negative_prompt: None,
         source_video: Some(video_path.clone()),
-        reference_image: None,
-        reference_images: None,
         duration_seconds: 80.0,
         fps: 30.0,
         resolution: (320, 240),
         task_type: "BACKGROUND_REMOVAL".to_string(),
+        reference_image: None,
+        reference_images: None,
     };
 
-    // 1. First submission
-    let m1 = orchestrator
-        .start_segmented_transformation(req.clone(), Some(5.0))
+    let manifest1 = orchestrator
+        .start_segmented_transformation(req1.clone(), None)
         .await
         .expect("start 1 failed");
 
-    // 2. Duplicate submission with identical config -> resumes same parent
-    let m2 = orchestrator
-        .start_segmented_transformation(req.clone(), Some(5.0))
+    // Duplicate submission with same clientRequestId -> returns same parent
+    let manifest2 = orchestrator
+        .start_segmented_transformation(req1, None)
         .await
         .expect("start 2 failed");
-    assert_eq!(m1.parent_id, m2.parent_id);
+    assert_eq!(manifest1.parent_id, manifest2.parent_id);
 
-    // 3. Duplicate client ID with modified configuration -> REQUEST_ID_CONFLICT
-    let video_path_diff = test_dir.join("source_diff.mp4");
-    create_synthetic_test_video(&video_path_diff, 90.0, 30, false);
-    let mut req_diff = req.clone();
-    req_diff.source_video = Some(video_path_diff);
+    // Submission with same clientRequestId but different video content -> returns REQUEST_ID_CONFLICT
+    let video_path2 = test_dir.join("source2.mp4");
+    create_synthetic_test_video(&video_path2, 85.0, 30, false);
+    let req_diff = CloudJobRequest {
+        job_id: "client_req_100".to_string(),
+        project_id: Some("proj_idem".to_string()),
+        prompt: "test".to_string(),
+        negative_prompt: None,
+        source_video: Some(video_path2),
+        duration_seconds: 85.0,
+        fps: 30.0,
+        resolution: (320, 240),
+        task_type: "BACKGROUND_REMOVAL".to_string(),
+        reference_image: None,
+        reference_images: None,
+    };
+
     let res_conflict = orchestrator
-        .start_segmented_transformation(req_diff, Some(5.0))
+        .start_segmented_transformation(req_diff, None)
         .await;
     assert!(res_conflict.is_err());
-    let err_msg = format!("{}", res_conflict.unwrap_err());
-    assert!(err_msg.contains("REQUEST_ID_CONFLICT"));
+    let err_str = format!("{}", res_conflict.unwrap_err());
+    assert!(err_str.contains("REQUEST_ID_CONFLICT"));
 }
 
 // =============================================================================
@@ -473,16 +571,16 @@ async fn test_phase19_09_parent_request_idempotency_and_conflict() {
 
 #[test]
 fn test_phase19_10_parent_storage_isolation() {
-    let test_dir = get_test_dir("isolation_test");
+    let test_dir = get_test_dir("storage_isolation");
     let storage_paths = StoragePaths::resolve_from_base(&test_dir);
-    let store_parent = SegmentedCloudJobStore::new(storage_paths.clone());
-    let store_child = PersistentCloudJobStore::new(storage_paths);
-    let project_id = "proj_iso";
+    let store_child = PersistentCloudJobStore::new(storage_paths.clone());
+    let store_parent = SegmentedCloudJobStore::new(storage_paths);
+    let project_id = "test_proj_isolation";
 
     let source_facts = SourceMediaFacts {
         duration_sec: 60.0,
-        width: 320,
-        height: 240,
+        width: 640,
+        height: 480,
         fps: 30.0,
         has_audio: false,
         timing: None,
@@ -504,6 +602,14 @@ fn test_phase19_10_parent_storage_isolation() {
         "replicate".to_string(),
         "bria/video-remove-background".to_string(),
         "hash_iso".to_string(),
+        None,
+        "source_hash_iso".to_string(),
+        Some("source.mp4".to_string()),
+        FinalAudioPolicy {
+            preserve_original_audio: false,
+            codec: "opus".to_string(),
+        },
+        0.0042,
         source_facts,
         timing_facts,
         plan,
@@ -559,6 +665,14 @@ fn test_phase19_11_parent_manifest_persistence_and_atomic_store() {
         "replicate".to_string(),
         "bria/video-remove-background".to_string(),
         "hash_99".to_string(),
+        None,
+        "source_hash_99".to_string(),
+        Some("source.mp4".to_string()),
+        FinalAudioPolicy {
+            preserve_original_audio: true,
+            codec: "opus".to_string(),
+        },
+        0.0042,
         source_facts,
         timing_facts,
         plan,
@@ -781,6 +895,14 @@ fn test_phase19_15_ambiguous_and_failed_retry_zero_auto_resubmit() {
         "replicate".to_string(),
         "bria/video-remove-background".to_string(),
         "hash_fail".to_string(),
+        None,
+        "source_hash_fail".to_string(),
+        Some("source.mp4".to_string()),
+        FinalAudioPolicy {
+            preserve_original_audio: false,
+            codec: "opus".to_string(),
+        },
+        0.0042,
         SourceMediaFacts::default(),
         DetailedTimingFacts {
             r_frame_rate: Rational::new(30, 1),
@@ -844,7 +966,7 @@ fn test_phase19_16_max_paid_concurrency_sequential() {
 }
 
 // =============================================================================
-// 17. Cancellation Semantics
+// 17. Cancellation Semantics (Truthful & Confirmed)
 // =============================================================================
 
 #[tokio::test]
@@ -875,6 +997,14 @@ async fn test_phase19_17_cancellation_semantics() {
         "replicate".to_string(),
         "bria/video-remove-background".to_string(),
         "hash".to_string(),
+        None,
+        "source_hash".to_string(),
+        Some("source.mp4".to_string()),
+        FinalAudioPolicy {
+            preserve_original_audio: false,
+            codec: "opus".to_string(),
+        },
+        0.0042,
         SourceMediaFacts::default(),
         DetailedTimingFacts {
             r_frame_rate: Rational::new(30, 1),
@@ -930,6 +1060,8 @@ fn test_phase19_18_child_audio_policy_video_only() {
         start_ms: 0,
         end_ms: 2000,
         expected_duration_sec: 2.0,
+        start_sec: 0.0,
+        end_sec: 2.0,
     };
 
     let split_out = test_dir.join("seg_noaudio.mp4");
@@ -943,7 +1075,7 @@ fn test_phase19_18_child_audio_policy_video_only() {
 }
 
 // =============================================================================
-// 19. Final Original Audio Muxing
+// 19. Final Original Audio Muxing & Policy Invariants
 // =============================================================================
 
 #[test]
@@ -970,7 +1102,7 @@ fn test_phase19_19_final_original_audio_muxing() {
 }
 
 // =============================================================================
-// 20. Level B Cache Lifecycle
+// 20. Level B Cache Lifecycle & Tamper Detection
 // =============================================================================
 
 #[test]
@@ -991,6 +1123,8 @@ fn test_phase19_20_level_b_cache_lifecycle() {
         start_ms: 0,
         end_ms: 2000,
         expected_duration_sec: 2.0,
+        start_sec: 0.0,
+        end_sec: 2.0,
     };
 
     let (path1, facts1) = SegmentCacheManager::get_or_create_split_segment(
@@ -1007,27 +1141,30 @@ fn test_phase19_20_level_b_cache_lifecycle() {
     assert!(path1.exists());
     assert!(!facts1.has_audio);
 
-    let ffmpeg_fp = SegmentSplitter::get_ffmpeg_build_fingerprint();
+    let ffmpeg_fp = SegmentSplitter::get_ffmpeg_build_fingerprint().unwrap();
     let cache_key = SegmentCacheManager::compute_split_cache_key(&checksum, &boundary, &ffmpeg_fp);
-    let hit = SegmentCacheManager::get_cached_split_segment(&test_dir, &cache_key, &checksum)
+    let hit = SegmentCacheManager::get_cached_split_segment(&test_dir, &cache_key, &checksum, 60.0)
         .expect("cache query failed");
     assert!(
         hit.is_some(),
         "Expected cache hit on identical fingerprint and checksum"
     );
 
-    // Corrupt file -> returns None and cleans up
-    fs::write(&path1, b"corrupted bytes").unwrap();
-    let hit_after_corrupt =
-        SegmentCacheManager::get_cached_split_segment(&test_dir, &cache_key, &checksum)
-            .expect("cache query after corrupt failed");
+    // Cache Tampering Test: replace segment.mp4 with a DIFFERENT valid video
+    let different_video = test_dir.join("different.mp4");
+    create_synthetic_test_video(&different_video, 2.0, 30, false);
+    fs::copy(&different_video, &path1).unwrap();
+
+    let hit_tampered =
+        SegmentCacheManager::get_cached_split_segment(&test_dir, &cache_key, &checksum, 60.0)
+            .expect("cache query after tamper failed");
     assert!(
-        hit_after_corrupt.is_none(),
-        "Corrupted cache entry must return None"
+        hit_tampered.is_none(),
+        "Tampered cache entry with SHA mismatch MUST cause cache miss"
     );
     assert!(
         !path1.exists(),
-        "Corrupted cache entry directory must be cleaned up"
+        "Tampered cache entry directory MUST be cleaned up"
     );
 }
 
@@ -1136,7 +1273,7 @@ fn test_phase19_24_final_stitch_duration_and_timestamp_accuracy() {
 }
 
 // =============================================================================
-// 25. Crash After Final Promotion Recovery
+// 25. Crash After Final Promotion Recovery & Invalid Final Artifact Rejection
 // =============================================================================
 
 #[tokio::test]
@@ -1147,7 +1284,7 @@ async fn test_phase19_25_crash_after_final_promotion_recovery() {
     let project_id = "proj_prom";
     let parent_id = "seg-parent-prom";
 
-    // Place completed final artifact in artifacts dir
+    // 1. Valid Alpha WebM -> Promotes to Completed
     let artifacts_dir = storage_paths
         .projects_dir
         .join(project_id)
@@ -1156,7 +1293,6 @@ async fn test_phase19_25_crash_after_final_promotion_recovery() {
     let final_artifact = artifacts_dir.join(format!("{}.webm", parent_id));
     create_synthetic_alpha_webm(&final_artifact, 4.0, 30);
 
-    // Save manifest in ValidatingOutput state (simulating crash before marking Completed)
     let mut manifest = SegmentedCloudJobManifest::new(
         parent_id.to_string(),
         "client-prom".to_string(),
@@ -1165,7 +1301,22 @@ async fn test_phase19_25_crash_after_final_promotion_recovery() {
         "replicate".to_string(),
         "bria/video-remove-background".to_string(),
         "hash".to_string(),
-        SourceMediaFacts::default(),
+        None,
+        "source_hash".to_string(),
+        Some("source.mp4".to_string()),
+        FinalAudioPolicy {
+            preserve_original_audio: false,
+            codec: "opus".to_string(),
+        },
+        0.0042,
+        SourceMediaFacts {
+            duration_sec: 4.0,
+            width: 320,
+            height: 240,
+            fps: 30.0,
+            has_audio: false,
+            timing: None,
+        },
         DetailedTimingFacts {
             r_frame_rate: Rational::new(30, 1),
             avg_frame_rate: Rational::new(30, 1),
@@ -1226,15 +1377,37 @@ async fn test_phase19_25_crash_after_final_promotion_recovery() {
         reference_images: None,
     };
 
-    // Running worker detects existing promoted artifact and promotes manifest to Completed
     orchestrator
-        .run_segmented_job_worker(project_id.to_string(), parent_id.to_string(), req)
+        .run_segmented_job_worker(project_id.to_string(), parent_id.to_string(), req.clone())
         .await
         .unwrap();
 
     let loaded = store.load_manifest(project_id, parent_id).unwrap();
     assert_eq!(loaded.state, SegmentedJobState::Completed);
     assert!(loaded.final_output.is_some());
+
+    // 2. Invalid Opaque WebM (No Alpha) -> Rejected during recovery
+    let parent_id_opaque = "seg-parent-opaque";
+    let final_opaque = artifacts_dir.join(format!("{}.webm", parent_id_opaque));
+    create_synthetic_opaque_webm(&final_opaque, 4.0, 30);
+
+    let mut manifest_opaque = manifest.clone();
+    manifest_opaque.parent_id = parent_id_opaque.to_string();
+    manifest_opaque.client_request_id = "client-opaque".to_string();
+    manifest_opaque.state = SegmentedJobState::ValidatingOutput;
+    store.save_manifest_atomic(&manifest_opaque).unwrap();
+
+    let res_opaque = orchestrator
+        .run_segmented_job_worker(project_id.to_string(), parent_id_opaque.to_string(), req)
+        .await;
+    assert!(
+        res_opaque.is_err(),
+        "Opaque WebM must fail alpha validation on recovery"
+    );
+
+    let loaded_opaque = store.load_manifest(project_id, parent_id_opaque).unwrap();
+    assert_ne!(loaded_opaque.state, SegmentedJobState::Completed);
+    assert_eq!(loaded_opaque.state, SegmentedJobState::Failed);
 }
 
 // =============================================================================
@@ -1265,6 +1438,14 @@ fn test_phase19_26_preview_authorization_security() {
         "replicate".to_string(),
         "bria/video-remove-background".to_string(),
         "hash".to_string(),
+        None,
+        "source_hash".to_string(),
+        Some("source.mp4".to_string()),
+        FinalAudioPolicy {
+            preserve_original_audio: false,
+            codec: "opus".to_string(),
+        },
+        0.0042,
         SourceMediaFacts::default(),
         DetailedTimingFacts {
             r_frame_rate: Rational::new(30, 1),

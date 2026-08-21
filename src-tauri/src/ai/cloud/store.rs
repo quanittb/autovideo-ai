@@ -502,6 +502,15 @@ impl SegmentedCloudJobStore {
         Ok(dir)
     }
 
+    pub fn parent_final_artifact_path(&self, project_id: &str, parent_id: &str) -> PathBuf {
+        self.storage_paths
+            .projects_dir
+            .join(project_id)
+            .join("cloud-jobs")
+            .join("artifacts")
+            .join(format!("{}.webm", parent_id))
+    }
+
     pub fn manifest_file_path(
         &self,
         project_id: &str,

@@ -1,88 +1,20 @@
 use super::error::CloudProviderError;
+use super::job::ValidationPolicy;
 use super::manifest::{SegmentBoundary, SegmentPlan};
 use super::spec::{DetailedTimingFacts, SourceMediaFacts, SourceMediaProbe};
-use serde::{Deserialize, Serialize};
+use super::validator::CloudOutputValidator;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub const DEFAULT_MAX_SEGMENT_DURATION_SEC: f64 = 60.0;
 pub const SEGMENTATION_POLICY_VERSION: u32 = 1;
 pub const SPLIT_ENCODING_POLICY_VERSION: u32 = 1;
-pub const DEFAULT_MAX_SEGMENT_DURATION_SEC: f64 = 60.0;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct VideoSegment {
-    pub segment_id: String,
-    pub source_path: PathBuf,
-    pub start_sec: f64,
-    pub end_sec: f64,
-    pub duration_sec: f64,
-    pub prompt: Option<String>,
-    pub reference_image: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SplitEncodingPolicy {
-    pub container: String,
-    pub video_codec: String,
-    pub pixel_format: String,
-    pub preset: String,
-    pub crf: u32,
-    pub preserve_audio: bool,
-    pub policy_version: u32,
-}
-
-impl Default for SplitEncodingPolicy {
-    fn default() -> Self {
-        Self {
-            container: "mp4".to_string(),
-            video_codec: "libx264".to_string(),
-            pixel_format: "yuv420p".to_string(),
-            preset: "fast".to_string(),
-            crf: 18,
-            preserve_audio: false, // Video-only child segments
-            policy_version: SPLIT_ENCODING_POLICY_VERSION,
-        }
-    }
-}
 
 pub struct SegmentPlanner;
 
 impl SegmentPlanner {
-    pub fn plan_segments(
-        source_path: &Path,
-        duration_sec: f64,
-        max_segment_sec: f64,
-        prompt: &str,
-        reference_image: Option<PathBuf>,
-    ) -> Vec<VideoSegment> {
-        let mut segments = Vec::new();
-        let mut current_start = 0.0;
-        let mut index = 0;
-
-        while current_start < duration_sec {
-            let current_end = (current_start + max_segment_sec).min(duration_sec);
-            let segment_dur = current_end - current_start;
-
-            segments.push(VideoSegment {
-                segment_id: format!("seg_{}", index),
-                source_path: source_path.to_path_buf(),
-                start_sec: current_start,
-                end_sec: current_end,
-                duration_sec: segment_dur,
-                prompt: Some(prompt.to_string()),
-                reference_image: reference_image.clone(),
-            });
-
-            current_start = current_end;
-            index += 1;
-        }
-
-        segments
-    }
-
     pub fn plan(
         source_facts: &SourceMediaFacts,
         timing_facts: &DetailedTimingFacts,
@@ -94,78 +26,80 @@ impl SegmentPlanner {
             ));
         }
 
-        let fps = timing_facts.r_frame_rate.to_f64();
+        let fps = source_facts.fps;
         if fps <= 0.0 || !fps.is_finite() {
-            return Err(CloudProviderError::RequestInvalid(format!(
-                "INVALID_TIMING_FPS: Probed invalid timing fps: {:.2}",
-                fps
-            )));
-        }
-
-        let total_source_duration_sec = source_facts.duration_sec;
-        if total_source_duration_sec <= 0.0 || !total_source_duration_sec.is_finite() {
-            return Err(CloudProviderError::RequestInvalid(format!(
-                "INVALID_DURATION: Probed non-positive duration: {:.2}s",
-                total_source_duration_sec
-            )));
-        }
-
-        let total_frames = if let Some(nbf) = timing_facts.nb_frames {
-            nbf
-        } else {
-            (total_source_duration_sec * fps).round() as u64
-        };
-
-        if total_frames == 0 {
             return Err(CloudProviderError::RequestInvalid(
-                "ZERO_FRAMES: Source video contains 0 frames".to_string(),
+                "INVALID_FPS: Framerate must be a positive finite number".to_string(),
             ));
         }
 
-        // Compute largest legal frame count strictly below provider limit (strictly < 60s)
-        let max_legal_frames = ((provider_limit_sec * fps).floor() as u64).saturating_sub(1);
-        if max_legal_frames == 0 {
-            return Err(CloudProviderError::RequestInvalid(format!(
-                "PROVIDER_LIMIT_TOO_LOW: Provider limit {:.2}s cannot accommodate 1 frame at {:.2} fps",
-                provider_limit_sec, fps
-            )));
+        let total_frames = timing_facts
+            .nb_frames
+            .unwrap_or_else(|| (source_facts.duration_sec * fps).round() as u64);
+
+        if total_frames == 0 {
+            return Err(CloudProviderError::RequestInvalid(
+                "EMPTY_SOURCE: Video has 0 frames".to_string(),
+            ));
         }
 
-        let segment_count = ((total_frames as f64) / (max_legal_frames as f64)).ceil() as usize;
-        let segment_count = segment_count.max(1);
+        let total_source_duration_sec = source_facts.duration_sec;
+        let r_num = timing_facts.r_frame_rate.num.max(1) as f64;
+        let r_den = timing_facts.r_frame_rate.den.max(1) as f64;
+        let total_limit_frames_float = (provider_limit_sec * r_num) / r_den;
+        let mut max_segment_frames = total_limit_frames_float.floor() as u64;
+        while max_segment_frames > 0
+            && ((max_segment_frames as f64 * r_den) / r_num) >= provider_limit_sec
+        {
+            max_segment_frames -= 1;
+        }
+        let max_segment_frames = max_segment_frames.max(1);
 
-        let frames_per_segment = ((total_frames as f64) / (segment_count as f64)).ceil() as u64;
+        let mut boundaries = Vec::new();
+        let mut current_start_frame: u64 = 0;
+        let mut index = 0;
 
-        let mut boundaries = Vec::with_capacity(segment_count);
-        for i in 0..segment_count {
-            let start_frame = i as u64 * frames_per_segment;
-            let end_frame = ((i as u64 + 1) * frames_per_segment).min(total_frames);
-            let seg_frames = end_frame.saturating_sub(start_frame);
-            let expected_duration_sec = seg_frames as f64 / fps;
-            let start_ms = ((start_frame as f64 / fps) * 1000.0).round() as u64;
-            let end_ms = ((end_frame as f64 / fps) * 1000.0).round() as u64;
+        let time_base_den = timing_facts.time_base.den.max(1);
+        let time_base_num = timing_facts.time_base.num.max(1);
+
+        while current_start_frame < total_frames {
+            let remaining = total_frames - current_start_frame;
+            let segment_frames = remaining.min(max_segment_frames);
+            let end_frame = current_start_frame + segment_frames;
+
+            let start_sec = (current_start_frame as f64 * r_den) / r_num;
+            let end_sec = (end_frame as f64 * r_den) / r_num;
+            let expected_duration_sec = end_sec - start_sec;
+
+            let start_pts =
+                ((start_sec * time_base_den as f64) / time_base_num as f64).round() as u64;
+            let end_pts = ((end_sec * time_base_den as f64) / time_base_num as f64).round() as u64;
+
+            let start_ms = (start_sec * 1000.0).round() as u64;
+            let end_ms = (end_sec * 1000.0).round() as u64;
 
             boundaries.push(SegmentBoundary {
-                index: i,
-                start_frame,
+                index,
+                start_frame: current_start_frame,
                 end_frame,
-                start_pts: start_frame,
-                end_pts: end_frame,
+                start_pts,
+                end_pts,
                 start_ms,
                 end_ms,
                 expected_duration_sec,
+                start_sec,
+                end_sec,
             });
+
+            current_start_frame = end_frame;
+            index += 1;
         }
 
         let plan_id = format!(
-            "plan-{}-{:.0}s-{}seg",
-            uuid::Uuid::new_v4()
-                .to_string()
-                .chars()
-                .take(8)
-                .collect::<String>(),
-            total_source_duration_sec,
-            segment_count
+            "plan_{}_{}_{}segs",
+            (total_source_duration_sec * 1000.0).round() as u64,
+            (fps * 1000.0).round() as u64,
+            boundaries.len()
         );
 
         Ok(SegmentPlan {
@@ -178,23 +112,87 @@ impl SegmentPlanner {
             total_source_duration_sec,
         })
     }
+
+    pub fn plan_segments(
+        _source_path: &Path,
+        duration_sec: f64,
+        segment_duration_sec: f64,
+        _prompt: &str,
+        _negative_prompt: Option<&str>,
+    ) -> Vec<SegmentBoundary> {
+        let fps = 30.0;
+        let mut boundaries = Vec::new();
+        let mut current_start_sec = 0.0f64;
+        let mut index = 0;
+
+        while current_start_sec < duration_sec {
+            let remaining = duration_sec - current_start_sec;
+            let dur = remaining.min(segment_duration_sec);
+            let end_sec = current_start_sec + dur;
+
+            let start_frame = (current_start_sec * fps).round() as u64;
+            let end_frame = (end_sec * fps).round() as u64;
+            let start_ms = (current_start_sec * 1000.0).round() as u64;
+            let end_ms = (end_sec * 1000.0).round() as u64;
+
+            boundaries.push(SegmentBoundary {
+                index,
+                start_frame,
+                end_frame,
+                start_pts: start_ms,
+                end_pts: end_ms,
+                start_ms,
+                end_ms,
+                expected_duration_sec: dur,
+                start_sec: current_start_sec,
+                end_sec,
+            });
+
+            current_start_sec = end_sec;
+            index += 1;
+        }
+
+        boundaries
+    }
 }
 
 pub struct SegmentSplitter;
 
 impl SegmentSplitter {
-    pub fn get_ffmpeg_build_fingerprint() -> String {
-        match Command::new("ffmpeg").arg("-version").output() {
-            Ok(output) if output.status.success() => {
-                let text = String::from_utf8_lossy(&output.stdout);
-                let first_line = text.lines().next().unwrap_or("ffmpeg_unknown").trim();
-                let mut hasher = sha2::Sha256::default();
-                use sha2::Digest;
-                hasher.update(first_line.as_bytes());
-                format!("{:x}", hasher.finalize())
-            }
-            _ => "ffmpeg_default_fingerprint".to_string(),
+    pub fn get_ffmpeg_build_fingerprint() -> Result<String, CloudProviderError> {
+        let output = Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .map_err(|e| {
+                CloudProviderError::ProviderUnavailable(format!(
+                    "FFMPEG_NOT_FOUND: Failed to invoke ffmpeg to get fingerprint: {}",
+                    e
+                ))
+            })?;
+        if !output.status.success() {
+            return Err(CloudProviderError::ProviderUnavailable(
+                "FFMPEG_VERSION_FAILED: ffmpeg -version returned non-zero exit code".to_string(),
+            ));
         }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let first_line = text
+            .lines()
+            .next()
+            .ok_or_else(|| {
+                CloudProviderError::ProviderUnavailable(
+                    "FFMPEG_OUTPUT_EMPTY: ffmpeg output empty".to_string(),
+                )
+            })?
+            .trim();
+        if first_line.is_empty() {
+            return Err(CloudProviderError::ProviderUnavailable(
+                "FFMPEG_VERSION_EMPTY: Unable to extract ffmpeg build identity".to_string(),
+            ));
+        }
+        let mut hasher = sha2::Sha256::default();
+        use sha2::Digest;
+        hasher.update(first_line.as_bytes());
+        Ok(format!("{:x}", hasher.finalize()))
     }
 
     pub fn split_segment(
@@ -250,36 +248,30 @@ impl SegmentSplitter {
                 .output()
                 .map_err(|e| {
                     CloudProviderError::JobFailed(format!(
-                        "SPLIT_ENCODE_INVOKE_FAILED: Failed to invoke ffmpeg: {}",
+                        "SPLIT_FAILED: Failed to invoke ffmpeg: {}",
                         e
                     ))
                 })?;
 
             if !output.status.success() {
                 return Err(CloudProviderError::JobFailed(format!(
-                    "SPLIT_ENCODE_FAILED: ffmpeg exited with non-zero code: {}",
+                    "SPLIT_FAILED: ffmpeg exited with non-zero status: {}",
                     String::from_utf8_lossy(&output.stderr)
                 )));
             }
 
-            // Authoritative re-probe of created segment on disk
             let facts = SourceMediaProbe::probe_file(out_path)?;
-
             if facts.duration_sec <= max_provider_limit_sec {
                 return Ok(facts);
             }
 
-            // Local duration correction loop: shrink by 1 frame duration
-            dur_sec = (dur_sec - frame_time).max(frame_time);
-            if attempt == 2 {
-                return Err(CloudProviderError::JobFailed(format!(
-                    "SEGMENT_DURATION_LIMIT_VIOLATION: Probed segment duration {:.3}s exceeds provider limit {:.2}s after 3 correction iterations",
-                    facts.duration_sec, max_provider_limit_sec
-                )));
-            }
+            // Exceeds provider duration limit - reduce by frame time and retry
+            dur_sec -= frame_time * (attempt as f64 + 1.0);
         }
 
-        SourceMediaProbe::probe_file(out_path)
+        Err(CloudProviderError::JobFailed(
+            "SEGMENT_DURATION_LIMIT_VIOLATION: Split segment duration consistently exceeded provider limit after 3 correction attempts".to_string(),
+        ))
     }
 }
 
@@ -289,10 +281,6 @@ impl SegmentStitcher {
     pub fn check_stream_copy_compatibility(
         artifacts: &[PathBuf],
     ) -> Result<bool, CloudProviderError> {
-        if artifacts.is_empty() {
-            return Ok(false);
-        }
-
         let mut ref_facts: Option<SourceMediaFacts> = None;
 
         for path in artifacts {
@@ -345,10 +333,23 @@ impl SegmentStitcher {
             })?;
         }
 
+        let validator = CloudOutputValidator::new();
+        let validation_policy = ValidationPolicy {
+            expected_duration_sec: None,
+            expected_width: None,
+            expected_height: None,
+            expected_fps: None,
+            require_audio: false,
+            require_alpha: true,
+            expected_container: Some("webm".to_string()),
+            expected_video_codec: Some("vp9".to_string()),
+        };
+
         if artifacts.len() == 1 {
             fs::copy(&artifacts[0], out_path).map_err(|e| {
                 CloudProviderError::JobFailed(format!("FAILED_COPY_SINGLE_SEGMENT: {}", e))
             })?;
+            validator.validate_artifact_with_policy(out_path, &validation_policy)?;
             return Ok(());
         }
 
@@ -392,18 +393,21 @@ impl SegmentStitcher {
 
             if let Ok(out) = status {
                 if out.status.success() && out_path.exists() {
-                    // Check output validity
-                    if let Ok(probed) = SourceMediaProbe::probe_file(out_path) {
-                        if probed.width > 0 && probed.height > 0 && probed.duration_sec > 0.0 {
-                            return Ok(());
-                        }
+                    // Production validation of stream-copied stitched output
+                    if validator
+                        .validate_artifact_with_policy(out_path, &validation_policy)
+                        .is_ok()
+                    {
+                        return Ok(());
                     }
                 }
             }
         }
 
         // Fallback: VP9 alpha re-encode concat filter
-        Self::stitch_with_vp9_reencode(artifacts, out_path)
+        Self::stitch_with_vp9_reencode(artifacts, out_path)?;
+        validator.validate_artifact_with_policy(out_path, &validation_policy)?;
+        Ok(())
     }
 
     pub fn stitch_with_vp9_reencode(

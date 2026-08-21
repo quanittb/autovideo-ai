@@ -2174,7 +2174,7 @@ pub async fn start_segmented_cloud_transformation(
     request: crate::ai::cloud::CloudJobRequest,
     max_cost: Option<f64>,
     orchestrator: tauri::State<'_, Arc<crate::ai::cloud::SegmentedCloudJobOrchestrator>>,
-) -> Result<crate::ai::cloud::SegmentedCloudJobManifest, String> {
+) -> Result<crate::ai::cloud::SegmentedCloudJobSnapshot, String> {
     orchestrator
         .start_segmented_transformation(request, max_cost)
         .await
@@ -2185,7 +2185,7 @@ pub async fn start_segmented_cloud_transformation(
 pub fn list_segmented_cloud_jobs(
     project_id: String,
     orchestrator: tauri::State<'_, Arc<crate::ai::cloud::SegmentedCloudJobOrchestrator>>,
-) -> Result<Vec<crate::ai::cloud::SegmentedCloudJobManifest>, String> {
+) -> Result<Vec<crate::ai::cloud::SegmentedCloudJobSnapshot>, String> {
     crate::ai::cloud::validate_identifier(&project_id, "projectId")
         .map_err(|e| format!("{}", e))?;
     orchestrator
@@ -2198,7 +2198,7 @@ pub async fn cancel_segmented_cloud_job(
     project_id: String,
     parent_id: String,
     orchestrator: tauri::State<'_, Arc<crate::ai::cloud::SegmentedCloudJobOrchestrator>>,
-) -> Result<crate::ai::cloud::SegmentedCloudJobManifest, String> {
+) -> Result<crate::ai::cloud::SegmentedCloudJobSnapshot, String> {
     crate::ai::cloud::validate_identifier(&project_id, "projectId")
         .map_err(|e| format!("{}", e))?;
     crate::ai::cloud::validate_identifier(&parent_id, "parentId").map_err(|e| format!("{}", e))?;
@@ -2214,7 +2214,7 @@ pub async fn approve_segmented_cloud_budget(
     parent_id: String,
     max_cost: f64,
     orchestrator: tauri::State<'_, Arc<crate::ai::cloud::SegmentedCloudJobOrchestrator>>,
-) -> Result<crate::ai::cloud::SegmentedCloudJobManifest, String> {
+) -> Result<crate::ai::cloud::SegmentedCloudJobSnapshot, String> {
     crate::ai::cloud::validate_identifier(&project_id, "projectId")
         .map_err(|e| format!("{}", e))?;
     crate::ai::cloud::validate_identifier(&parent_id, "parentId").map_err(|e| format!("{}", e))?;

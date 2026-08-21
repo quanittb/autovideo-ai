@@ -86,6 +86,13 @@ impl SegmentedJobState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FinalAudioPolicy {
+    pub preserve_original_audio: bool,
+    pub codec: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SegmentBoundary {
     pub index: usize,
     pub start_frame: u64,
@@ -95,6 +102,10 @@ pub struct SegmentBoundary {
     pub start_ms: u64,
     pub end_ms: u64,
     pub expected_duration_sec: f64,
+    #[serde(default)]
+    pub start_sec: f64,
+    #[serde(default)]
+    pub end_sec: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,6 +125,7 @@ pub struct SegmentPlan {
 pub struct SegmentChildRecord {
     pub segment_index: usize,
     pub client_job_id: String,
+    pub segment_sha256: Option<String>,
     pub internal_job_id: Option<String>,
     pub input_segment_path: Option<PathBuf>,
     pub state: Option<CloudJobState>,
@@ -135,6 +147,11 @@ pub struct SegmentedCloudJobManifest {
     pub provider_id: String,
     pub model_id: String,
     pub configuration_hash: String,
+    pub source_media_id: Option<String>,
+    pub source_content_hash: String,
+    pub source_file_name: Option<String>,
+    pub final_audio_policy: FinalAudioPolicy,
+    pub unit_rate_usd: f64,
     pub state: SegmentedJobState,
     pub source_facts: SourceMediaFacts,
     pub timing_facts: DetailedTimingFacts,
@@ -150,6 +167,45 @@ pub struct SegmentedCloudJobManifest {
     pub error: Option<JobErrorRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SegmentedChildSnapshot {
+    pub segment_index: usize,
+    pub client_job_id: String,
+    pub state: Option<CloudJobState>,
+    pub duration_sec: f64,
+    pub cost_usd: Option<f64>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SegmentedCloudJobSnapshot {
+    pub schema_version: u32,
+    pub state_revision: u64,
+    pub parent_id: String,
+    pub client_request_id: String,
+    pub project_id: String,
+    pub task_type: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub configuration_hash: String,
+    pub state: SegmentedJobState,
+    pub source_facts: SourceMediaFacts,
+    pub timing_facts: DetailedTimingFacts,
+    pub segment_plan: SegmentPlan,
+    pub child_jobs: Vec<SegmentedChildSnapshot>,
+    pub budget_limit: Option<f64>,
+    pub provisional_estimate_usd: f64,
+    pub actual_batch_base_estimate_usd: Option<f64>,
+    pub final_output_ready: bool,
+    pub final_audio_policy: FinalAudioPolicy,
+    pub timestamps: JobTimestamps,
+    pub cancellation_requested: bool,
+    pub progress_pct: Option<f64>,
+    pub error: Option<String>,
+}
+
 impl SegmentedCloudJobManifest {
     pub fn new(
         parent_id: String,
@@ -159,6 +215,11 @@ impl SegmentedCloudJobManifest {
         provider_id: String,
         model_id: String,
         configuration_hash: String,
+        source_media_id: Option<String>,
+        source_content_hash: String,
+        source_file_name: Option<String>,
+        final_audio_policy: FinalAudioPolicy,
+        unit_rate_usd: f64,
         source_facts: SourceMediaFacts,
         timing_facts: DetailedTimingFacts,
         segment_plan: SegmentPlan,
@@ -175,6 +236,7 @@ impl SegmentedCloudJobManifest {
                     "segjob:{}:{}:{}:v{}",
                     parent_id, b.index, configuration_hash, segment_plan.policy_version
                 ),
+                segment_sha256: None,
                 internal_job_id: None,
                 input_segment_path: None,
                 state: None,
@@ -195,6 +257,11 @@ impl SegmentedCloudJobManifest {
             provider_id,
             model_id,
             configuration_hash,
+            source_media_id,
+            source_content_hash,
+            source_file_name,
+            final_audio_policy,
+            unit_rate_usd,
             state: SegmentedJobState::Planning,
             source_facts,
             timing_facts,
@@ -211,7 +278,7 @@ impl SegmentedCloudJobManifest {
                 completed_at: None,
             },
             cancellation_requested: false,
-            progress_pct: Some(0.0),
+            progress_pct: None,
             error: None,
         }
     }
@@ -239,39 +306,77 @@ impl SegmentedCloudJobManifest {
     }
 
     pub fn recalculate_progress(&mut self) {
-        if self.state == SegmentedJobState::Completed {
-            self.progress_pct = Some(100.0);
-            return;
-        }
-
-        let total = self.child_jobs.len();
-        if total == 0 {
-            return;
-        }
-
-        let completed = self
-            .child_jobs
-            .iter()
-            .filter(|c| c.state == Some(CloudJobState::Completed))
-            .count();
-
-        // 0-10% planning/splitting, 10-85% segments running, 85-95% stitching, 95-100% validating
-        let base_pct = match self.state {
-            SegmentedJobState::Planning => 0.0,
-            SegmentedJobState::Splitting => 5.0,
-            SegmentedJobState::CostApprovalRequired => 10.0,
-            SegmentedJobState::Ready => 10.0,
-            SegmentedJobState::Running => 10.0 + (completed as f64 / total as f64) * 75.0,
-            SegmentedJobState::Stitching => 85.0,
-            SegmentedJobState::ValidatingOutput => 95.0,
-            SegmentedJobState::Completed => 100.0,
+        match self.state {
+            SegmentedJobState::Planning
+            | SegmentedJobState::Splitting
+            | SegmentedJobState::CostApprovalRequired
+            | SegmentedJobState::Ready
+            | SegmentedJobState::Stitching
+            | SegmentedJobState::ValidatingOutput => {
+                self.progress_pct = None;
+            }
+            SegmentedJobState::Running => {
+                let total_duration: f64 = self.child_jobs.iter().map(|c| c.duration_sec).sum();
+                if total_duration > 0.0 {
+                    let completed_duration: f64 = self
+                        .child_jobs
+                        .iter()
+                        .filter(|c| c.state == Some(CloudJobState::Completed))
+                        .map(|c| c.duration_sec)
+                        .sum();
+                    self.progress_pct =
+                        Some(((completed_duration / total_duration) * 100.0).clamp(0.0, 99.9));
+                } else {
+                    self.progress_pct = None;
+                }
+            }
+            SegmentedJobState::Completed => {
+                self.progress_pct = Some(100.0);
+            }
             SegmentedJobState::Failed
             | SegmentedJobState::Blocked
-            | SegmentedJobState::Cancelled => {
-                return;
-            }
-        };
+            | SegmentedJobState::Cancelled => {}
+        }
+    }
 
-        self.progress_pct = Some(base_pct);
+    pub fn to_snapshot(&self) -> SegmentedCloudJobSnapshot {
+        let child_snapshots = self
+            .child_jobs
+            .iter()
+            .map(|c| SegmentedChildSnapshot {
+                segment_index: c.segment_index,
+                client_job_id: c.client_job_id.clone(),
+                state: c.state,
+                duration_sec: c.duration_sec,
+                cost_usd: c.cost_usd,
+                updated_at: c.updated_at.clone(),
+            })
+            .collect();
+
+        SegmentedCloudJobSnapshot {
+            schema_version: self.schema_version,
+            state_revision: self.state_revision,
+            parent_id: self.parent_id.clone(),
+            client_request_id: self.client_request_id.clone(),
+            project_id: self.project_id.clone(),
+            task_type: self.task_type.clone(),
+            provider_id: self.provider_id.clone(),
+            model_id: self.model_id.clone(),
+            configuration_hash: self.configuration_hash.clone(),
+            state: self.state,
+            source_facts: self.source_facts.clone(),
+            timing_facts: self.timing_facts.clone(),
+            segment_plan: self.segment_plan.clone(),
+            child_jobs: child_snapshots,
+            budget_limit: self.budget_limit,
+            provisional_estimate_usd: self.provisional_estimate_usd,
+            actual_batch_base_estimate_usd: self.actual_batch_base_estimate_usd,
+            final_output_ready: self.final_output.is_some(),
+            final_audio_policy: self.final_audio_policy.clone(),
+            timestamps: self.timestamps.clone(),
+            cancellation_requested: self.cancellation_requested,
+            progress_pct: self.progress_pct,
+            error: self.error.as_ref().map(|e| e.sanitized_message.clone()),
+        }
     }
 }

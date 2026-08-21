@@ -1056,11 +1056,19 @@ mod tests {
 
         let _ = service.recover_startup_jobs().await.unwrap();
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        let final_job = service
+        let mut final_job = service
             .get_job_status(&project_id, "cjob-dl-budget")
             .unwrap();
+        for _ in 0..20 {
+            if final_job.state.is_terminal() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            final_job = service
+                .get_job_status(&project_id, "cjob-dl-budget")
+                .unwrap();
+        }
+
         // Only 1 download attempt allowed before hitting max_download_attempts (3)
         assert_eq!(final_job.state, CloudJobState::Failed);
         assert_eq!(final_job.error.as_ref().unwrap().code, "DOWNLOAD_FAILED");
