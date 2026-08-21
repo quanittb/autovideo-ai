@@ -26,7 +26,7 @@ Triển khai hoàn chỉnh hệ thống **Google Flow Browser Driver & Gemini Pr
 3. **Gemini Credential Lifecycle & Granular Diagnostic Engine**:
    - `GeminiCredentialManager` lưu trữ trạng thái shared state trong ứng dụng, quản lý khóa bảo mật thông qua OS Credential Manager (Windows Credential Manager / macOS Keychain / Linux Secret Service).
    - Khởi tạo ban đầu: `stored = true/false` và `verification_status = UNVERIFIED`.
-   - Hàm kiểm tra `test_gemini_api_key()` thực hiện probe HTTP thực tế tới `models.get (gemini-2.5-flash-lite)` để cập nhật trạng thái `VALID` hoặc phân tích mã lỗi chi tiết.
+   - Hàm kiểm tra `test_gemini_api_key()` thực hiện probe HTTP thực tế tới `models.get (gemini-3.5-flash)` để cập nhật trạng thái `VALID` hoặc phân tích mã lỗi chi tiết.
    - Bảng ánh xạ mã lỗi Google Generative AI đầy đủ:
      - 400 (`API_KEY_INVALID`, `INVALID_ARGUMENT`) -> `INVALID_KEY`
      - 400 (yêu cầu không hợp lệ khác) -> `BAD_REQUEST`
@@ -74,6 +74,9 @@ Triển khai hoàn chỉnh hệ thống **Google Flow Browser Driver & Gemini Pr
 | Tiêu chí / Acceptance Flag | Giá trị công bố | Ghi chú |
 | :--- | :---: | :--- |
 | **MOCK_PLAYWRIGHT_CHROMIUM_VERIFIED** | **YES** | Đã xác thực qua Real Sidecar + Real Playwright + Real Chromium + Local Mock Server |
+| **LOGIN_BROWSER_SESSION_PERSISTENCE_VERIFIED** | **YES** | Phiên Chromium login sống bền bỉ, không bị tự động tắt khi IPC call hoàn thành |
+| **PROFILE_AUTH_REFRESH_RELOAD_CONSISTENCY** | **YES** | Refresh READY -> reload profiles vẫn READY; đóng browser -> status trở về UNKNOWN |
+| **APP_SHUTDOWN_SESSION_CLEANUP_WIRED** | **YES** | Hook `handle_app_shutdown` được kích hoạt trên `ExitRequested`/`Exit`, đóng sạch sẽ toàn bộ Chromium và giải phóng lock |
 | **FLOW_REAL_BROWSER_VERIFIED** | **NO** | Chưa kết nối live Google Flow (tuân thủ Phase 20A mock scope) |
 | **FLOW_REAL_GENERATION_VERIFIED** | **NO** | Chưa sinh video thật trên Google Flow |
 | **PREVIEW_RUNTIME_VERIFIED** | **NO** | Kế thừa từ Phase 19 |
@@ -106,22 +109,22 @@ vite v7.3.6 building client environment for production...
 ✓ 1865 modules transformed.
 dist/index.html                   0.49 kB │ gzip:   0.31 kB
 dist/assets/index-BpOSgi2F.css   95.57 kB │ gzip:  13.14 kB
-dist/assets/window-DX7M3LbO.js   13.92 kB │ gzip:   3.43 kB
-dist/assets/index-B7MLV2YE.js   499.97 kB │ gzip: 125.47 kB
-✓ built in 5.72s
+dist/assets/window-D1PylawR.js   13.92 kB │ gzip:   3.43 kB
+dist/assets/index-B3nAcdmx.js   499.96 kB │ gzip: 125.47 kB
+✓ built in 7.03s
 ```
 **Kết quả**: ✅ **0 lỗi TypeScript, 0 lỗi Vite bundle.**
 
 ### 3.3. Frontend Vitest Tests (`npm test -- --run`)
 ```text
+ ✓ src/stores/__tests__/segmentedCloudJobStore.test.ts (8 tests) 8ms
  ✓ src/stores/__tests__/cloudJobStore.test.ts (12 tests) 9ms
- ✓ src/stores/__tests__/segmentedCloudJobStore.test.ts (8 tests) 9ms
- ✓ src/stores/__tests__/flowJobStore.test.ts (6 tests) 7ms
- ✓ src/features/flow/__tests__/flowPromptUx.test.ts (12 tests) 12ms
+ ✓ src/stores/__tests__/flowJobStore.test.ts (6 tests) 9ms
+ ✓ src/features/flow/__tests__/flowPromptUx.test.ts (12 tests) 13ms
 
  Test Files  4 passed (4)
       Tests  38 passed (38)
-   Duration  440ms
+   Duration  431ms
 ```
 **Kết quả**: ✅ **4 test files, 38/38 tests PASSED (100%).**
 
@@ -140,7 +143,7 @@ Exit code: 0
 **Kết quả**: ✅ **0 compile errors, 0 warnings.**
 
 ### 3.6. Rust Test Regression Suites (Serial Execution)
-- `cargo test --lib -- tests_phase20a --test-threads=1`: **57/57 passed (100%)**
+- `cargo test --lib -- tests_phase20a --test-threads=1`: **59/59 passed (100%)**
   - `test_phase20a_01` -> `test_phase20a_12`: Prompt optimization provenance, sanitization, single active request & undo tests.
   - `test_phase20a_13` -> `test_phase20a_19`: Flow manifest freeze, submitted prompt hash, credit calculation & log secrecy.
   - `test_phase20a_20` -> `test_phase20a_27`: Legal segmentation, fractional CFR frames, audio mux & corruption rejection.
@@ -158,9 +161,11 @@ Exit code: 0
   - `test_phase20a_55_get_gemini_status_retains_valid_in_session`: Giữ trạng thái `VALID` trong phiên ứng dụng.
   - `test_phase20a_56_app_restart_resets_to_unverified`: Khởi động lại ứng dụng đặt lại trạng thái `UNVERIFIED`.
   - `test_phase20a_57_zero_credential_leakage_in_diagnostics`: Che dấu API key trong toàn bộ chuỗi chẩn đoán.
-- Workspace regression suite (`cargo test --workspace -- --test-threads=1`): **847/847 passed (100%)**
+  - `test_phase20a_58_profile_auth_refresh_reload_consistency`: Live auth status được bảo toàn nhất quán qua các lần list/load profiles.
+  - `test_phase20a_59_production_app_shutdown_lifecycle_callback_cleans_sessions`: Callback shutdown của app gọi `close_all()` giải phóng lock và tiến trình.
+- Workspace regression suite (`cargo test --workspace -- --test-threads=1`): **849/849 passed (100%)**
 
-**Tổng cộng Rust tests**: ✅ **847/847 tests PASSED (100%), 0 failures, 0 regressions.**
+**Tổng cộng Rust tests**: ✅ **849/849 tests PASSED (100%), 0 failures, 0 regressions.**
 
 ---
 

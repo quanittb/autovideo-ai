@@ -17,6 +17,10 @@ use std::sync::Arc;
 use system::StoragePaths;
 use tauri::Manager;
 
+pub async fn handle_app_shutdown(session_manager: Arc<crate::ai::flow::FlowBrowserSessionManager>) {
+    session_manager.close_all().await;
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Perform startup recovery on interrupted pipeline jobs
@@ -24,7 +28,7 @@ pub fn run() {
     let engine = JobEngine::new(storage_paths.clone());
     let _ = engine.recover_interrupted_jobs();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
             let storage_paths = StoragePaths::default_paths();
@@ -183,6 +187,20 @@ pub fn run() {
             get_flow_job_status,
             list_flow_jobs,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(move |app_handle, event| match event {
+        tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
+            if let Some(session_mgr) =
+                app_handle.try_state::<Arc<crate::ai::flow::FlowBrowserSessionManager>>()
+            {
+                let mgr_clone = (*session_mgr).clone();
+                tauri::async_runtime::block_on(async move {
+                    handle_app_shutdown(mgr_clone).await;
+                });
+            }
+        }
+        _ => {}
+    });
 }

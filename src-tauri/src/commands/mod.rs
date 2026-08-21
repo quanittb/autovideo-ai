@@ -2312,7 +2312,15 @@ pub fn list_flow_profiles(
     );
     let mut profiles = manager.list_profiles();
     for p in &mut profiles {
-        p.browser_session_open = session_mgr.is_session_open(&p.profile_id);
+        if session_mgr.is_session_open(&p.profile_id) {
+            p.browser_session_open = true;
+            p.status = session_mgr
+                .get_session_auth_status(&p.profile_id)
+                .unwrap_or_else(|| "UNKNOWN".to_string());
+        } else {
+            p.browser_session_open = false;
+            p.status = "UNKNOWN".to_string();
+        }
     }
     profiles
 }
@@ -2328,6 +2336,13 @@ pub fn create_flow_profile(
     );
     let mut snapshot = manager.create_profile(&profile_id, &name)?;
     snapshot.browser_session_open = session_mgr.is_session_open(&profile_id);
+    snapshot.status = if snapshot.browser_session_open {
+        session_mgr
+            .get_session_auth_status(&profile_id)
+            .unwrap_or_else(|| "UNKNOWN".to_string())
+    } else {
+        "UNKNOWN".to_string()
+    };
     Ok(snapshot)
 }
 

@@ -1,6 +1,7 @@
 use crate::ai::flow::*;
 use crate::system::StoragePaths;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 #[test]
@@ -617,4 +618,115 @@ fn test_phase20a_50_profile_locked_by_worker_not_browser_open() {
     assert!(!session_mgr.is_session_open("prof_worker_lock"));
 
     drop(guard);
+}
+
+#[test]
+fn test_phase20a_58_profile_auth_refresh_reload_consistency() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let profile_mgr = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_mgr
+        .create_profile("prof_consistency_test", "Consistency Test")
+        .unwrap();
+    let profile_dir = profile_mgr
+        .get_profile_dir("prof_consistency_test")
+        .unwrap();
+
+    let server_handle = rt
+        .block_on(MockFlowServer::start(MockScenario::Ready))
+        .unwrap();
+
+    let session_mgr = FlowBrowserSessionManager::with_mock_url(server_handle.base_url.clone());
+
+    // 1. Open session
+    let _ = rt
+        .block_on(session_mgr.open_session("prof_consistency_test", &profile_dir, &paths))
+        .unwrap();
+
+    // 2. Refresh auth -> READY
+    let refreshed = rt
+        .block_on(session_mgr.check_or_refresh_auth("prof_consistency_test", &profile_dir, &paths))
+        .unwrap();
+    assert_eq!(refreshed, "READY");
+
+    // 3. Re-read / overlay profiles as in list_flow_profiles
+    let mut profiles = profile_mgr.list_profiles();
+    for p in &mut profiles {
+        if session_mgr.is_session_open(&p.profile_id) {
+            p.browser_session_open = true;
+            p.status = session_mgr
+                .get_session_auth_status(&p.profile_id)
+                .unwrap_or_else(|| "UNKNOWN".to_string());
+        } else {
+            p.browser_session_open = false;
+            p.status = "UNKNOWN".to_string();
+        }
+    }
+
+    let p_snap = profiles
+        .iter()
+        .find(|p| p.profile_id == "prof_consistency_test")
+        .unwrap();
+    assert_eq!(p_snap.status, "READY");
+    assert!(p_snap.browser_session_open);
+
+    // 4. Close browser session
+    rt.block_on(session_mgr.close_session("prof_consistency_test"))
+        .unwrap();
+
+    // 5. Re-read profiles after close -> auth status becomes UNKNOWN, browserSessionOpen=false
+    let mut profiles_after = profile_mgr.list_profiles();
+    for p in &mut profiles_after {
+        if session_mgr.is_session_open(&p.profile_id) {
+            p.browser_session_open = true;
+            p.status = session_mgr
+                .get_session_auth_status(&p.profile_id)
+                .unwrap_or_else(|| "UNKNOWN".to_string());
+        } else {
+            p.browser_session_open = false;
+            p.status = "UNKNOWN".to_string();
+        }
+    }
+
+    let p_snap_after = profiles_after
+        .iter()
+        .find(|p| p.profile_id == "prof_consistency_test")
+        .unwrap();
+    assert_eq!(p_snap_after.status, "UNKNOWN");
+    assert!(!p_snap_after.browser_session_open);
+}
+
+#[test]
+fn test_phase20a_59_production_app_shutdown_lifecycle_callback_cleans_sessions() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let profile_mgr = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_mgr
+        .create_profile("prof_prod_shut", "Prod Shutdown Test")
+        .unwrap();
+    let profile_dir = profile_mgr.get_profile_dir("prof_prod_shut").unwrap();
+
+    let server_handle = rt
+        .block_on(MockFlowServer::start(MockScenario::Ready))
+        .unwrap();
+
+    let session_mgr = Arc::new(FlowBrowserSessionManager::with_mock_url(
+        server_handle.base_url.clone(),
+    ));
+
+    // Open active managed login session
+    let _ = rt
+        .block_on(session_mgr.open_session("prof_prod_shut", &profile_dir, &paths))
+        .unwrap();
+    assert!(session_mgr.is_session_open("prof_prod_shut"));
+    assert!(profile_dir.join(".session.lock").exists());
+
+    // Invoke production app shutdown lifecycle handler
+    rt.block_on(crate::handle_app_shutdown(session_mgr.clone()));
+
+    // Assert session is closed, lock is removed, no orphan processes
+    assert!(!session_mgr.is_session_open("prof_prod_shut"));
+    assert!(!profile_dir.join(".session.lock").exists());
 }

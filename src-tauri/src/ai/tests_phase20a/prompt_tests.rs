@@ -144,12 +144,12 @@ fn test_phase20a_04_successful_optimization_replaces_editor_content() {
     let hash = calculate_prompt_hash(prompt);
     let resp = OptimizePromptResponse {
         optimized_prompt: prompt.to_string(),
-        model: "gemini-2.5-flash-lite".to_string(),
+        model: "gemini-3.5-flash".to_string(),
         prompt_source: PromptSource::GeminiOptimized,
         prompt_hash: hash,
     };
     assert_eq!(resp.prompt_source, PromptSource::GeminiOptimized);
-    assert_eq!(resp.model, "gemini-2.5-flash-lite");
+    assert_eq!(resp.model, "gemini-3.5-flash");
 }
 
 #[test]
@@ -308,7 +308,7 @@ fn test_phase20a_52_gemini_mock_validation_success_valid() {
     let server = rt
         .block_on(MockGeminiServer::start(
             200,
-            r#"{"name":"models/gemini-2.5-flash-lite","displayName":"Gemini 2.5 Flash Lite"}"#,
+            r#"{"name":"models/gemini-3.5-flash","displayName":"Gemini 2.5 Flash Lite"}"#,
         ))
         .unwrap();
 
@@ -319,7 +319,7 @@ fn test_phase20a_52_gemini_mock_validation_success_valid() {
     let manager = GeminiCredentialManager::with_endpoint_and_model(
         store,
         Some(server.base_url.clone()),
-        "gemini-2.5-flash-lite".to_string(),
+        "gemini-3.5-flash".to_string(),
     );
 
     let res = rt.block_on(manager.test_api_key()).unwrap();
@@ -346,7 +346,7 @@ fn test_phase20a_53_gemini_mock_validation_error_statuses() {
     let m_400 = GeminiCredentialManager::with_endpoint_and_model(
         store,
         Some(s_400.base_url.clone()),
-        "gemini-2.5-flash-lite".to_string(),
+        "gemini-3.5-flash".to_string(),
     );
     let res_400 = rt.block_on(m_400.test_api_key()).unwrap();
     assert_eq!(
@@ -366,7 +366,7 @@ fn test_phase20a_53_gemini_mock_validation_error_statuses() {
     let m_403 = GeminiCredentialManager::with_endpoint_and_model(
         store_403,
         Some(s_403.base_url.clone()),
-        "gemini-2.5-flash-lite".to_string(),
+        "gemini-3.5-flash".to_string(),
     );
     let res_403 = rt.block_on(m_403.test_api_key()).unwrap();
     assert_eq!(
@@ -378,7 +378,7 @@ fn test_phase20a_53_gemini_mock_validation_error_statuses() {
     let s_404 = rt
         .block_on(MockGeminiServer::start(
             404,
-            r#"{"error":{"code":404,"message":"models/gemini-2.5-flash-lite is not found for API version v1beta","status":"NOT_FOUND"}}"#,
+            r#"{"error":{"code":404,"message":"models/gemini-3.5-flash is not found for API version v1beta","status":"NOT_FOUND"}}"#,
         ))
         .unwrap();
     let store_404 = SecretStore::new(temp_dir.path().to_path_buf());
@@ -386,7 +386,7 @@ fn test_phase20a_53_gemini_mock_validation_error_statuses() {
     let m_404 = GeminiCredentialManager::with_endpoint_and_model(
         store_404,
         Some(s_404.base_url.clone()),
-        "gemini-2.5-flash-lite".to_string(),
+        "gemini-3.5-flash".to_string(),
     );
     let res_404 = rt.block_on(m_404.test_api_key()).unwrap();
     assert_eq!(
@@ -406,7 +406,7 @@ fn test_phase20a_53_gemini_mock_validation_error_statuses() {
     let m_429 = GeminiCredentialManager::with_endpoint_and_model(
         store_429,
         Some(s_429.base_url.clone()),
-        "gemini-2.5-flash-lite".to_string(),
+        "gemini-3.5-flash".to_string(),
     );
     let res_429 = rt.block_on(m_429.test_api_key()).unwrap();
     assert_eq!(
@@ -426,7 +426,7 @@ fn test_phase20a_53_gemini_mock_validation_error_statuses() {
     let m_500 = GeminiCredentialManager::with_endpoint_and_model(
         store_500,
         Some(s_500.base_url.clone()),
-        "gemini-2.5-flash-lite".to_string(),
+        "gemini-3.5-flash".to_string(),
     );
     let res_500 = rt.block_on(m_500.test_api_key()).unwrap();
     assert_eq!(
@@ -452,7 +452,7 @@ fn test_phase20a_54_failed_verification_preserves_stored_key() {
     let manager = GeminiCredentialManager::with_endpoint_and_model(
         store.clone(),
         Some(server.base_url.clone()),
-        "gemini-2.5-flash-lite".to_string(),
+        "gemini-3.5-flash".to_string(),
     );
 
     let res = rt.block_on(manager.test_api_key()).unwrap();
@@ -472,7 +472,7 @@ fn test_phase20a_55_get_gemini_status_retains_valid_in_session() {
     let server = rt
         .block_on(MockGeminiServer::start(
             200,
-            r#"{"name":"models/gemini-2.5-flash-lite"}"#,
+            r#"{"name":"models/gemini-3.5-flash"}"#,
         ))
         .unwrap();
 
@@ -483,7 +483,7 @@ fn test_phase20a_55_get_gemini_status_retains_valid_in_session() {
     let manager = GeminiCredentialManager::with_endpoint_and_model(
         store,
         Some(server.base_url.clone()),
-        "gemini-2.5-flash-lite".to_string(),
+        "gemini-3.5-flash".to_string(),
     );
 
     let _ = rt.block_on(manager.test_api_key()).unwrap();

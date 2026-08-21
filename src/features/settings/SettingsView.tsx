@@ -75,7 +75,7 @@ export const SettingsView: React.FC = () => {
       const testRes = await flowApi.testGeminiApiKey();
       setGeminiStatus(testRes);
       if (testRes.verificationStatus === 'VALID') {
-        setGeminiMessage({ type: 'success', text: 'API Access Verified (gemini-2.5-flash-lite).' });
+        setGeminiMessage({ type: 'success', text: 'API Access Verified (gemini-3.5-flash).' });
       } else {
         setGeminiMessage({
           type: 'warning',
@@ -284,7 +284,7 @@ export const SettingsView: React.FC = () => {
                 </div>
 
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  Gemini API key is used exclusively for <strong>user-initiated prompt optimization</strong> in Google Flow ({geminiStatus?.model || 'gemini-2.5-flash-lite'}). Keys are securely stored in the <strong>OS Credential Manager / Keychain</strong> and are never written to disk or sent to logs.
+                  Gemini API key is used exclusively for <strong>user-initiated prompt optimization</strong> in Google Flow ({geminiStatus?.model || 'gemini-3.5-flash'}). Keys are securely stored in the <strong>OS Credential Manager / Keychain</strong> and are never written to disk or sent to logs.
                 </p>
 
                 {geminiMessage && (

@@ -330,7 +330,7 @@ pub struct GeminiCredentialManager {
 }
 
 impl GeminiCredentialManager {
-    pub const DEFAULT_MODEL: &'static str = "gemini-2.5-flash-lite";
+    pub const DEFAULT_MODEL: &'static str = "gemini-3.5-flash";
 
     pub fn new(secret_store: SecretStore) -> Self {
         let is_cfg = secret_store.is_gemini_configured();
@@ -529,7 +529,7 @@ pub struct GeminiPromptOptimizer {
 }
 
 impl GeminiPromptOptimizer {
-    pub const DEFAULT_MODEL: &'static str = "gemini-2.5-flash-lite";
+    pub const DEFAULT_MODEL: &'static str = "gemini-3.5-flash";
 
     pub fn new(secret_store: SecretStore) -> Self {
         let client = reqwest::Client::builder()

@@ -92,12 +92,36 @@ describe('flowJobStore', () => {
     expect(state.profiles[0].browserSessionOpen).toBe(true);
     expect(state.profiles[0].isLocked).toBe(true);
 
-    vi.mocked(flowApi.closeProfileBrowser).mockResolvedValueOnce(undefined);
+    // Refresh auth -> READY
+    vi.mocked(flowApi.refreshProfileStatus).mockResolvedValueOnce('READY');
+    const authRes = await useFlowJobStore.getState().refreshProfileStatus('prof_1');
+    expect(authRes).toBe('READY');
+    expect(useFlowJobStore.getState().profiles[0].status).toBe('READY');
+
+    // Subsequent loadProfiles returns same READY status from live session
     vi.mocked(flowApi.listProfiles).mockResolvedValueOnce([
       {
         profileId: 'prof_1',
         name: 'Profile 1',
         status: 'READY',
+        isLocked: true,
+        browserSessionOpen: true,
+        createdAt: '2026-08-21T00:00:00Z',
+        updatedAt: '2026-08-21T00:00:00Z',
+      },
+    ]);
+    await useFlowJobStore.getState().loadProfiles();
+    state = useFlowJobStore.getState();
+    expect(state.profiles[0].status).toBe('READY');
+    expect(state.profiles[0].browserSessionOpen).toBe(true);
+
+    // Close bgemini-3.5-flashs -> auth status becomes UNKNOWN and browserSessionOpen=false
+    vi.mocked(flowApi.closeProfileBrowser).mockResolvedValueOnce(undefined);
+    vi.mocked(flowApi.listProfiles).mockResolvedValueOnce([
+      {
+        profileId: 'prof_1',
+        name: 'Profile 1',
+        status: 'UNKNOWN',
         isLocked: false,
         browserSessionOpen: false,
         createdAt: '2026-08-21T00:00:00Z',
@@ -109,6 +133,7 @@ describe('flowJobStore', () => {
     state = useFlowJobStore.getState();
     expect(state.profiles[0].browserSessionOpen).toBe(false);
     expect(state.profiles[0].isLocked).toBe(false);
+    expect(state.profiles[0].status).toBe('UNKNOWN');
   });
 
   it('tests Gemini API key and stores verification status', async () => {

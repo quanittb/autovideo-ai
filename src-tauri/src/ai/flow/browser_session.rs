@@ -46,6 +46,27 @@ impl FlowBrowserSessionManager {
         guard.contains_key(profile_id)
     }
 
+    pub fn get_session_auth_status(&self, profile_id: &str) -> Option<String> {
+        let session_arc = {
+            let map = self.sessions.lock().unwrap();
+            map.get(profile_id).cloned()
+        }?;
+        let res = match session_arc.try_lock() {
+            Ok(session) => session.auth_status.clone(),
+            Err(_) => "UNKNOWN".to_string(),
+        };
+        Some(res)
+    }
+
+    pub async fn get_session_auth_status_async(&self, profile_id: &str) -> Option<String> {
+        let session_arc = {
+            let map = self.sessions.lock().unwrap();
+            map.get(profile_id).cloned()
+        }?;
+        let session = session_arc.lock().await;
+        Some(session.auth_status.clone())
+    }
+
     pub async fn open_session(
         &self,
         profile_id: &str,
