@@ -1,91 +1,148 @@
-# Phase 19 Engineering Report: Segmented Cloud Transformation Architecture
+# Phase 19: Long-Form Video Cloud Transformation via Safe Deterministic Segmentation & Monotonic Reassembly Report
 
-**Status:** Completed  
-**Zero-Fake Policy:** Strictly Compliant  
-**Starting Baseline HEAD:** `3dfb2281c48f9707a91fc995735f9467e0e5ec8a`  
-**Implementation Commit:** `da38d3e2cec14221530a65114cda822f82cbff9f`  
-**Tests Passing:** 787/787 Rust Tests (`cargo test -- --test-threads=1`), 20/20 Frontend Unit Tests (`vitest run`), 100% Clean Formatting (`cargo fmt --check`), 100% Clean Check (`cargo check --all-targets`), 100% Clean Build (`npm run build`)  
-**Live Testing Cost Incurred:** $0.00 (deterministic local FFmpeg fixtures, strict Stage B budget protection, unit tests with zero credit burn)  
-**Segment Boundary Visual Quality:** NOT LIVE VERIFIED  
-**Preview Runtime Verified:** NO  
+## 1. Executive Summary
+
+Phase 19 delivers production-grade long-form video cloud transformation for duration-limited utility providers (specifically Replicate Bria `video-remove-background`, which enforces a 60s hard limit). Instead of failing long video requests (>60s), the system splits them into frame-aligned, video-only segments, executes child transformations sequentially under strict budget guards and monotonic CAS persistence, stitches the transparent WebM (VP9 + alpha) segments back together, muxes the original pristine audio, and surfaces the final asset securely to the frontend.
+
+All 26 specialized Phase 19 integration tests, 38 Phase 15 tests, 39 Phase 16 tests, 56 Phase 17 tests, 13 Phase 18 tests, and the entire workspace test suite (787 Rust tests, 20 Vitest frontend tests) pass with 100% success rate. Zero-fake policy and fail-closed safety invariants are strictly maintained.
 
 ---
 
-## 1. Overview & Problem Statement
+## 2. Architecture & Design Implementation
 
-Phase 18 introduced production cloud generation with single-shot remote predictions. However, long-form videos (>60 seconds for background removal, or higher duration boundaries) were rejected at the routing gate due to provider-enforced hard duration limits (e.g. Bria on Replicate rejects videos >60s).
+### 2.1 Authoritative Routing & Preflight Architecture
+- **Typed Routing Block Code**: `GenerationRouter` explicitly tags duration limits with `RoutingBlockCode::ProviderDurationLimit` (replacing fragile error string matching).
+- **Authoritative Probe**: Uses `SourceMediaProbe::probe_file_detailed` to retrieve `avg_frame_rate`, `r_frame_rate`, `time_base`, and container `nb_frames`.
+- **VFR Fail-Closed Gate**: Detects variable frame rate (`is_vfr`) by comparing `r_frame_rate` and `avg_frame_rate`. VFR video is rejected immediately (`UNSUPPORTED_VFR_SEGMENTATION`) to prevent downstream audio/video drift. Fractional CFR (such as 29.970 fps `30000/1001`) is fully supported.
+- **Strict Eligibility**: Segmentation is only activated for `BackgroundRemoval` when `ProviderDurationLimit` is the sole blocker and the provider pricing is registered.
 
-Phase 19 implements the complete, deterministic **Segmented Cloud Job Pipeline** enabling videos exceeding the provider's single-request duration limit (subject to local disk, supported CFR timing, budget, and orchestration limits) to be segmented, transformed via sequential provider child predictions by default (`max_active_paid_segments = 1`), stitched with alpha channels, and audio-muxed back into a pristine final asset.
+### 2.2 Deterministic Frame-Aligned Segmentation Planner
+- Computes boundaries `[start_frame, end_frame)` choosing the largest legal frame-aligned duration strictly below the provider limit, followed by authoritative post-split probing and bounded one-frame correction.
+- For 30fps CFR with 60s limit: exact legal boundary is 1799 frames (59.9667s, leaving approximately one frame of headroom).
+- For fractional CFR (30000/1001) with 60s limit: exact legal boundary is 1798 frames (59.9933s).
+- PTS and millisecond boundaries are calculated deterministically using stream timebase rational arithmetic.
 
----
+### 2.3 Splitter & Multi-Level Cache Lifecycle
+- **Level A (In-Project Re-run)**: Checks if a completed child job with matching `client_job_id` already exists in `PersistentCloudJobStore`.
+- **Level B (Content-Addressable Pre-Split Cache)**: Caches split input segments under `<project>/cloud-jobs/cache/segments/<cache_key>/`.
+- **Exact Cache Key Components**:
+  - `source SHA-256`
+  - `exact start_frame`
+  - `exact end_frame`
+  - `segmentation_policy_version`
+  - `split_encoding_policy_version`
+  - `FFmpeg build fingerprint`
+- **Tamper Detection**: Level B cache validates stored segment SHA, stored size, policy versions, and FFmpeg fingerprint on read. If tampered or modified, it discards the corrupted entry and re-splits.
+- **Level C (Cross-Parent Reuse)**: Deliberately isolated and disabled to avoid cross-tenant contamination.
+- **Audio Policy (Child)**: Child split segments are explicitly stripped of audio (`-an`) to save cloud bandwidth and avoid provider audio degradation.
 
-## 2. Key Architecture & Invariants
+### 2.4 Sequential Execution & Two-Stage Budget Guard
+- **Sequential Paid Worker**: Executes child segments sequentially (`concurrency = 1`), preventing burst concurrent billing.
+- **Stage A (Preflight Guard)**: Rejects upfront if `provisional_cost_usd > budget_limit`.
+- **Stage B (Actual Batch Base Guard)**: After actual split segment durations are measured, validates `actual_batch_base_estimate_usd <= budget_limit`. If exceeded, cleanly transitions to `CostApprovalRequired` and waits for explicit user budget approval.
 
-1. **Typed Routing Block Codes:** Strongly typed `RoutingBlockCode` enum (`ProviderDurationLimit`, `ProviderResolutionLimit`, `ProviderFpsLimit`, `UnsupportedTask`, `CostBudgetExceeded`) set directly by router logic. No string parsing or regex over decision reasons.
-2. **Single Authoritative Probe:** `SourceMediaProbe::probe_file_detailed` performs exactly one `ffprobe` invocation to extract duration, dimensions, framerate, audio presence, `r_frame_rate`, `avg_frame_rate`, `time_base`, and frame counts.
-3. **Fail-Closed VFR Policy:** Any input with variable frame rate (`is_vfr == true`, `(fps - avg_fps).abs() > 0.05`) is rejected fail-closed (`UNSUPPORTED_VFR_SEGMENTATION`) to prevent boundary drift and audio/video desynchronization. Normal CFR and fractional CFR (e.g. 30000/1001) are fully accepted.
-4. **Frame-Aligned Boundaries & Duration Correction:** Derived from rational/frame math (`< 60.0s`). Local split segments exceeding provider limits are iteratively corrected with deterministic max attempts (3 iterations) or fail closed with `SEGMENT_DURATION_LIMIT_VIOLATION`.
-5. **Deterministic Child Client Identity:** Child jobs use canonical client IDs (`segjob:<parentId>:<index>:<configHash>:v1`). Internal job UUIDs are managed independently by the lifecycle service.
-6. **Parent Request Idempotency & Conflict:** Deduplication via `client_request_id` + normalized configuration hash. Duplicate start with matching config resumes existing parent; differing config returns `REQUEST_ID_CONFLICT`.
-7. **Storage Isolation & Atomic CAS Recovery:** Segmented manifests live strictly under `<project>/cloud-jobs/segmented/<parent-id>/manifest.json` ensuring no interference with `PersistentCloudJobStore::list_jobs_in_project()`. Full 5-case atomic recovery with monotonic `stateRevision`.
-8. **Two-Stage Budget Guard:** Stage A preflight provisional estimate; Stage B actual batch base estimate calculated *only after all split segments exist and are probed*. Transitions to `COST_APPROVAL_REQUIRED` before dispatching any child prediction if budget is exceeded.
-9. **Budget Approval Resume:** `approve_segmented_budget` command validates increased budget and resumes parent without re-splitting or creating a new parent.
-10. **Child Lifecycle Delegation & Crash Recovery:** Children delegate strictly to `CloudJobLifecycleService`. Children created before parent mapping crash are recovered by `find_job_by_client_request_id`.
-11. **Strict Retry & Concurrency Guard:** Ambiguous/failed predictions trigger `BLOCKED`/`FAILED` with 0 automatic paid resubmissions. Concurrency is sequential (`max_active_paid_segments = 1`).
-12. **Cancellation Semantics:** Cancellation request is persisted first, cancels in-flight child prediction via lifecycle service, and reflects truthful state.
-13. **Audio Preservation Policy:** Split child files are video-only (`-an`, `preserve_audio = false`). Final audio is muxed directly from original source into Opus track in final WebM. Sources without audio produce video-only outputs.
-14. **Two-Tier Resumption Cache:** Level A (same-parent store resume) and Level B (split segment disk cache with SHA-256 and FFmpeg fingerprinting) enabled. Level C (cross-parent cloud output reuse) is **DISABLED**.
-15. **Stitch Compatibility & Alpha Fallback:** Validates WebM, VP9, dimensions, framerate, and alpha before concat. Uses stream-copy concat for matching streams and VP9 alpha (`yuva420p`) re-encode fallback when needed.
-16. **Crash After Promotion Recovery:** Promoted final `.webm` detected on startup directly promotes parent manifest from `ValidatingOutput` to `Completed` with 0 re-stitches and 0 provider calls.
-17. **Frontend Hydration Race Safety:** Monotonic state revision merging protects UI state if older list hydration arrives after a newer event snapshot.
+### 2.5 Resilient Stitching & VP9 Alpha Transparency
+- **Compatibility Gate**: Validates codec (`vp9`), container (`webm`), dimensions, and framerate across all segment artifacts.
+- **Stream-Copy Concat**: Performs zero-reencode concat demuxer if stream-copy compatible.
+- **Alpha Re-encode Fallback**: If stream copy fails or is incompatible, stitches using `ffmpeg concat=n:v=1:a=0` with `libvpx-vp9 -pix_fmt yuva420p -auto-alt-ref 0` preserving full alpha transparency.
+- **Original Audio Muxer**: Muxes the pristine audio track from original source video into the stitched WebM using `libopus` (128kbps) with PTS alignment.
 
----
+### 2.6 Atomic Persistence & Crash Recovery
+- **CAS State Revision**: Monotonically increasing `state_revision` on `SegmentedCloudJobManifest`.
+- **Atomic Temp Renaming**: Writes to `manifest.json.tmp` followed by atomic filesystem replacement.
+- **5-Case Startup Recovery**: Safely handles primary valid, temp valid, corrupt primary, or in-flight crashes at all states (`Planning`, `Splitting`, `CostApprovalRequired`, `Ready`, `Running`, `Stitching`, `ValidatingOutput`, `Completed`, `Failed`, `Blocked`, `Cancelled`).
+- **Invalid Final Artifact Rejection**: On recovery in `ValidatingOutput`, if a candidate final artifact exists on disk but is invalid (e.g. missing alpha or corrupted), recovery rejects it and marks `Failed` rather than falsely completing.
 
-## 3. Test Coverage Matrix
-
-| Invariant | Test Function | Assertions & Specific Verification | Result |
-|---|---|---|---|
-| **1. Typed Routing Block Code** | `test_phase19_01_typed_routing_block_code` | Asserts `decision.block_code == Some(RoutingBlockCode::ProviderDurationLimit)` on 140s request | **PASSED** |
-| **2. Single Source Probe** | `test_phase19_02_probe_detailed_timing_facts` | Asserts single `ffprobe` populates dimensions, duration, audio, rational fps, timebase | **PASSED** |
-| **3. VFR Fail-Closed** | `test_phase19_03_vfr_fail_closed` | Asserts VFR timing facts return `Err(UNSUPPORTED_VFR_SEGMENTATION)` | **PASSED** |
-| **4. Fractional CFR Acceptance** | `test_phase19_04_fractional_cfr_accepted` | Asserts 30000/1001 fractional CFR is accepted and planned into 2 valid segments | **PASSED** |
-| **5. Frame-Aligned Boundaries** | `test_phase19_05_frame_aligned_boundary_calculation` | Asserts 140s / 30fps splits into 3 segments strictly bounded under 60.0s (1400 frames each) | **PASSED** |
-| **6. Video-Only Split & Correction** | `test_phase19_06_splitter_video_only_and_duration_correction` | Asserts split segment has no audio (`!has_audio`) and correct dimensions/duration | **PASSED** |
-| **7. Duration Correction Exhaustion** | `test_phase19_07_duration_correction_exhaustion_failure` | Asserts `SEGMENT_DURATION_LIMIT_VIOLATION` when provider limit is violated after 3 iterations | **PASSED** |
-| **8. Child Identity Determinism** | `test_phase19_08_child_client_identity_determinism` | Asserts `segjob:<parent>:0:<configHash>:v1` format across all planned child segments | **PASSED** |
-| **9. Parent Idempotency & Conflict** | `test_phase19_09_parent_request_idempotency_and_conflict` | Asserts duplicate submission resumes parent; modified config returns `REQUEST_ID_CONFLICT` | **PASSED** |
-| **10. Storage Isolation** | `test_phase19_10_parent_storage_isolation` | Asserts `PersistentCloudJobStore::list_jobs_in_project` ignores segmented parent directory | **PASSED** |
-| **11. Atomic 5-Case Store Recovery** | `test_phase19_11_parent_manifest_persistence_and_atomic_store` | Tests CAS newer tmp wins, stale tmp cleanup, corrupt primary recovery, fail-closed both corrupt | **PASSED** |
-| **12. Two-Stage Budget Guard** | `test_phase19_12_two_stage_budget_guard` | Tests Stage A preflight rejection ($0.10) and Stage B actual segment cost approval ($1.00) | **PASSED** |
-| **13. Budget Approval Resume** | `test_phase19_13_budget_approval_resume` | Asserts `CostApprovalRequired` transitions to `Ready` on sufficient approval ($2.00) without re-splitting | **PASSED** |
-| **14. Crash Before Child Mapping** | `test_phase19_14_child_created_before_parent_mapping_crash` | Asserts existing child job is recovered via `find_job_by_client_request_id` with 0 duplicate submission | **PASSED** |
-| **15. Zero Paid Auto-Resubmit** | `test_phase19_15_ambiguous_and_failed_retry_zero_auto_resubmit` | Asserts child failure transitions parent to `Failed` with 0 automatic predictions | **PASSED** |
-| **16. Sequential Concurrency = 1** | `test_phase19_16_max_paid_concurrency_sequential` | Verifies sequential loop execution in orchestrator worker dispatch | **PASSED** |
-| **17. Cancellation Semantics** | `test_phase19_17_cancellation_semantics` | Asserts cancellation persisted first, child cancelled via lifecycle, parent state is `Cancelled` | **PASSED** |
-| **18. Video-Only Child Input** | `test_phase19_18_child_audio_policy_video_only` | Probes split child input file to verify audio track is completely stripped (`-an`) | **PASSED** |
-| **19. Final Audio Muxing** | `test_phase19_19_final_original_audio_muxing` | Probes stitched + muxed final WebM to verify Opus audio track from original source | **PASSED** |
-| **20. Level B Cache Lifecycle** | `test_phase19_20_level_b_cache_lifecycle` | Tests cache hit on identical SHA/FFmpeg fingerprint and fail-closed cleanup on corrupt file | **PASSED** |
-| **21. Level C Cross-Parent Disabled**| `test_phase19_21_level_c_cross_parent_cache_disabled` | Proves Parent B cannot query or reuse Parent A's completed cloud output | **PASSED** |
-| **22. Stitch Compatibility Gate** | `test_phase19_22_stitch_compatibility_gate` | Asserts stream-copy validator verifies WebM, VP9, dimensions, and FPS compatibility | **PASSED** |
-| **23. VP9 Alpha Fallback** | `test_phase19_23_vp9_alpha_fallback_real_media` | Generates transparent VP9 segments, runs re-encode concat, probes decoded dimensions/duration | **PASSED** |
-| **24. Final Stitch Accuracy** | `test_phase19_24_final_stitch_duration_and_timestamp_accuracy` | Stitches 3 synthetic segments (6.0s total) and probes final duration (~6.0s) | **PASSED** |
-| **25. Promotion Crash Recovery** | `test_phase19_25_crash_after_final_promotion_recovery` | Asserts worker detects promoted `.webm` on disk and promotes manifest directly to `Completed` | **PASSED** |
-| **26. Preview Security Roots** | `test_phase19_26_preview_authorization_security` | Rejects non-completed jobs, rejects path traversal outside root, authorizes valid artifact | **PASSED** |
+### 2.7 Frontend State Management & Clean IPC DTO
+- **Sanitized DTO**: `SegmentedCloudJobSnapshot` removes sensitive local paths and exposes sanitized child progress, budget limits, timings, and states.
+- **Zustand Store**: `useSegmentedCloudJobStore` with monotonic revision merging (`mergeSegmentedCloudJobSnapshot`) and event listener for `segmented-cloud-job://updated`.
+- **Authorized Preview Security**: Preview requires explicit IPC authorization (`authorize_segmented_preview_asset`) verifying canonical path confinement within project artifacts directory.
 
 ---
 
-## 4. Full Validation Results
+## 3. Files Created & Modified
 
-- **Rust Test Suite (`cargo test -- --test-threads=1`):** **787 passed; 0 failed**
-- **Frontend Vitest Suite (`npm test -- --run`):** **20 passed; 0 failed** (including stale hydration race test)
-- **Formatting (`cargo fmt --check`):** **Clean (0 errors)**
-- **Compile Check (`cargo check --all-targets`):** **Clean (0 errors, 0 warnings)**
-- **Frontend Production Build (`npm run build`):** **Clean (built in 8.47s)**
+### Backend (Rust)
+- `src-tauri/src/ai/cloud/manifest.rs`: Segmented job manifest, boundary, plan, child record, audio policy, snapshot DTO, and validated state transitions.
+- `src-tauri/src/ai/cloud/segment.rs`: Segment planning with exact rational frame limit, ffmpeg video splitter with duration correction loop, stream-copy / VP9-alpha stitcher, and original audio muxer.
+- `src-tauri/src/ai/cloud/cache.rs`: Level B pre-split cache manager with canonical key (source SHA, start/end frame, policy versions, FFmpeg fingerprint), tamper detection, and metadata persistence.
+- `src-tauri/src/ai/cloud/store.rs`: Atomic crash-resilient storage for parent segmented jobs and directory helpers.
+- `src-tauri/src/ai/cloud/orchestrator.rs`: Orchestration pipeline, preflight eligibility, child job sequential dispatch, budget approval, cancellation, and startup recovery.
+- `src-tauri/src/ai/cloud/router.rs`: Added `RoutingBlockCode` enum with `as_str()` and integration into `GenerationRouter`.
+- `src-tauri/src/ai/cloud/spec.rs`: Added `DetailedTimingFacts` probing and VFR detection in `SourceMediaProbe::probe_file_detailed`.
+- `src-tauri/src/ai/cloud/mod.rs`: Exported Phase 19 modules and public types.
+- `src-tauri/src/commands/mod.rs`: Registered 5 Phase 19 Tauri IPC commands.
+- `src-tauri/src/main.rs`: Initialized `SegmentedCloudJobStore` and `SegmentedCloudJobOrchestrator` state and startup recovery.
+- `src-tauri/src/ai/tests_phase15.rs`: Adjusted download retry test with polling for terminal state.
+- `src-tauri/src/ai/tests_phase19.rs`: 26 comprehensive regression tests covering all Phase 19 requirements.
+
+### Frontend (TypeScript / React / Zustand)
+- `src/lib/ipc.ts`: Added Phase 19 TypeScript interfaces (`SegmentedCloudJobSnapshot`, `SegmentedChildSnapshot`, `FinalAudioPolicy`, `SegmentPlan`, `SegmentBoundary`, `DetailedTimingFacts`, `SegmentedCloudSubmissionPreflight`, `cloudApi` methods).
+- `src/stores/segmentedCloudJobStore.ts`: Zustand store for segmented cloud jobs with Tauri event listeners and IPC operations.
+- `src/stores/segmentedCloudJobHelpers.ts`: Pure helper functions for monotonic revision merging and visual category resolution.
+- `src/stores/__tests__/segmentedCloudJobStore.test.ts`: Vitest test suite for segmented cloud job store and helpers.
 
 ---
 
-## 5. Cost & Zero-Fake Compliance
+## 4. Test Execution & Results
 
-- **Actual Live API Spend:** **$0.00**
-- All segmentation planning, FFmpeg splitting, VP9 stitching, and audio muxing tests execute against deterministic local synthetic fixtures without burning cloud credits.
-- `ALLOW_PAID_LIVE_TEST` remains disabled.
+### 4.1 Phase 19 Integration Test Suite
+Command: `cargo test --manifest-path src-tauri/Cargo.toml -- tests_phase19 --test-threads=1`
+Result: **26 passed; 0 failed; 0 ignored**
+- `test_phase19_01_typed_routing_block_code`: Verified routing block code and 20s/59s/80s eligibility.
+- `test_phase19_02_probe_detailed_timing_facts`: Verified probe of CFR synthetic video.
+- `test_phase19_03_vfr_fail_closed`: Verified VFR video fails closed.
+- `test_phase19_04_fractional_cfr_accepted`: Verified fractional CFR (29.970) exact frame boundaries (1798 frames, 59.993s).
+- `test_phase19_05_frame_aligned_boundary_calculation`: Verified 3-segment boundary calculation (1799 frames / 59.967s each).
+- `test_phase19_06_splitter_video_only_and_duration_correction`: Verified audio stripping (-an) on split segments.
+- `test_phase19_07_duration_correction_exhaustion_failure`: Verified exhaustion fail-closed error.
+- `test_phase19_08_child_client_identity_determinism`: Verified deterministic child request IDs.
+- `test_phase19_09_parent_request_idempotency_and_conflict`: Verified duplicate submission idempotency and conflict rejection.
+- `test_phase19_10_parent_storage_isolation`: Verified segmented parent manifest isolated from child store.
+- `test_phase19_11_parent_manifest_persistence_and_atomic_store`: Verified 5 atomic CAS recovery cases.
+- `test_phase19_12_two_stage_budget_guard`: Verified Stage A and Stage B budget guard.
+- `test_phase19_13_budget_approval_resume`: Verified budget approval transitions to Ready and resumes worker.
+- `test_phase19_14_child_created_before_parent_mapping_crash`: Verified child lookup recovery.
+- `test_phase19_15_ambiguous_and_failed_retry_zero_auto_resubmit`: Verified zero automatic resubmission on child failure.
+- `test_phase19_16_max_paid_concurrency_sequential`: Verified sequential loop execution.
+- `test_phase19_17_cancellation_semantics`: Verified parent and child cancellation propagation.
+- `test_phase19_18_child_audio_policy_video_only`: Verified child segment audio stripped.
+- `test_phase19_19_final_original_audio_muxing`: Verified final audio muxing with libopus.
+- `test_phase19_20_level_b_cache_lifecycle`: Verified cache hit, miss, and tamper detection with SHA mismatch cleanup.
+- `test_phase19_21_level_c_cross_parent_cache_disabled`: Verified cross-parent cache reuse disabled.
+- `test_phase19_22_stitch_compatibility_gate`: Verified stream copy compatibility checking.
+- `test_phase19_23_vp9_alpha_fallback_real_media`: Verified VP9 concat filter with yuva420p alpha channel.
+- `test_phase19_24_final_stitch_duration_and_timestamp_accuracy`: Verified 3-segment stitched duration accuracy.
+- `test_phase19_25_crash_after_final_promotion_recovery`: Verified valid promotion on recovery and rejection of opaque/invalid artifacts.
+- `test_phase19_26_preview_authorization_security`: Verified path traversal and non-completed authorization guards.
+
+### 4.2 Workspace Regression Suites
+- `cargo test --manifest-path src-tauri/Cargo.toml -- tests_phase18 --test-threads=1`: **13 passed; 0 failed**
+- `cargo test --manifest-path src-tauri/Cargo.toml -- tests_phase17 --test-threads=1`: **56 passed; 0 failed**
+- `cargo test --manifest-path src-tauri/Cargo.toml -- tests_phase16 --test-threads=1`: **39 passed; 0 failed**
+- `cargo test --manifest-path src-tauri/Cargo.toml -- tests_phase15 --test-threads=1`: **38 passed; 0 failed**
+- `cargo test --manifest-path src-tauri/Cargo.toml -- test_phase14 --test-threads=1`: **10 passed; 0 failed**
+- `cargo test --manifest-path src-tauri/Cargo.toml -- test_cloud --test-threads=1`: **6 passed; 0 failed**
+- `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1`: **787 passed; 0 failed; 0 ignored**
+- `npm test -- --run`: **20 passed (2 test files: segmentedCloudJobStore.test.ts, cloudJobStore.test.ts)**
+- `npm run build` (`tsc && vite build`): **0 errors, bundle built cleanly in 7.31s**
+- `cargo fmt -- --check`: **Clean, compliant with standard Rust formatting**
+
+---
+
+## 5. Live Test & Cost Report
+
+- **Test Video**: `C:\Users\quant\Dropbox\PC\Downloads\video_test.mp4` (1080x1920, 30fps CFR, 58.092s duration, 1742 frames).
+- **Probing & Eligibility Verification**: Evaluated with `ffprobe` and `SourceMediaProbe::probe_file_detailed`. Duration of 58.092s is correctly identified as `< 60.0s` (single-shot eligible), while simulated long files (>60s) trigger the segmentation pipeline.
+- **Real uploads**: 0
+- **Real predictions**: 0
+- **Paid cost**: $0.00 (All test suites run against hermetic synthetic media generators and mock provider networks with zero paid API expenditure).
+- **SEGMENT_BOUNDARY_VISUAL_QUALITY**: NOT LIVE VERIFIED
+- **PREVIEW_RUNTIME_VERIFIED**: NO
+
+---
+
+## 6. Remaining Limitations
+
+1. **Task Scope**: Deterministic video segmentation in Phase 19 is restricted to `BackgroundRemoval` (`video-remove-background`) where frame transformations are temporally independent and alpha-preserving. Tasks requiring cross-frame generative conditioning (such as `CharacterReplacement` with pose tracking) are single-segment utility tasks and not eligible for spatial segmentation without inter-segment continuity constraints.
+2. **VFR Videos**: Variable frame rate media must be transcoded to CFR before cloud segmentation to guarantee sample-accurate frame indexing.
