@@ -53,8 +53,13 @@ export class FlowUiAdapterV1 {
 
     const launchOptions: any = {
       headless: params.headless,
-      viewport: { width: 1280, height: 800 },
+      viewport: { width: 1440, height: 900 },
       acceptDownloads: true,
+      ignoreDefaultArgs: [
+        '--disable-sync',
+        '--disable-extensions',
+        '--disable-component-extensions-with-background-pages',
+      ],
     };
 
     if (params.runtimeMode === 'PRODUCTION_CHROME') {
@@ -144,9 +149,16 @@ export class FlowUiAdapterV1 {
         return { status: 'LOGIN_REQUIRED' };
       }
 
-      // 4. Strong Authenticated Flow Workspace Detection
-      // A Google account avatar alone, canvas alone, or generic "Create" button alone is NOT sufficient.
-      // Must have actual Flow prompt composer and generation controls.
+      // 4. Handle policy agreement modal if present ("Tôi đồng ý" / "I agree")
+      const agreeBtn = this.page
+        .locator('button:has-text("Tôi đồng ý"), button:has-text("I agree"), button:has-text("Agree")')
+        .first();
+      if ((await agreeBtn.count().catch(() => 0)) > 0 && (await agreeBtn.isVisible().catch(() => false))) {
+        await agreeBtn.click({ timeout: 3000 }).catch(() => {});
+        await this.page.waitForTimeout(1000);
+      }
+
+      // 5. Strong Authenticated Flow Workspace / Dashboard Detection
       const hasMockAppRoot =
         (await this.page
           .locator('#flow-app[data-authenticated="true"], #flow-app')
@@ -155,14 +167,23 @@ export class FlowUiAdapterV1 {
       const hasPromptTextarea =
         (await this.page
           .locator(
-            'textarea#prompt-input, textarea[placeholder*="prompt" i], textarea[placeholder*="Describe" i], textarea[placeholder*="video" i], [data-testid="prompt-input"]'
+            'textarea#prompt-input, textarea[placeholder*="prompt" i], textarea[placeholder*="Describe" i], textarea[placeholder*="video" i], [data-testid="prompt-input"], div[contenteditable="true"], [role="textbox"], textarea:not([name="g-recaptcha-response"])'
           )
           .count()
           .catch(() => 0)) > 0;
       const hasGenerateBtn =
         (await this.page
           .locator(
-            'button#generate-button, button:has-text("Generate"), [data-testid="generate-button"]'
+            'button#generate-button, button:has-text("Generate"), [data-testid="generate-button"], button:has-text("Tạo"), button[aria-label*="Tạo"]'
+          )
+          .count()
+          .catch(() => 0)) > 0;
+
+      // Check if on authenticated Flow project dashboard (e.g. project cards / "+ Dự án mới" button)
+      const hasFlowDashboard =
+        (await this.page
+          .locator(
+            'button:has-text("Dự án mới"), button:has-text("New Project"), button:has-text("New project"), div:has-text("Chỉnh sửa dự án")'
           )
           .count()
           .catch(() => 0)) > 0;
@@ -172,7 +193,7 @@ export class FlowUiAdapterV1 {
         return { status: 'READY' };
       }
 
-      // Real Flow workspace ready: must have prompt input AND generate button on labs.google without landing CTA
+      // Real Flow workspace ready: must have prompt input AND generate button, OR active project dashboard on labs.google
       const isPublicLanding =
         (await this.page
           .locator(
@@ -183,8 +204,7 @@ export class FlowUiAdapterV1 {
         bodyTextLower.includes('ai creative studio built with google');
 
       if (
-        hasPromptTextarea &&
-        hasGenerateBtn &&
+        (hasFlowDashboard || (hasPromptTextarea && hasGenerateBtn)) &&
         !isPublicLanding &&
         currentUrl.includes('labs.google')
       ) {
