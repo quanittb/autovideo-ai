@@ -207,6 +207,7 @@ pub enum FlowAuthStatus {
     Unknown,
     FlowUiChanged,
     FlowEligibilityRequired,
+    FlowLanding,
 }
 
 impl FlowAuthStatus {
@@ -217,6 +218,7 @@ impl FlowAuthStatus {
             Self::Unknown => "UNKNOWN",
             Self::FlowUiChanged => "FLOW_UI_CHANGED",
             Self::FlowEligibilityRequired => "FLOW_ELIGIBILITY_REQUIRED",
+            Self::FlowLanding => "FLOW_LANDING",
         }
     }
 
@@ -229,6 +231,7 @@ impl FlowAuthStatus {
             | "FLOWELIGIBILITYREQUIRED"
             | "ELIGIBILITY_REQUIRED"
             | "USER_ACTION_REQUIRED" => Self::FlowEligibilityRequired,
+            "FLOW_LANDING" | "FLOWLANDING" => Self::FlowLanding,
             _ => Self::Unknown,
         }
     }
@@ -396,6 +399,8 @@ impl PlaywrightBridge {
                     || e.contains("USER_ACTION_REQUIRED")
                 {
                     Ok(FlowAuthStatus::FlowEligibilityRequired)
+                } else if e.contains("FLOW_LANDING") {
+                    Ok(FlowAuthStatus::FlowLanding)
                 } else if e.contains("LOGIN_REQUIRED") {
                     Ok(FlowAuthStatus::LoginRequired)
                 } else {

@@ -568,3 +568,80 @@ fn test_phase18_13_real_authoritative_preflight_fixture_with_ffmpeg() {
         }
     }
 }
+
+#[test]
+fn test_phase18_17_project_media_preview_path_traversal_and_nonexistent_rejection() {
+    use crate::commands::resolve_project_source_preview_path;
+    use crate::projects::{ProjectManager, SourceMedia};
+    use crate::system::StoragePaths;
+    use std::fs::{self, File};
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    let temp = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp.path());
+    fs::create_dir_all(&paths.projects_dir).unwrap();
+
+    let pm = ProjectManager::new(paths.clone());
+    let mut proj = pm.create_project("Traversal Test").unwrap();
+    let project_dir = paths.projects_dir.join(&proj.id);
+    let media_dir = project_dir.join("media");
+    fs::create_dir_all(&media_dir).unwrap();
+
+    // 1. Nonexistent file path -> Error
+    let non_existent = media_dir.join("does_not_exist.mp4");
+    proj.source_media = Some(SourceMedia {
+        media_id: "sm_missing".to_string(),
+        original_file_name: "does_not_exist.mp4".to_string(),
+        source_path: non_existent,
+        duration_ms: 5000,
+        width: 1920,
+        height: 1080,
+        fps: 30.0,
+        file_size_bytes: 3,
+        container: "mp4".to_string(),
+        video_codec: "h264".to_string(),
+        audio_codec: None,
+        has_audio: false,
+    });
+    pm.update_project(&proj).unwrap();
+
+    let err_missing = resolve_project_source_preview_path(&proj.id, &paths).unwrap_err();
+    assert!(
+        err_missing.contains("SOURCE_FILE_NOT_FOUND")
+            || err_missing.contains("CANONICALIZE_FAILED"),
+        "Expected missing file error, got: {}",
+        err_missing
+    );
+
+    // 2. Traversal attempt using ../ outside media dir
+    let outside_file = temp.path().join("system_sensitive.mp4");
+    File::create(&outside_file)
+        .unwrap()
+        .write_all(b"secret")
+        .unwrap();
+
+    proj.source_media.as_mut().unwrap().source_path =
+        media_dir.join("../../../system_sensitive.mp4");
+    pm.update_project(&proj).unwrap();
+
+    let err_traversal = resolve_project_source_preview_path(&proj.id, &paths).unwrap_err();
+    assert!(
+        err_traversal.contains("SECURITY_VIOLATION")
+            || err_traversal.contains("CANONICALIZE_FAILED"),
+        "Expected SECURITY_VIOLATION for traversal, got: {}",
+        err_traversal
+    );
+
+    // 3. Project without source media -> PROJECT_HAS_NO_SOURCE_MEDIA
+    let mut proj_no_media = pm.create_project("Empty Media").unwrap();
+    proj_no_media.source_media = None;
+    pm.update_project(&proj_no_media).unwrap();
+
+    let err_no_media = resolve_project_source_preview_path(&proj_no_media.id, &paths).unwrap_err();
+    assert!(
+        err_no_media.contains("PROJECT_HAS_NO_SOURCE_MEDIA"),
+        "Expected PROJECT_HAS_NO_SOURCE_MEDIA, got: {}",
+        err_no_media
+    );
+}

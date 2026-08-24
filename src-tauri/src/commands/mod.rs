@@ -126,9 +126,13 @@ pub fn probe_media(file_path: String) -> Result<MediaMetadata, AppError> {
 }
 
 #[command]
-pub fn import_media(project_id: String, file_path: String) -> Result<Project, AppError> {
+pub fn import_media(
+    app: AppHandle,
+    project_id: String,
+    file_path: String,
+) -> Result<Project, AppError> {
     let storage_paths = StoragePaths::default_paths();
-    let manager = ProjectManager::new(storage_paths);
+    let manager = ProjectManager::new(storage_paths.clone());
 
     // Auto-create project if the ID is a mock fixture (e.g. proj-fox-rabbit) or missing
     let mut project = match manager.get_project(&project_id) {
@@ -174,6 +178,12 @@ pub fn import_media(project_id: String, file_path: String) -> Result<Project, Ap
 
     let media_service = MediaService::new();
     let source_media = media_service.import_to_project(&proj_dir, &source_file)?;
+
+    // Dynamically authorize newly imported file into asset protocol scope
+    if let Ok((canonical_file, _)) = resolve_project_source_preview_path(&target_id, &storage_paths)
+    {
+        let _ = app.asset_protocol_scope().allow_file(&canonical_file);
+    }
 
     project.source_media = Some(source_media);
     project.status = ProjectStatus::Imported;
@@ -316,19 +326,24 @@ pub fn open_directory(path: String) -> Result<(), AppError> {
 
 #[command]
 pub fn resolve_project_media(
+    app: AppHandle,
     project_id: String,
 ) -> Result<crate::media::ResolvedMediaAsset, AppError> {
     let storage_paths = StoragePaths::default_paths();
+    let (canonical_source, source_media) =
+        resolve_project_source_preview_path(&project_id, &storage_paths)
+            .map_err(|e| AppError::invalid_input(e))?;
+
+    // Dynamically authorize exact canonical file into Tauri asset protocol scope
+    let _ = app.asset_protocol_scope().allow_file(&canonical_source);
+
     let manager = ProjectManager::new(storage_paths);
-    let project = manager.get_project(&project_id)?;
     let proj_dir = manager.project_dir(&project_id);
 
-    let source_media = project.source_media.ok_or_else(|| {
-        AppError::invalid_input("Project does not have an imported source media file")
-    })?;
-
     let media_service = MediaService::new();
-    media_service.resolve_project_media(&proj_dir, &source_media)
+    let mut resolved = media_service.resolve_project_media(&proj_dir, &source_media)?;
+    resolved.source_path = canonical_source;
+    Ok(resolved)
 }
 
 #[command]

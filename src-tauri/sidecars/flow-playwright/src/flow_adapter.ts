@@ -30,6 +30,7 @@ export interface AuthStatusResult {
     | 'UNKNOWN'
     | 'FLOW_UI_CHANGED'
     | 'FLOW_ELIGIBILITY_REQUIRED'
+    | 'FLOW_LANDING'
     | 'USER_ACTION_REQUIRED';
 }
 
@@ -82,76 +83,161 @@ export class FlowUiAdapterV1 {
   async checkAuthStatus(): Promise<AuthStatusResult> {
     if (!this.page) throw new Error('Browser not launched');
 
+    const checkPage = async (): Promise<AuthStatusResult | null> => {
+      if (!this.page) return null;
+      const currentUrl = this.page.url();
+
+      // 1. Authoritative positive evidence for LOGIN_REQUIRED via URL redirection
+      if (
+        currentUrl.includes('accounts.google.com') ||
+        currentUrl.includes('ServiceLogin') ||
+        currentUrl.includes('/signin')
+      ) {
+        return { status: 'LOGIN_REQUIRED' };
+      }
+
+      // Check for explicit Google Sign-in form (identifier / password inputs)
+      const isGoogleSignInForm =
+        (await this.page
+          .locator('input[name="identifier"], #identifierId, input[type="email"]')
+          .count()
+          .catch(() => 0)) > 0;
+      if (isGoogleSignInForm) {
+        return { status: 'LOGIN_REQUIRED' };
+      }
+
+      // 2. Account eligibility / Action Required gates (fail-closed)
+      const hasEligibilityGate =
+        (await this.page
+          .locator('#eligibility-gate, .eligibility-alert, [data-testid="eligibility-gate"]')
+          .count()
+          .catch(() => 0)) > 0;
+      const bodyText = await this.page.locator('body').innerText().catch(() => '');
+      const bodyTextLower = bodyText.toLowerCase();
+
+      if (
+        hasEligibilityGate ||
+        bodyTextLower.includes('account not eligible') ||
+        bodyTextLower.includes('age verification required') ||
+        bodyTextLower.includes('identity verification required') ||
+        bodyTextLower.includes('verify your age') ||
+        bodyTextLower.includes('verify your identity') ||
+        bodyTextLower.includes('region is not supported')
+      ) {
+        return { status: 'FLOW_ELIGIBILITY_REQUIRED' };
+      }
+
+      // 3. Explicit unauthenticated login prompt in rendered DOM
+      const hasLoginPrompt =
+        (await this.page
+          .locator(
+            '.login-prompt, #login-button, button:has-text("Sign in to Flow"), a.login-prompt'
+          )
+          .count()
+          .catch(() => 0)) > 0;
+
+      if (
+        hasLoginPrompt ||
+        bodyTextLower.includes('sign in with google to continue') ||
+        bodyTextLower.includes('sign in to continue')
+      ) {
+        return { status: 'LOGIN_REQUIRED' };
+      }
+
+      // 4. Strong Authenticated Flow Workspace Detection
+      // A Google account avatar alone, canvas alone, or generic "Create" button alone is NOT sufficient.
+      // Must have actual Flow prompt composer and generation controls.
+      const hasMockAppRoot =
+        (await this.page
+          .locator('#flow-app[data-authenticated="true"], #flow-app')
+          .count()
+          .catch(() => 0)) > 0;
+      const hasPromptTextarea =
+        (await this.page
+          .locator(
+            'textarea#prompt-input, textarea[placeholder*="prompt" i], textarea[placeholder*="Describe" i], textarea[placeholder*="video" i], [data-testid="prompt-input"]'
+          )
+          .count()
+          .catch(() => 0)) > 0;
+      const hasGenerateBtn =
+        (await this.page
+          .locator(
+            'button#generate-button, button:has-text("Generate"), [data-testid="generate-button"]'
+          )
+          .count()
+          .catch(() => 0)) > 0;
+
+      // Mock server ready
+      if (hasMockAppRoot && hasPromptTextarea) {
+        return { status: 'READY' };
+      }
+
+      // Real Flow workspace ready: must have prompt input AND generate button on labs.google without landing CTA
+      const isPublicLanding =
+        (await this.page
+          .locator(
+            'button:has-text("Create with Google Flow"), a:has-text("Create with Google Flow"), button:has-text("Try in Google Flow")'
+          )
+          .count()
+          .catch(() => 0)) > 0 ||
+        bodyTextLower.includes('ai creative studio built with google');
+
+      if (
+        hasPromptTextarea &&
+        hasGenerateBtn &&
+        !isPublicLanding &&
+        currentUrl.includes('labs.google')
+      ) {
+        return { status: 'READY' };
+      }
+
+      return null;
+    };
+
+    // First inspection pass
+    const initialStatus = await checkPage();
+    if (initialStatus) {
+      return initialStatus;
+    }
+
+    // Check if on public landing page with CTA
+    const landingCta = this.page
+      .locator(
+        'button:has-text("Create with Google Flow"), a:has-text("Create with Google Flow"), button:has-text("Try in Google Flow"), #cta-btn'
+      )
+      .first();
+    const landingCtaCount = await landingCta.count().catch(() => 0);
+
+    if (landingCtaCount > 0) {
+      // Execute ONE NON-GENERATION navigation preflight: activate "Create with Google Flow" CTA
+      try {
+        await landingCta.click({ timeout: 5000 });
+        // Wait for possible redirect or workspace load
+        await this.page.waitForTimeout(3000);
+      } catch (_) {
+        // CTA click failed or timed out
+      }
+
+      // Re-evaluate page post-CTA
+      const postCtaStatus = await checkPage();
+      if (postCtaStatus) {
+        return postCtaStatus;
+      }
+
+      const postUrl = this.page.url();
+      if (
+        postUrl.includes('accounts.google.com') ||
+        postUrl.includes('ServiceLogin') ||
+        postUrl.includes('/signin')
+      ) {
+        return { status: 'LOGIN_REQUIRED' };
+      }
+
+      // If still on landing page or unrecognized
+      return { status: 'FLOW_LANDING' };
+    }
+
     const currentUrl = this.page.url();
-
-    // 1. Authoritative positive evidence for LOGIN_REQUIRED via URL redirection
-    if (
-      currentUrl.includes('accounts.google.com') ||
-      currentUrl.includes('ServiceLogin') ||
-      currentUrl.includes('/signin')
-    ) {
-      return { status: 'LOGIN_REQUIRED' };
-    }
-
-    // Check for explicit Google Sign-in form (identifier / password inputs)
-    const isGoogleSignInForm = (await this.page.locator('input[name="identifier"], #identifierId, input[type="email"]').count().catch(() => 0)) > 0;
-    if (isGoogleSignInForm) {
-      return { status: 'LOGIN_REQUIRED' };
-    }
-
-    // 2. Authenticated Ready indicators (Prioritized before inspecting text)
-    // Mock server indicators
-    const hasMockAppRoot = (await this.page.locator('#flow-app[data-authenticated="true"], #flow-app').count().catch(() => 0)) > 0;
-    const hasMockPromptInput = (await this.page.locator('textarea#prompt-input').count().catch(() => 0)) > 0;
-    if (hasMockAppRoot && hasMockPromptInput) {
-      return { status: 'READY' };
-    }
-
-    // Real Google Flow indicators: Google account avatar/menu or Flow controls
-    const hasGoogleAccountAvatar = (await this.page.locator(
-      '[aria-label*="Google Account" i], img[src*="googleusercontent.com"], a[href*="SignOutOptions"], button[aria-label*="Account" i], a[href*="accounts.google.com/SignOutOptions"]'
-    ).count().catch(() => 0)) > 0;
-
-    const hasFlowAppControls = (await this.page.locator(
-      'textarea[placeholder*="prompt" i], textarea[placeholder*="Describe" i], textarea[placeholder*="video" i], button:has-text("Generate"), button:has-text("Create"), [data-testid="prompt-input"], [data-testid="generate-button"], canvas'
-    ).count().catch(() => 0)) > 0;
-
-    if (hasGoogleAccountAvatar || (hasFlowAppControls && currentUrl.includes('labs.google'))) {
-      return { status: 'READY' };
-    }
-
-    // 3. Inspect visible rendered text (ignoring script tags, styles, and hidden metadata)
-    const bodyText = await this.page.locator('body').innerText().catch(() => '');
-    const bodyTextLower = bodyText.toLowerCase();
-
-    // 4. Account eligibility / Action Required gates (fail-closed, requires manual account action)
-    const hasEligibilityGate = (await this.page.locator('#eligibility-gate, .eligibility-alert, [data-testid="eligibility-gate"]').count().catch(() => 0)) > 0;
-    if (
-      hasEligibilityGate ||
-      bodyTextLower.includes('account not eligible') ||
-      bodyTextLower.includes('age verification required') ||
-      bodyTextLower.includes('identity verification required') ||
-      bodyTextLower.includes('verify your age') ||
-      bodyTextLower.includes('verify your identity') ||
-      bodyTextLower.includes('region is not supported')
-    ) {
-      return { status: 'FLOW_ELIGIBILITY_REQUIRED' };
-    }
-
-    // 5. Explicit unauthenticated login prompt in rendered DOM
-    const hasLoginPrompt = (await this.page.locator(
-      '.login-prompt, #login-button, button:has-text("Sign in to Flow"), a.login-prompt'
-    ).count().catch(() => 0)) > 0;
-
-    if (
-      hasLoginPrompt ||
-      bodyTextLower.includes('sign in with google to continue') ||
-      bodyTextLower.includes('sign in to continue')
-    ) {
-      return { status: 'LOGIN_REQUIRED' };
-    }
-
-    // 6. Official Flow URL or Mock server without login redirect, but elements cannot be recognized
     if (
       currentUrl.includes('labs.google') ||
       currentUrl.includes('127.0.0.1') ||

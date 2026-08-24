@@ -314,75 +314,104 @@ impl FlowOrchestrator {
                 FlowChildSubmissionState::ProvenCompleted => continue,
             };
 
-            // 3. Poll until complete
-            let poll_result = self
-                .bridge
-                .poll_generation(&profile_dir, &submission_evidence)
-                .await?;
+            // 3. Poll until complete (with timeout and sleep)
+            let poll_start = Utc::now();
+            let poll_timeout = std::time::Duration::from_secs(600); // 10 minutes max for video generation
+            let mut is_completed = false;
 
-            match poll_result.status.as_str() {
-                "login_required" => {
-                    manifest.state = FlowJobState::LoginRequired;
+            while !is_completed {
+                if manifest.cancellation_requested {
+                    manifest.state = FlowJobState::Cancelled;
                     self.store.save_manifest_atomic(&mut manifest)?;
                     return Ok(());
                 }
-                "credits_required" => {
-                    manifest.state = FlowJobState::CreditsRequired;
-                    self.store.save_manifest_atomic(&mut manifest)?;
-                    return Ok(());
-                }
-                "ui_changed" => {
-                    manifest.state = FlowJobState::FlowUiChanged;
-                    self.store.save_manifest_atomic(&mut manifest)?;
-                    return Ok(());
-                }
-                "failed" => {
+
+                if Utc::now().signed_duration_since(poll_start).num_seconds()
+                    > poll_timeout.as_secs() as i64
+                {
                     manifest.state = FlowJobState::Failed;
                     manifest.child_segments[i].state = FlowJobState::Failed;
                     manifest.error = Some(JobErrorRecord {
-                        code: "GENERATION_FAILED".to_string(),
-                        sanitized_message: poll_result
-                            .error_message
-                            .unwrap_or_else(|| "Flow generation failed".to_string()),
+                        code: "GENERATION_TIMEOUT".to_string(),
+                        sanitized_message:
+                            "Flow generation exceeded maximum polling duration of 10 minutes"
+                                .to_string(),
                     });
                     self.store.save_manifest_atomic(&mut manifest)?;
                     return Ok(());
                 }
-                "ready" => {
-                    let download_url = poll_result
-                        .download_url
-                        .unwrap_or_else(|| "/download".to_string());
-                    let seg_out_name = format!("child_out_{:03}.mp4", i);
-                    let seg_out_path = outputs_dir.join(&seg_out_name);
 
-                    manifest.state = FlowJobState::Downloading;
-                    manifest.child_segments[i].state = FlowJobState::Downloading;
-                    self.store.save_manifest_atomic(&mut manifest)?;
+                let poll_result = self
+                    .bridge
+                    .poll_generation(&profile_dir, &submission_evidence)
+                    .await?;
 
-                    self.bridge
-                        .download_artifact(&profile_dir, &download_url, &seg_out_path)
-                        .await?;
+                match poll_result.status.as_str() {
+                    "login_required" => {
+                        manifest.state = FlowJobState::LoginRequired;
+                        self.store.save_manifest_atomic(&mut manifest)?;
+                        return Ok(());
+                    }
+                    "credits_required" => {
+                        manifest.state = FlowJobState::CreditsRequired;
+                        self.store.save_manifest_atomic(&mut manifest)?;
+                        return Ok(());
+                    }
+                    "ui_changed" => {
+                        manifest.state = FlowJobState::FlowUiChanged;
+                        self.store.save_manifest_atomic(&mut manifest)?;
+                        return Ok(());
+                    }
+                    "failed" => {
+                        manifest.state = FlowJobState::Failed;
+                        manifest.child_segments[i].state = FlowJobState::Failed;
+                        manifest.error = Some(JobErrorRecord {
+                            code: "GENERATION_FAILED".to_string(),
+                            sanitized_message: poll_result
+                                .error_message
+                                .unwrap_or_else(|| "Flow generation failed".to_string()),
+                        });
+                        self.store.save_manifest_atomic(&mut manifest)?;
+                        return Ok(());
+                    }
+                    "ready" => {
+                        let download_url = poll_result
+                            .download_url
+                            .unwrap_or_else(|| "/download".to_string());
+                        let seg_out_name = format!("child_out_{:03}.mp4", i);
+                        let seg_out_path = outputs_dir.join(&seg_out_name);
 
-                    // Validate segment
-                    manifest.state = FlowJobState::ValidatingSegment;
-                    manifest.child_segments[i].state = FlowJobState::ValidatingSegment;
-                    self.store.save_manifest_atomic(&mut manifest)?;
+                        manifest.state = FlowJobState::Downloading;
+                        manifest.child_segments[i].state = FlowJobState::Downloading;
+                        self.store.save_manifest_atomic(&mut manifest)?;
 
-                    let val_rec = FlowOutputValidator::validate_child_artifact(
-                        &seg_out_path,
-                        manifest.child_segments[i].duration_sec,
-                    )?;
+                        self.bridge
+                            .download_artifact(&profile_dir, &download_url, &seg_out_path)
+                            .await?;
 
-                    manifest.child_segments[i].download_artifact_path = Some(seg_out_path);
-                    manifest.child_segments[i].download_artifact_sha = Some(val_rec.sha256);
-                    manifest.child_segments[i].state = FlowJobState::Completed;
-                    manifest.child_segments[i].submission_state =
-                        FlowChildSubmissionState::ProvenCompleted;
-                    manifest.credit_record.completed_generations += 1;
-                    self.store.save_manifest_atomic(&mut manifest)?;
-                }
-                _ => {
-                    // Generating/Queued
+                        // Validate segment
+                        manifest.state = FlowJobState::ValidatingSegment;
+                        manifest.child_segments[i].state = FlowJobState::ValidatingSegment;
+                        self.store.save_manifest_atomic(&mut manifest)?;
+
+                        let val_rec = FlowOutputValidator::validate_child_artifact(
+                            &seg_out_path,
+                            manifest.child_segments[i].duration_sec,
+                        )?;
+
+                        manifest.child_segments[i].download_artifact_path = Some(seg_out_path);
+                        manifest.child_segments[i].download_artifact_sha = Some(val_rec.sha256);
+                        manifest.child_segments[i].state = FlowJobState::Completed;
+                        manifest.child_segments[i].submission_state =
+                            FlowChildSubmissionState::ProvenCompleted;
+                        manifest.credit_record.completed_generations += 1;
+                        self.store.save_manifest_atomic(&mut manifest)?;
+                        is_completed = true;
+                    }
+                    _ => {
+                        // Generating/Queued -> Sleep briefly before next poll
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    }
                 }
             }
         }

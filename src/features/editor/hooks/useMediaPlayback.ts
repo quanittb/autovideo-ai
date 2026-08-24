@@ -1,5 +1,27 @@
 import { useEffect, useCallback } from 'react';
 import { useEditorStore } from '../stores/editorStore';
+import { applyPendingSeekIfExists } from '../stores/editorStore';
+
+export function mapMediaError(
+  err: MediaError | { code: number; message?: string } | null
+): string {
+  if (!err) {
+    return 'MEDIA_PLAYBACK_ERROR: Video could not be loaded by the desktop preview runtime.';
+  }
+
+  switch (err.code) {
+    case 1: // MEDIA_ERR_ABORTED
+      return 'MEDIA_ERR_ABORTED: Video playback was aborted.';
+    case 2: // MEDIA_ERR_NETWORK
+      return 'MEDIA_ERR_NETWORK: A network error occurred while loading the video asset.';
+    case 3: // MEDIA_ERR_DECODE
+      return 'MEDIA_DECODE_ERROR: The video playback could not be decoded by the desktop preview runtime.';
+    case 4: // MEDIA_ERR_SRC_NOT_SUPPORTED
+      return 'MEDIA_SOURCE_NOT_SUPPORTED: The video source format, codec, or desktop asset protocol path is not supported or was blocked.';
+    default:
+      return `MEDIA_PLAYBACK_ERROR: Video playback error (code ${err.code}): ${err.message || 'Unknown media error'}`;
+  }
+}
 
 export const useMediaPlayback = (videoRef: React.RefObject<HTMLVideoElement | null>) => {
   const {
@@ -8,6 +30,8 @@ export const useMediaPlayback = (videoRef: React.RefObject<HTMLVideoElement | nu
     setCurrentTime,
     setDuration,
     setMuted,
+    setMediaPlayable,
+    setMediaError,
     seek,
     stepForward,
     stepBackward,
@@ -46,12 +70,35 @@ export const useMediaPlayback = (videoRef: React.RefObject<HTMLVideoElement | nu
   const handleLoadedMetadata = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
-    setDuration(video.duration);
-    // Seek to initial restored currentTime if needed
+    if (video.duration && !isNaN(video.duration)) {
+      setDuration(video.duration);
+    }
+    // Apply any pending seek that was issued before metadata was available
+    applyPendingSeekIfExists();
+    // Also restore persisted currentTime if no pending seek covered it
     if (playback.currentTime > 0 && Math.abs(video.currentTime - playback.currentTime) > 0.5) {
       video.currentTime = playback.currentTime;
     }
   }, [videoRef, setDuration, playback.currentTime]);
+
+  const handleLoadedData = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    setMediaPlayable(video.duration && !isNaN(video.duration) ? video.duration : undefined);
+  }, [videoRef, setMediaPlayable]);
+
+  const handleCanPlay = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    setMediaPlayable(video.duration && !isNaN(video.duration) ? video.duration : undefined);
+  }, [videoRef, setMediaPlayable]);
+
+  const handleError = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const errorMsg = mapMediaError(video.error);
+    setMediaError(errorMsg);
+  }, [videoRef, setMediaError]);
 
   const handleEnded = useCallback(() => {
     setIsPlaying(false);
@@ -63,13 +110,10 @@ export const useMediaPlayback = (videoRef: React.RefObject<HTMLVideoElement | nu
 
   const seekTo = useCallback(
     (timeSeconds: number) => {
-      const video = videoRef.current;
-      if (video) {
-        video.currentTime = timeSeconds;
-      }
+      // store.seek() is the single authoritative path: updates Zustand + video.currentTime
       seek(timeSeconds);
     },
-    [videoRef, seek]
+    [seek]
   );
 
   const toggleMute = useCallback(() => {
@@ -92,28 +136,11 @@ export const useMediaPlayback = (videoRef: React.RefObject<HTMLVideoElement | nu
           break;
         case 'ArrowLeft':
           e.preventDefault();
-          if (e.shiftKey) {
-            stepBackward(0.1); // Small step
-          } else {
-            stepBackward(1.0); // Standard step
-          }
-          if (videoRef.current) {
-            videoRef.current.currentTime = Math.max(0, videoRef.current.currentTime - (e.shiftKey ? 0.1 : 1.0));
-          }
+          stepBackward(e.shiftKey ? 0.1 : 1.0);
           break;
         case 'ArrowRight':
           e.preventDefault();
-          if (e.shiftKey) {
-            stepForward(0.1); // Small step
-          } else {
-            stepForward(1.0); // Standard step
-          }
-          if (videoRef.current) {
-            videoRef.current.currentTime = Math.min(
-              playback.duration,
-              videoRef.current.currentTime + (e.shiftKey ? 0.1 : 1.0)
-            );
-          }
+          stepForward(e.shiftKey ? 0.1 : 1.0);
           break;
         case 'Home':
           e.preventDefault();
@@ -132,11 +159,14 @@ export const useMediaPlayback = (videoRef: React.RefObject<HTMLVideoElement | nu
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [togglePlay, stepBackward, stepForward, seekTo, toggleMute, playback.duration, videoRef]);
+  }, [togglePlay, stepBackward, stepForward, seekTo, toggleMute, playback.duration]);
 
   return {
     handleTimeUpdate,
     handleLoadedMetadata,
+    handleLoadedData,
+    handleCanPlay,
+    handleError,
     handleEnded,
     togglePlay,
     seekTo,

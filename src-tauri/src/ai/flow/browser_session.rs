@@ -190,6 +190,8 @@ impl FlowBrowserSessionManager {
                     || e.contains("USER_ACTION_REQUIRED")
                 {
                     Ok("FLOW_ELIGIBILITY_REQUIRED".to_string())
+                } else if e.contains("FLOW_LANDING") {
+                    Ok("FLOW_LANDING".to_string())
                 } else if e.contains("LOGIN_REQUIRED") {
                     Ok("LOGIN_REQUIRED".to_string())
                 } else {

@@ -7,7 +7,14 @@ export interface PlaybackState {
   playbackRate: number;
 }
 
-export type MediaLoadStatus = 'IDLE' | 'LOADING' | 'READY' | 'ERROR' | 'NOT_FOUND';
+export type MediaLoadStatus =
+  | 'IDLE'
+  | 'LOADING'
+  | 'MEDIA_URL_READY'
+  | 'PLAYABLE'
+  | 'READY'
+  | 'ERROR'
+  | 'NOT_FOUND';
 
 export interface TimelineDimensions {
   containerWidth: number;

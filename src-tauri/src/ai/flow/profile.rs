@@ -1,5 +1,6 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -115,6 +116,14 @@ impl FlowProfileManager {
         } else {
             Ok(target)
         }
+    }
+
+    pub fn profile_fingerprint(&self, profile_id: &str) -> Result<String, String> {
+        let dir = self.get_profile_dir(profile_id)?;
+        let mut hasher = Sha256::new();
+        hasher.update(dir.to_string_lossy().as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        Ok(hash[..16].to_string())
     }
 
     pub fn create_profile(

@@ -4,6 +4,10 @@ import { editorApi } from '../../../lib/ipc';
 import { ResolvedMediaAsset } from '../../../types/contracts';
 import { PlaybackState, MediaLoadStatus } from '../types/editor';
 
+// Runtime-only refs — NOT serialized into Zustand state
+let _videoElement: HTMLVideoElement | null = null;
+let _pendingSeekTime: number | null = null;
+
 interface EditorStore {
   projectId: string | null;
   mediaAsset: ResolvedMediaAsset | null;
@@ -16,6 +20,8 @@ interface EditorStore {
 
   // Actions
   loadProjectMedia: (projectId: string) => Promise<void>;
+  setMediaPlayable: (duration?: number) => void;
+  setMediaError: (errorMessage: string) => void;
   setIsPlaying: (isPlaying: boolean) => void;
   setCurrentTime: (time: number) => void;
   setDuration: (duration: number) => void;
@@ -26,8 +32,19 @@ interface EditorStore {
   seek: (timeSeconds: number) => void;
   stepForward: (seconds?: number) => void;
   stepBackward: (seconds?: number) => void;
+  registerVideoElement: (el: HTMLVideoElement | null) => void;
   reset: () => void;
 }
+
+// Exported for use in useMediaPlayback (pending seek apply-on-ready)
+export const getEditorVideoElement = () => _videoElement;
+export const applyPendingSeekIfExists = () => {
+  if (_pendingSeekTime !== null && _videoElement) {
+    const target = _pendingSeekTime;
+    _pendingSeekTime = null;
+    _videoElement.currentTime = target;
+  }
+};
 
 let persistTimeout: any = null;
 
@@ -72,7 +89,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       set((state) => ({
         mediaAsset: asset,
         mediaUrl: safeUrl,
-        loadStatus: 'READY',
+        loadStatus: 'MEDIA_URL_READY',
         playback: {
           ...state.playback,
           isPlaying: false, // Always starts paused on project reload
@@ -86,6 +103,28 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
         errorMessage: err?.message || 'Failed to resolve project media asset',
       });
     }
+  },
+
+  setMediaPlayable: (duration?: number) => {
+    set((state) => ({
+      loadStatus: 'READY',
+      errorMessage: null,
+      playback: {
+        ...state.playback,
+        duration: duration && duration > 0 ? duration : state.playback.duration,
+      },
+    }));
+  },
+
+  setMediaError: (errorMessage: string) => {
+    set((state) => ({
+      loadStatus: 'ERROR',
+      errorMessage,
+      playback: {
+        ...state.playback,
+        isPlaying: false,
+      },
+    }));
   },
 
   setIsPlaying: (isPlaying: boolean) => {
@@ -139,12 +178,21 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   seek: (timeSeconds: number) => {
     const { playback, projectId, timelineZoom } = get();
-    const clamped = Math.max(0, Math.min(timeSeconds, playback.duration || 0));
+    const duration = playback.duration || 0;
+    if (!isFinite(timeSeconds)) return;
+    const clamped = Math.max(0, Math.min(timeSeconds, duration));
     set((state) => ({
       playback: { ...state.playback, currentTime: clamped },
     }));
     if (projectId) {
       schedulePersist(projectId, clamped, timelineZoom);
+    }
+    // Drive the real video element (authoritative seek path)
+    if (_videoElement && _videoElement.readyState >= 1) {
+      _videoElement.currentTime = clamped;
+    } else {
+      // Metadata not yet loaded; apply once element is ready
+      _pendingSeekTime = clamped;
     }
   },
 
@@ -156,6 +204,13 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   stepBackward: (seconds = 1.0) => {
     const { playback } = get();
     get().seek(playback.currentTime - seconds);
+  },
+
+  registerVideoElement: (el: HTMLVideoElement | null) => {
+    _videoElement = el;
+    if (el === null) {
+      _pendingSeekTime = null;
+    }
   },
 
   reset: () => {

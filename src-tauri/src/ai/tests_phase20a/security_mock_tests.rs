@@ -728,6 +728,7 @@ fn test_phase20a_60_auth_status_typed_semantics_mapping() {
         FlowAuthStatus::FlowEligibilityRequired.as_str(),
         "FLOW_ELIGIBILITY_REQUIRED"
     );
+    assert_eq!(FlowAuthStatus::FlowLanding.as_str(), "FLOW_LANDING");
 
     // 2. Loose parsing preservation
     assert_eq!(
@@ -753,6 +754,10 @@ fn test_phase20a_60_auth_status_typed_semantics_mapping() {
     assert_eq!(
         FlowAuthStatus::from_str_loose("USER_ACTION_REQUIRED"),
         FlowAuthStatus::FlowEligibilityRequired
+    );
+    assert_eq!(
+        FlowAuthStatus::from_str_loose("FLOW_LANDING"),
+        FlowAuthStatus::FlowLanding
     );
 
     // 3. UNKNOWN must never collapse to LoginRequired
@@ -813,6 +818,41 @@ fn test_phase20a_61_mock_server_scenarios_auth_inspection() {
     let b_elig = PlaywrightBridge::with_mock_url(h_elig.base_url.clone());
     let res_elig = rt.block_on(b_elig.check_auth_status(&profile_dir)).unwrap();
     assert_eq!(res_elig, FlowAuthStatus::FlowEligibilityRequired);
+
+    // 5. PublicLandingRedirectToLogin -> clicks CTA -> redirects to signin -> FlowAuthStatus::LoginRequired
+    let h_landing_login = rt
+        .block_on(MockFlowServer::start(
+            MockScenario::PublicLandingRedirectToLogin,
+        ))
+        .unwrap();
+    let b_landing_login = PlaywrightBridge::with_mock_url(h_landing_login.base_url.clone());
+    let res_landing_login = rt
+        .block_on(b_landing_login.check_auth_status(&profile_dir))
+        .unwrap();
+    assert_eq!(res_landing_login, FlowAuthStatus::LoginRequired);
+
+    // 6. PublicLandingRedirectToWorkspace -> clicks CTA -> reveals workspace -> FlowAuthStatus::Ready
+    let h_landing_ws = rt
+        .block_on(MockFlowServer::start(
+            MockScenario::PublicLandingRedirectToWorkspace,
+        ))
+        .unwrap();
+    let b_landing_ws = PlaywrightBridge::with_mock_url(h_landing_ws.base_url.clone());
+    let res_landing_ws = rt
+        .block_on(b_landing_ws.check_auth_status(&profile_dir))
+        .unwrap();
+    assert_eq!(res_landing_ws, FlowAuthStatus::Ready);
+
+    // 7. AvatarOnly scenario (Google avatar + canvas + generic Create button, but NO prompt composer) -> FlowAuthStatus::FlowUiChanged (NOT READY)
+    let h_avatar = rt
+        .block_on(MockFlowServer::start(MockScenario::AvatarOnly))
+        .unwrap();
+    let b_avatar = PlaywrightBridge::with_mock_url(h_avatar.base_url.clone());
+    let res_avatar = rt
+        .block_on(b_avatar.check_auth_status(&profile_dir))
+        .unwrap();
+    assert_ne!(res_avatar, FlowAuthStatus::Ready);
+    assert_eq!(res_avatar, FlowAuthStatus::FlowUiChanged);
 }
 
 #[test]
@@ -860,4 +900,29 @@ fn test_phase20a_63_close_login_browser_only_targets_managed_profile_pids() {
         assert!(!a.contains("remote-debugging"));
         assert!(!a.contains("enable-automation"));
     }
+}
+
+#[test]
+fn test_phase20a_64_profile_fingerprint_deterministic_and_consistent() {
+    let temp_dir = tempdir().unwrap();
+    let manager = FlowProfileManager::new(temp_dir.path().to_path_buf());
+    manager
+        .create_profile("profile_fingerprint_test", "Fingerprint Test")
+        .unwrap();
+
+    let fp1 = manager
+        .profile_fingerprint("profile_fingerprint_test")
+        .unwrap();
+    let fp2 = manager
+        .profile_fingerprint("profile_fingerprint_test")
+        .unwrap();
+
+    assert_eq!(fp1, fp2);
+    assert_eq!(fp1.len(), 16);
+
+    let manager2 = FlowProfileManager::new(temp_dir.path().to_path_buf());
+    let fp3 = manager2
+        .profile_fingerprint("profile_fingerprint_test")
+        .unwrap();
+    assert_eq!(fp1, fp3);
 }

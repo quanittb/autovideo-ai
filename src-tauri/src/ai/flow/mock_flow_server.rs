@@ -18,6 +18,9 @@ pub enum MockScenario {
     WrongDownload,
     DelayAfterGenerateClick,
     EligibilityRequired,
+    PublicLandingRedirectToLogin,
+    PublicLandingRedirectToWorkspace,
+    AvatarOnly,
 }
 
 pub struct MockFlowServerHandle {
@@ -160,6 +163,51 @@ impl MockFlowServer {
             }
             MockScenario::GenerationError => {
                 let html = "<html><body><div id='flow-app'><div class='error-banner'>Generation failed: Inappropriate prompt content detected</div></div></body></html>";
+                ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+            }
+            MockScenario::PublicLandingRedirectToLogin => {
+                if req.contains("GET /signin") {
+                    let html = "<html><body><form><input name='identifier' id='identifierId' type='email'/><div class='login-prompt'>Sign in with Google</div></form></body></html>";
+                    ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+                } else {
+                    let html = r#"<!DOCTYPE html>
+<html>
+<head><title>Google Flow - AI Creative Studio for Video, Images & Custom Tools</title></head>
+<body>
+  <div>AI creative studio built with Google's advanced generative models.</div>
+  <button id="cta-btn" onclick="window.location.href='/signin'">Create with Google Flow</button>
+</body>
+</html>"#;
+                    ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+                }
+            }
+            MockScenario::PublicLandingRedirectToWorkspace => {
+                let html = r#"<!DOCTYPE html>
+<html>
+<head><title>Google Flow - AI Creative Studio for Video, Images & Custom Tools</title></head>
+<body>
+  <div id="landing">
+    <div>AI creative studio built with Google's advanced generative models.</div>
+    <button id="cta-btn" onclick="document.getElementById('landing').style.display='none'; document.getElementById('flow-app').style.display='block';">Create with Google Flow</button>
+  </div>
+  <div id="flow-app" data-authenticated="true" style="display:none;">
+    <textarea id="prompt-input" placeholder="Describe video"></textarea>
+    <button id="generate-button">Generate</button>
+  </div>
+</body>
+</html>"#;
+                ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+            }
+            MockScenario::AvatarOnly => {
+                let html = r#"<!DOCTYPE html>
+<html>
+<head><title>Google Flow</title></head>
+<body>
+  <img src="https://googleusercontent.com/avatar.png" aria-label="Google Account" />
+  <button>Create</button>
+  <canvas width="100" height="100"></canvas>
+</body>
+</html>"#;
                 ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
             }
             MockScenario::DelayAfterGenerateClick => {
