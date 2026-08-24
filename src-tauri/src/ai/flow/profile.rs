@@ -124,11 +124,19 @@ impl FlowProfileManager {
     ) -> Result<FlowProfileSnapshot, String> {
         let clean_id = Self::sanitize_profile_id(profile_id)?;
         let target_dir = self.base_dir.join(&clean_id);
+        let meta_file = target_dir.join("profile_meta.json");
+
+        if meta_file.exists() {
+            return Err(format!(
+                "PROFILE_ALREADY_EXISTS: Profile '{}' already exists. Please choose a different Profile ID.",
+                clean_id
+            ));
+        }
+
         fs::create_dir_all(&target_dir)
             .map_err(|e| format!("Failed to create profile directory: {}", e))?;
 
         let now = Utc::now().to_rfc3339();
-        let meta_file = target_dir.join("profile_meta.json");
         let info = FlowProfileInfo {
             profile_id: clean_id,
             name: if name.trim().is_empty() {

@@ -84,7 +84,7 @@ export class FlowUiAdapterV1 {
 
     const currentUrl = this.page.url();
 
-    // 1. Authoritative positive evidence for LOGIN_REQUIRED
+    // 1. Authoritative positive evidence for LOGIN_REQUIRED via URL redirection
     if (
       currentUrl.includes('accounts.google.com') ||
       currentUrl.includes('ServiceLogin') ||
@@ -93,18 +93,19 @@ export class FlowUiAdapterV1 {
       return { status: 'LOGIN_REQUIRED' };
     }
 
-    const content = await this.page.content();
-
-    if (
-      content.includes('Sign in with Google') ||
-      content.includes('Sign in - Google Accounts') ||
-      content.includes('accounts.google.com/signin') ||
-      (await this.page.locator('.login-prompt, #login-button, a[href*="accounts.google.com/ServiceLogin"], a[href*="accounts.google.com/signin"]').count()) > 0
-    ) {
+    // Check for explicit Google Sign-in form (identifier / password inputs)
+    const isGoogleSignInForm = (await this.page.locator('input[name="identifier"], #identifierId, input[type="email"]').count().catch(() => 0)) > 0;
+    if (isGoogleSignInForm) {
       return { status: 'LOGIN_REQUIRED' };
     }
 
     // 2. Account eligibility / Action Required gates (fail-closed, requires manual account action)
+    const hasEligibilityGate = (await this.page.locator('#eligibility-gate, .eligibility-alert, [data-testid="eligibility-gate"]').count().catch(() => 0)) > 0;
+    if (hasEligibilityGate) {
+      return { status: 'FLOW_ELIGIBILITY_REQUIRED' };
+    }
+
+    const content = await this.page.content().catch(() => '');
     const contentLower = content.toLowerCase();
     if (
       contentLower.includes('account not eligible') ||
@@ -114,23 +115,42 @@ export class FlowUiAdapterV1 {
       contentLower.includes('verify your identity') ||
       contentLower.includes('subscription required') ||
       contentLower.includes('country is not supported') ||
-      contentLower.includes('region is not supported') ||
-      contentLower.includes('join the waitlist') ||
-      contentLower.includes('request access') ||
-      (await this.page.locator('#eligibility-gate, .eligibility-alert, [data-testid="eligibility-gate"]').count()) > 0
+      contentLower.includes('region is not supported')
     ) {
       return { status: 'FLOW_ELIGIBILITY_REQUIRED' };
     }
 
     // 3. Authenticated Ready indicators
-    const hasAppRoot = (await this.page.locator('#flow-app[data-authenticated="true"], #flow-app').count()) > 0;
-    const hasPromptInput = (await this.page.locator('textarea#prompt-input, textarea[placeholder*="prompt" i]').count()) > 0;
-
-    if (hasAppRoot && hasPromptInput) {
+    // Mock server indicators
+    const hasMockAppRoot = (await this.page.locator('#flow-app[data-authenticated="true"], #flow-app').count().catch(() => 0)) > 0;
+    const hasMockPromptInput = (await this.page.locator('textarea#prompt-input').count().catch(() => 0)) > 0;
+    if (hasMockAppRoot && hasMockPromptInput) {
       return { status: 'READY' };
     }
 
-    // 4. Official Flow URL or Mock server without login redirect, but elements cannot be recognized
+    // Real Google Flow indicators
+    const hasGoogleAccountAvatar = (await this.page.locator(
+      '[aria-label*="Google Account" i], img[src*="googleusercontent.com"], a[href*="SignOutOptions"], button[aria-label*="Account" i]'
+    ).count().catch(() => 0)) > 0;
+
+    const hasFlowAppControls = (await this.page.locator(
+      'textarea[placeholder*="prompt" i], textarea[placeholder*="Describe" i], textarea[placeholder*="video" i], button:has-text("Generate"), button:has-text("Create"), [data-testid="prompt-input"], [data-testid="generate-button"]'
+    ).count().catch(() => 0)) > 0;
+
+    if (hasGoogleAccountAvatar || (hasFlowAppControls && currentUrl.includes('labs.google'))) {
+      return { status: 'READY' };
+    }
+
+    // 4. Check for explicit unauthenticated login prompt in the rendered DOM
+    const hasLoginPrompt = (await this.page.locator(
+      '.login-prompt, #login-button, button:has-text("Sign in to Flow"), a.login-prompt'
+    ).count().catch(() => 0)) > 0;
+
+    if (hasLoginPrompt) {
+      return { status: 'LOGIN_REQUIRED' };
+    }
+
+    // 5. Official Flow URL or Mock server without login redirect, but elements cannot be recognized
     if (
       currentUrl.includes('labs.google') ||
       currentUrl.includes('127.0.0.1') ||

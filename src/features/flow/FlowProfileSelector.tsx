@@ -45,14 +45,39 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newProfileId.trim()) return;
-    await onCreateProfile(
-      newProfileId.trim(),
-      newProfileName.trim() || newProfileId.trim()
-    );
-    setNewProfileId('');
-    setNewProfileName('');
-    setShowCreate(false);
+    const id = newProfileId.trim();
+    if (!id) return;
+    if (profiles.some((p) => p.profileId.toLowerCase() === id.toLowerCase())) {
+      setActionFeedback(`Profile ID "${id}" already exists. Please choose a different ID.`);
+      return;
+    }
+    try {
+      await onCreateProfile(
+        id,
+        newProfileName.trim() || id
+      );
+      setNewProfileId('');
+      setNewProfileName('');
+      setShowCreate(false);
+      setActionFeedback(`✓ Profile "${id}" created and selected.`);
+      if (onRefreshProfiles) onRefreshProfiles();
+    } catch (err: any) {
+      setActionFeedback(`Failed to create profile: ${err?.message || String(err)}`);
+    }
+  };
+
+  const handleOpenCreateForm = () => {
+    if (!showCreate) {
+      let nextIndex = profiles.length + 1;
+      let defaultId = `profile_${nextIndex}`;
+      while (profiles.some((p) => p.profileId === defaultId)) {
+        nextIndex++;
+        defaultId = `profile_${nextIndex}`;
+      }
+      setNewProfileId(defaultId);
+      setNewProfileName(`Flow Account ${nextIndex}`);
+    }
+    setShowCreate(!showCreate);
   };
 
   const isBrowserOpen = selected?.manualBrowserOpen || selected?.browserSessionOpen || false;
@@ -131,7 +156,7 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
 
         <button
           type="button"
-          onClick={() => setShowCreate(!showCreate)}
+          onClick={handleOpenCreateForm}
           className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-indigo-300 hover:text-white bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-700/50 rounded-lg transition cursor-pointer"
         >
           <Plus className="w-3 h-3" />

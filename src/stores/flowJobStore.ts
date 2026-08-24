@@ -85,6 +85,7 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
             ? err
             : err?.message || 'Failed to create profile',
       });
+      throw err;
     }
   },
 
