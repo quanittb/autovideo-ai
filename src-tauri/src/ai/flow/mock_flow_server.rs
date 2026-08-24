@@ -21,6 +21,9 @@ pub enum MockScenario {
     PublicLandingRedirectToLogin,
     PublicLandingRedirectToWorkspace,
     AvatarOnly,
+    NoTransitionAfterClick,
+    UnknownPollDom,
+    ResultMissingDownload,
 }
 
 pub struct MockFlowServerHandle {
@@ -229,6 +232,44 @@ impl MockFlowServer {
     document.getElementById('progress-indicator').setAttribute('data-progress', '10');
   });
 </script>
+</body>
+</html>"#;
+                ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+            }
+            MockScenario::NoTransitionAfterClick => {
+                let html = r#"<!DOCTYPE html>
+<html>
+<head><title>Google Flow Mock - No Transition</title></head>
+<body>
+<div id="flow-app" data-authenticated="true">
+  <textarea id="prompt-input" placeholder="Enter prompt"></textarea>
+  <input type="file" id="video-upload" />
+  <button id="generate-button">Generate</button>
+</div>
+<script>
+  document.getElementById('generate-button').addEventListener('click', function() {
+    fetch('/api/click', { method: 'POST' });
+    // Does NOT transition DOM -> stays ambiguous
+  });
+</script>
+</body>
+</html>"#;
+                ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+            }
+            MockScenario::UnknownPollDom => {
+                let html = "<html><body><div id='unknown-widget-redesigned'>Completely unrecognized page</div></body></html>";
+                ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+            }
+            MockScenario::ResultMissingDownload => {
+                let html = r#"<!DOCTYPE html>
+<html>
+<head><title>Google Flow Mock - Result Missing Download</title></head>
+<body>
+<div id="flow-app" data-authenticated="true">
+  <textarea id="prompt-input" placeholder="Enter prompt"></textarea>
+  <button id="generate-button">Generate</button>
+  <div id="progress-indicator" data-progress="100" data-status="ready">Ready (No Download)</div>
+</div>
 </body>
 </html>"#;
                 ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())

@@ -357,7 +357,8 @@ fn test_phase20a_38_real_mock_playwright_chromium_e2e() {
     // 4. Download artifact via browser
     let download_url = poll_res.download_url.unwrap();
     let dest_path = temp_dir.path().join("downloaded_output.mp4");
-    let dl_res = rt.block_on(bridge.download_artifact(&profile_dir, &download_url, &dest_path));
+    let dl_res =
+        rt.block_on(bridge.download_artifact(&profile_dir, Some(&download_url), &dest_path));
     assert!(dl_res.is_ok());
     assert!(dest_path.exists());
     assert!(std::fs::metadata(&dest_path).unwrap().len() > 0);

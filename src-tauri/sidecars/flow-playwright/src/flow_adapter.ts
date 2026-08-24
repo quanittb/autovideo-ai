@@ -17,7 +17,15 @@ export interface SubmitPromptParams {
 }
 
 export interface PollResult {
-  status: 'queued' | 'generating' | 'ready' | 'failed' | 'login_required' | 'credits_required' | 'ui_changed' | 'unknown';
+  status:
+    | 'queued'
+    | 'generating'
+    | 'ready'
+    | 'failed'
+    | 'login_required'
+    | 'credits_required'
+    | 'ui_changed'
+    | 'unknown';
   progressPct: number;
   downloadUrl?: string;
   errorMessage?: string;
@@ -42,9 +50,281 @@ export interface SubmitResult {
   fingerprint: string;
 }
 
+/**
+ * Shared Helper: Locates the active prompt composer input on the Flow workspace.
+ * Supports textarea, contenteditable div, [role="textbox"].
+ * Excludes recaptcha, hidden fields, and credential/login inputs.
+ */
+export async function locatePromptComposer(page: Page) {
+  const selectorCandidates = [
+    'div[data-slate-editor="true"]',
+    'div[contenteditable="true"]',
+    '[role="textbox"]',
+    'textarea#prompt-input',
+    'textarea[placeholder*="prompt" i]',
+    'textarea[placeholder*="Describe" i]',
+    'textarea[placeholder*="video" i]',
+    'textarea[placeholder*="nhập" i]',
+    'textarea[placeholder*="Mô tả" i]',
+    '[data-testid="prompt-input"]',
+    'textarea:not([name="g-recaptcha-response"])',
+  ];
+
+  for (const selector of selectorCandidates) {
+    const loc = page.locator(selector);
+    const count = await loc.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const el = loc.nth(i);
+      const isVisible = await el.isVisible().catch(() => false);
+      const isEditable = await el.isEditable().catch(() => false);
+      if (isVisible && isEditable) {
+        const name = ((await el.getAttribute('name').catch(() => '')) || '').toLowerCase();
+        const type = ((await el.getAttribute('type').catch(() => '')) || '').toLowerCase();
+        if (
+          name.includes('recaptcha') ||
+          name.includes('identifier') ||
+          type === 'password' ||
+          type === 'hidden'
+        ) {
+          continue;
+        }
+        return el;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Shared Helper: Locates the video file upload input.
+ */
+export async function locateUploadControl(page: Page) {
+  const fileInput = page.locator('input[type="file"]').first();
+  const exists = (await fileInput.count().catch(() => 0)) > 0;
+  return exists ? fileInput : null;
+}
+
+/**
+ * Shared Helper: Locates the authoritative Generate control in the active composer.
+ * Strictly excludes generic navigation/new project buttons.
+ */
+export async function locateGenerateControl(page: Page) {
+  const generateSelectors = [
+    'button#generate-button',
+    '[data-testid="generate-button"]',
+    'button:has(i:has-text("arrow_forward"))',
+    'button:has-text("arrow_forward")',
+    'button:has-text("Generate")',
+    'button:has-text("Tạo")',
+    'button[aria-label*="Generate" i]',
+    'button[aria-label*="Tạo" i]',
+  ];
+
+  for (const selector of generateSelectors) {
+    const loc = page.locator(selector);
+    const count = await loc.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const btn = loc.nth(i);
+      const isVisible = await btn.isVisible().catch(() => false);
+      if (!isVisible) continue;
+
+      const btnText = ((await btn.innerText().catch(() => '')) || '').trim().toLowerCase();
+      const ariaLabel = ((await btn.getAttribute('aria-label').catch(() => '')) || '').toLowerCase();
+      const ariaHasPopup = ((await btn.getAttribute('aria-haspopup').catch(() => '')) || '').toLowerCase();
+
+      // Reject menu/dialog trigger buttons (e.g. "add_2\nTạo")
+      if (ariaHasPopup === 'dialog' || ariaHasPopup === 'menu') {
+        continue;
+      }
+
+      // Explicitly reject unrelated navigation / project management buttons
+      if (
+        btnText.includes('dự án mới') ||
+        btnText.includes('new project') ||
+        btnText.includes('create with google flow') ||
+        btnText.includes('try in google flow') ||
+        btnText.includes('sign in') ||
+        btnText.includes('đóng') ||
+        btnText.includes('close') ||
+        btnText.includes('explore tools') ||
+        btnText.includes('chỉnh sửa dự án') ||
+        btnText.includes('xoá dự án') ||
+        btnText.includes('tác nhân')
+      ) {
+        continue;
+      }
+
+      if (
+        btnText.includes('arrow_forward') ||
+        btnText === 'generate' ||
+        btnText === 'tạo' ||
+        btnText.startsWith('generate') ||
+        btnText.startsWith('tạo') ||
+        ariaLabel.includes('generate') ||
+        ariaLabel.includes('tạo') ||
+        selector.includes('#generate-button') ||
+        selector.includes('[data-testid="generate-button"]')
+      ) {
+        return btn;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Shared Helper: Authoritative semantic state detection. Fails closed on unrecognized DOM.
+ * NEVER fabricates arbitrary 50% progress.
+ */
+export async function detectGenerationState(
+  page: Page,
+  _submissionEvidence?: string
+): Promise<PollResult> {
+  const currentUrl = page.url();
+
+  // 1. Auth check
+  if (
+    currentUrl.includes('accounts.google.com') ||
+    currentUrl.includes('ServiceLogin') ||
+    currentUrl.includes('/signin')
+  ) {
+    return { status: 'login_required', progressPct: 0, errorMessage: 'Authentication expired' };
+  }
+
+  const isGoogleSignInForm =
+    (await page
+      .locator('input[name="identifier"], #identifierId, input[type="email"]')
+      .count()
+      .catch(() => 0)) > 0;
+  if (isGoogleSignInForm) {
+    return { status: 'login_required', progressPct: 0, errorMessage: 'Authentication required' };
+  }
+
+  const bodyText = await page.locator('body').innerText().catch(() => '');
+  const bodyTextLower = bodyText.toLowerCase();
+
+  if (
+    bodyTextLower.includes('sign in with google to continue') ||
+    bodyTextLower.includes('sign in to continue')
+  ) {
+    return { status: 'login_required', progressPct: 0, errorMessage: 'Authentication required' };
+  }
+
+  // 2. Eligibility check
+  if (
+    bodyTextLower.includes('account not eligible') ||
+    bodyTextLower.includes('age verification required') ||
+    bodyTextLower.includes('identity verification required') ||
+    bodyTextLower.includes('region is not supported') ||
+    (await page.locator('#eligibility-gate, [data-testid="eligibility-gate"]').count().catch(() => 0)) > 0
+  ) {
+    return {
+      status: 'failed',
+      progressPct: 0,
+      errorMessage: 'FLOW_ELIGIBILITY_REQUIRED: Account or region verification required',
+    };
+  }
+
+  // 3. Credits check
+  if (
+    bodyTextLower.includes('0 credits remaining') ||
+    bodyTextLower.includes('0 tín dụng còn lại') ||
+    (await page.locator('.credits-alert, #credits-alert, [data-testid="credits-alert"]').count().catch(() => 0)) > 0
+  ) {
+    return { status: 'credits_required', progressPct: 0, errorMessage: 'Insufficient Flow credits' };
+  }
+
+  // 4. Generation Error check
+  const errorBanner = page.locator(
+    '.error-banner, #error-banner, [data-testid="error-banner"], .generation-error'
+  );
+  if ((await errorBanner.count().catch(() => 0)) > 0 && (await errorBanner.first().isVisible().catch(() => false))) {
+    const errMsg = await errorBanner.first().innerText().catch(() => 'Generation failed');
+    return { status: 'failed', progressPct: 0, errorMessage: errMsg || 'Generation failed' };
+  }
+  if (bodyTextLower.includes('generation failed') || bodyTextLower.includes('quá trình tạo không thành công')) {
+    return { status: 'failed', progressPct: 0, errorMessage: 'Flow generation failed' };
+  }
+
+  // 5. Ready / Download check
+  const downloadLink = page
+    .locator(
+      'a#download-link, a[download], a[href*="download"], button:has-text("Download"), button:has-text("Tải xuống")'
+    )
+    .first();
+  if ((await downloadLink.count().catch(() => 0)) > 0 && (await downloadLink.isVisible().catch(() => false))) {
+    const href = await downloadLink.getAttribute('href').catch(() => null);
+    if (href && href.trim().length > 0) {
+      return {
+        status: 'ready',
+        progressPct: 100,
+        downloadUrl: href.trim(),
+      };
+    } else {
+      return {
+        status: 'ready',
+        progressPct: 100,
+        downloadUrl: undefined,
+      };
+    }
+  }
+
+  const completedVideo = page
+    .locator(
+      'video[data-status="ready"], #flow-app [data-status="ready"], div[data-status="ready"]'
+    )
+    .first();
+  if ((await completedVideo.count().catch(() => 0)) > 0 && (await completedVideo.isVisible().catch(() => false))) {
+    return {
+      status: 'ready',
+      progressPct: 100,
+    };
+  }
+
+  // 6. Generating / Queued check (Authoritative semantic progress markers)
+  const progressIndicator = page
+    .locator(
+      '#progress-indicator, [data-testid="progress-indicator"], .progress-indicator, [data-status="generating"]'
+    )
+    .first();
+  if ((await progressIndicator.count().catch(() => 0)) > 0 && (await progressIndicator.isVisible().catch(() => false))) {
+    const progressAttr = await progressIndicator.getAttribute('data-progress').catch(() => null);
+    const progressPct = progressAttr ? parseFloat(progressAttr) : 0;
+    return { status: 'generating', progressPct: isNaN(progressPct) ? 0 : progressPct };
+  }
+
+  const generatingCard = page
+    .locator(
+      '.generating-card, [data-state="generating"], div:has-text("Đang tạo"), div:has-text("Generating...")'
+    )
+    .first();
+  if ((await generatingCard.count().catch(() => 0)) > 0 && (await generatingCard.isVisible().catch(() => false))) {
+    return { status: 'generating', progressPct: 0 };
+  }
+
+  // 7. Fail-closed: do NOT fabricate generating 50%
+  if (
+    currentUrl.includes('labs.google') ||
+    currentUrl.includes('127.0.0.1') ||
+    currentUrl.includes('localhost')
+  ) {
+    return {
+      status: 'ui_changed',
+      progressPct: 0,
+      errorMessage: 'FLOW_UI_CHANGED: Unrecognized page state during generation polling',
+    };
+  }
+
+  return {
+    status: 'unknown',
+    progressPct: 0,
+    errorMessage: 'UNKNOWN: Could not determine Flow generation state',
+  };
+}
+
 export class FlowUiAdapterV1 {
-  private context: BrowserContext | null = null;
-  private page: Page | null = null;
+  public context: BrowserContext | null = null;
+  public page: Page | null = null;
 
   async launchBrowser(params: LaunchParams): Promise<void> {
     if (this.context) {
@@ -73,8 +353,13 @@ export class FlowUiAdapterV1 {
       this.page = this.context.pages()[0] || (await this.context.newPage());
     } catch (err: any) {
       const errMsg = err?.message || String(err);
-      if (errMsg.includes('Executable doesn\'t exist') || errMsg.includes('Cannot find installed Chrome')) {
-        throw new Error('CHROME_NOT_INSTALLED: Google Chrome Stable was not found. Please install Google Chrome to use Flow automation.');
+      if (
+        errMsg.includes("Executable doesn't exist") ||
+        errMsg.includes('Cannot find installed Chrome')
+      ) {
+        throw new Error(
+          'CHROME_NOT_INSTALLED: Google Chrome Stable was not found. Please install Google Chrome to use Flow automation.'
+        );
       }
       throw err;
     }
@@ -151,33 +436,27 @@ export class FlowUiAdapterV1 {
 
       // 4. Handle policy agreement modal if present ("Tôi đồng ý" / "I agree")
       const agreeBtn = this.page
-        .locator('button:has-text("Tôi đồng ý"), button:has-text("I agree"), button:has-text("Agree")')
+        .locator(
+          'button:has-text("Tôi đồng ý"), button:has-text("I agree"), button:has-text("Agree")'
+        )
         .first();
-      if ((await agreeBtn.count().catch(() => 0)) > 0 && (await agreeBtn.isVisible().catch(() => false))) {
+      if (
+        (await agreeBtn.count().catch(() => 0)) > 0 &&
+        (await agreeBtn.isVisible().catch(() => false))
+      ) {
         await agreeBtn.click({ timeout: 3000 }).catch(() => {});
         await this.page.waitForTimeout(1000);
       }
 
-      // 5. Strong Authenticated Flow Workspace / Dashboard Detection
+      // 5. Strong Authenticated Flow Workspace / Dashboard Detection using shared helpers
       const hasMockAppRoot =
         (await this.page
           .locator('#flow-app[data-authenticated="true"], #flow-app')
           .count()
           .catch(() => 0)) > 0;
-      const hasPromptTextarea =
-        (await this.page
-          .locator(
-            'textarea#prompt-input, textarea[placeholder*="prompt" i], textarea[placeholder*="Describe" i], textarea[placeholder*="video" i], [data-testid="prompt-input"], div[contenteditable="true"], [role="textbox"], textarea:not([name="g-recaptcha-response"])'
-          )
-          .count()
-          .catch(() => 0)) > 0;
-      const hasGenerateBtn =
-        (await this.page
-          .locator(
-            'button#generate-button, button:has-text("Generate"), [data-testid="generate-button"], button:has-text("Tạo"), button[aria-label*="Tạo"]'
-          )
-          .count()
-          .catch(() => 0)) > 0;
+
+      const promptInput = await locatePromptComposer(this.page);
+      const generateBtn = await locateGenerateControl(this.page);
 
       // Check if on authenticated Flow project dashboard (e.g. project cards / "+ Dự án mới" button)
       const hasFlowDashboard =
@@ -188,12 +467,14 @@ export class FlowUiAdapterV1 {
           .count()
           .catch(() => 0)) > 0;
 
+      const isProjectWorkspace = currentUrl.includes('/tools/flow/project/');
+
       // Mock server ready
-      if (hasMockAppRoot && hasPromptTextarea) {
+      if (hasMockAppRoot && promptInput) {
         return { status: 'READY' };
       }
 
-      // Real Flow workspace ready: must have prompt input AND generate button, OR active project dashboard on labs.google
+      // Real Flow workspace ready: must have project workspace OR active dashboard OR prompt composer
       const isPublicLanding =
         (await this.page
           .locator(
@@ -204,7 +485,7 @@ export class FlowUiAdapterV1 {
         bodyTextLower.includes('ai creative studio built with google');
 
       if (
-        (hasFlowDashboard || (hasPromptTextarea && hasGenerateBtn)) &&
+        (isProjectWorkspace || hasFlowDashboard || (promptInput && generateBtn)) &&
         !isPublicLanding &&
         currentUrl.includes('labs.google')
       ) {
@@ -229,16 +510,11 @@ export class FlowUiAdapterV1 {
     const landingCtaCount = await landingCta.count().catch(() => 0);
 
     if (landingCtaCount > 0) {
-      // Execute ONE NON-GENERATION navigation preflight: activate "Create with Google Flow" CTA
       try {
         await landingCta.click({ timeout: 5000 });
-        // Wait for possible redirect or workspace load
         await this.page.waitForTimeout(3000);
-      } catch (_) {
-        // CTA click failed or timed out
-      }
+      } catch (_) {}
 
-      // Re-evaluate page post-CTA
       const postCtaStatus = await checkPage();
       if (postCtaStatus) {
         return postCtaStatus;
@@ -253,7 +529,6 @@ export class FlowUiAdapterV1 {
         return { status: 'LOGIN_REQUIRED' };
       }
 
-      // If still on landing page or unrecognized
       return { status: 'FLOW_LANDING' };
     }
 
@@ -266,21 +541,104 @@ export class FlowUiAdapterV1 {
       return { status: 'FLOW_UI_CHANGED' };
     }
 
-    // Fail-closed fallback: do not assume login failure
     return { status: 'UNKNOWN' };
   }
 
-  async submitPromptGeneration(params: SubmitPromptParams): Promise<SubmitResult> {
+  async dryRunPreflight(params: { prompt: string; videoPath?: string }): Promise<{
+    authStatus: string;
+    workspaceAccessible: boolean;
+    promptLocated: boolean;
+    uploadLocated: boolean;
+    generateLocated: boolean;
+    generateEnabled: boolean;
+  }> {
     if (!this.page) throw new Error('Browser not launched');
 
-    // 1. Locate Prompt Input (Fail-closed on UI change)
-    const promptInput = this.page.locator('textarea#prompt-input, textarea[placeholder*="prompt" i]').first();
-    const promptVisible = await promptInput.isVisible({ timeout: 5000 }).catch(() => false);
-    if (!promptVisible) {
-      throw new Error('FLOW_UI_CHANGED: Prompt textarea input not found or not actionable');
+    const auth = await this.checkAuthStatus();
+    if (auth.status !== 'READY') {
+      return {
+        authStatus: auth.status,
+        workspaceAccessible: false,
+        promptLocated: false,
+        uploadLocated: false,
+        generateLocated: false,
+        generateEnabled: false,
+      };
     }
 
-    await promptInput.fill(params.prompt);
+    // If on project dashboard, enter active project workspace
+    const projectLink = this.page.locator('a[href*="/tools/flow/project/"]').first();
+    if ((await projectLink.count().catch(() => 0)) > 0 && !this.page.url().includes('/project/')) {
+      await projectLink.click().catch(() => {});
+      await this.page.waitForTimeout(4000);
+    }
+
+    const promptEl = await locatePromptComposer(this.page);
+    if (promptEl && params.prompt) {
+      const tagName = await promptEl.evaluate((el: any) => el.tagName.toLowerCase());
+      if (tagName === 'textarea' || tagName === 'input') {
+        await promptEl.fill(params.prompt);
+      } else {
+        await promptEl.click();
+        await this.page.keyboard.press('Control+A');
+        await this.page.keyboard.press('Backspace');
+        await this.page.keyboard.type(params.prompt);
+      }
+      await this.page.waitForTimeout(1000);
+    }
+
+    let uploadLocated = false;
+    if (params.videoPath) {
+      const uploadEl = await locateUploadControl(this.page);
+      uploadLocated = uploadEl !== null;
+    }
+
+    const generateEl = await locateGenerateControl(this.page);
+    const generateLocated = generateEl !== null;
+    let generateEnabled = false;
+    if (generateEl) {
+      const disabled = await generateEl.isDisabled().catch(() => false);
+      const ariaDisabled = await generateEl.getAttribute('aria-disabled').catch(() => null);
+      generateEnabled = !disabled && ariaDisabled !== 'true';
+    }
+
+    return {
+      authStatus: auth.status,
+      workspaceAccessible: true,
+      promptLocated: promptEl !== null,
+      uploadLocated,
+      generateLocated,
+      generateEnabled,
+    };
+  }
+
+  async submitPromptGeneration(params: SubmitPromptParams): Promise<SubmitResult> {
+    const page = this.page;
+    if (!page) throw new Error('Browser not launched');
+
+    // If on project dashboard, enter active project workspace
+    const projectLink = page.locator('a[href*="/tools/flow/project/"]').first();
+    if ((await projectLink.count().catch(() => 0)) > 0 && !page.url().includes('/project/')) {
+      await projectLink.click().catch(() => {});
+      await page.waitForTimeout(4000);
+    }
+
+    // 1. Locate Prompt Composer via shared helper
+    const promptInput = await locatePromptComposer(page);
+    if (!promptInput) {
+      throw new Error('FLOW_UI_CHANGED: Prompt composer input not found or not actionable');
+    }
+
+    const tagName = await promptInput.evaluate((el: any) => el.tagName.toLowerCase());
+    if (tagName === 'textarea' || tagName === 'input') {
+      await promptInput.fill(params.prompt);
+    } else {
+      await promptInput.click();
+      await page.keyboard.press('Control+A');
+      await page.keyboard.press('Backspace');
+      await page.keyboard.type(params.prompt);
+    }
+    await page.waitForTimeout(1000);
 
     // 2. Locate File Input if Video Path is provided
     if (params.videoPath) {
@@ -288,9 +646,8 @@ export class FlowUiAdapterV1 {
         throw new Error(`FILE_NOT_FOUND: Upload video does not exist at ${params.videoPath}`);
       }
 
-      const fileInput = this.page.locator('input[type="file"]').first();
-      const fileInputExists = (await fileInput.count().catch(() => 0)) > 0;
-      if (!fileInputExists) {
+      const fileInput = await locateUploadControl(page);
+      if (!fileInput) {
         throw new Error('FLOW_UI_CHANGED: Video file upload input element not found');
       }
 
@@ -301,14 +658,16 @@ export class FlowUiAdapterV1 {
       }
     }
 
-    // 3. Locate Generate Button (Fail-closed)
-    const generateBtn = this.page.locator('button#generate-button, button:has-text("Generate")').first();
-    const btnVisible = await generateBtn.isVisible({ timeout: 5000 }).catch(() => false);
-    if (!btnVisible) {
+    // 3. Locate Generate Button via shared helper
+    const generateBtn = await locateGenerateControl(page);
+    if (!generateBtn) {
       throw new Error('FLOW_UI_CHANGED: Generate button not found or not actionable');
     }
 
-    const btnEnabled = await generateBtn.isEnabled().catch(() => false);
+    const disabled = await generateBtn.isDisabled().catch(() => false);
+    const ariaDisabled = await generateBtn.getAttribute('aria-disabled').catch(() => null);
+    const btnEnabled = !disabled && ariaDisabled !== 'true';
+
     if (!btnEnabled) {
       throw new Error('FLOW_UI_CHANGED: Generate button is disabled');
     }
@@ -321,70 +680,68 @@ export class FlowUiAdapterV1 {
       throw new Error(`CLICK_FAILED: Failed to execute Generate click: ${err?.message || String(err)}`);
     }
 
-    // 5. Post-click Semantic Browser Evidence verification
-    // Wait briefly to observe UI transition
-    await this.page.waitForTimeout(500);
+    // 5. Post-click Semantic Browser Evidence verification (Bounded observation)
+    let postClickEvidence: string | null = null;
+    let postClickState = 'AMBIGUOUS';
 
-    const postContent = await this.page.content();
-    let postClickState = 'SUBMITTED_OBSERVED';
-    if (postContent.includes('credits-alert') || postContent.includes('0 Credits remaining')) {
-      postClickState = 'CREDITS_REQUIRED_OBSERVED';
-    } else if (postContent.includes('progress-indicator') || postContent.includes('generating')) {
-      postClickState = 'GENERATING_OBSERVED';
+    for (let attempt = 0; attempt < 10; attempt++) {
+      await page.waitForTimeout(500);
+
+      const state = await detectGenerationState(page, params.localSubmissionAttemptId);
+      if (state.status === 'generating') {
+        postClickState = 'GENERATING_OBSERVED';
+        postClickEvidence = `semantic:generating:${submittedAt}:${params.localSubmissionAttemptId}`;
+        break;
+      } else if (state.status === 'ready') {
+        postClickState = 'READY_OBSERVED';
+        postClickEvidence = `semantic:ready:${submittedAt}:${params.localSubmissionAttemptId}`;
+        break;
+      } else if (state.status === 'credits_required') {
+        postClickState = 'CREDITS_REQUIRED_OBSERVED';
+        postClickEvidence = `semantic:credits_required:${submittedAt}`;
+        break;
+      } else if (state.status === 'failed') {
+        postClickState = 'FAILED_OBSERVED';
+        postClickEvidence = `semantic:failed:${submittedAt}:${state.errorMessage || ''}`;
+        break;
+      }
+
+      // Check if button changed to disabled or generating indicator
+      const isStillEnabled = await generateBtn.isEnabled().catch(() => false);
+      const isStillVisible = await generateBtn.isVisible().catch(() => false);
+      if (!isStillEnabled || !isStillVisible) {
+        postClickState = 'SUBMIT_DISPATCHED_OBSERVED';
+        postClickEvidence = `semantic:btn_dispatched:${submittedAt}:${params.localSubmissionAttemptId}`;
+        break;
+      }
     }
 
-    const fingerprint = `fp_${params.localSubmissionAttemptId}_dur_${params.durationSec}`;
-    const generationEvidence = `evidence:${params.localSubmissionAttemptId}:${submittedAt}:${fingerprint}`;
+    if (!postClickEvidence || postClickState === 'AMBIGUOUS') {
+      throw new Error(
+        `GENERATION_AMBIGUOUS: No positive post-submission UI transition observed for attempt ${params.localSubmissionAttemptId}`
+      );
+    }
+
+    const localFingerprint = `fp_${params.localSubmissionAttemptId}_dur_${params.durationSec}`;
 
     return {
-      generationEvidence,
+      generationEvidence: postClickEvidence,
       localSubmissionAttemptId: params.localSubmissionAttemptId,
       postClickState,
       submittedAt,
-      fingerprint,
+      fingerprint: localFingerprint,
     };
   }
 
-  async pollGenerationProgress(_submissionEvidence: string): Promise<PollResult> {
+  async pollGenerationProgress(submissionEvidence: string): Promise<PollResult> {
     if (!this.page) throw new Error('Browser not launched');
-
-    const content = await this.page.content();
-
-    if (content.includes('Sign in with Google') || content.includes('login-prompt')) {
-      return { status: 'login_required', progressPct: 0, errorMessage: 'Authentication expired' };
-    }
-    if (content.includes('0 Credits remaining') || content.includes('credits-alert')) {
-      return { status: 'credits_required', progressPct: 0, errorMessage: 'Insufficient Flow credits' };
-    }
-    if (content.includes('error-banner') || content.includes('Generation failed')) {
-      return { status: 'failed', progressPct: 0, errorMessage: 'Generation failed: Inappropriate prompt or server error' };
-    }
-    if (content.includes('completely-redesigned-layout')) {
-      return { status: 'ui_changed', progressPct: 0, errorMessage: 'FLOW_UI_CHANGED: Unrecognized page structure' };
-    }
-
-    const downloadLink = this.page.locator('a#download-link, a[href*="download"]').first();
-    const downloadVisible = await downloadLink.isVisible({ timeout: 1000 }).catch(() => false);
-    if (downloadVisible) {
-      const href = await downloadLink.getAttribute('href');
-      return {
-        status: 'ready',
-        progressPct: 100,
-        downloadUrl: href || '/download',
-      };
-    }
-
-    const progressIndicator = this.page.locator('#progress-indicator').first();
-    if ((await progressIndicator.count().catch(() => 0)) > 0) {
-      const progressAttr = await progressIndicator.getAttribute('data-progress');
-      const progressPct = progressAttr ? parseFloat(progressAttr) : 50;
-      return { status: 'generating', progressPct };
-    }
-
-    return { status: 'generating', progressPct: 50 };
+    return detectGenerationState(this.page, submissionEvidence);
   }
 
-  async downloadArtifact(downloadUrl: string, destinationPath: string): Promise<{ success: boolean; savedPath: string }> {
+  async downloadArtifact(
+    downloadUrl: string | undefined,
+    destinationPath: string
+  ): Promise<{ success: boolean; savedPath: string }> {
     if (!this.page) throw new Error('Browser not launched');
 
     const dir = path.dirname(destinationPath);
@@ -392,31 +749,67 @@ export class FlowUiAdapterV1 {
       fs.mkdirSync(dir, { recursive: true });
     }
 
-    // 1. Try browser download event if link is clickable
-    const downloadLink = this.page.locator(`a#download-link, a[href*="download"], a[href="${downloadUrl}"]`).first();
-    if (await downloadLink.isVisible({ timeout: 2000 }).catch(() => false)) {
-      try {
-        const downloadPromise = this.page.waitForEvent('download', { timeout: 8000 });
-        await downloadLink.click();
-        const download = await downloadPromise;
-        await download.saveAs(destinationPath);
-        return { success: true, savedPath: destinationPath };
-      } catch (_) {
-        // Fall through to request context
+    // 1. Try browser download event by clicking download element on page
+    const downloadLocators = [
+      'a#download-link',
+      'a[download]',
+      'a[href*="download"]',
+      'button:has-text("Download")',
+      'button:has-text("Tải xuống")',
+      'button[aria-label*="Download" i]',
+      'button[aria-label*="Tải xuống" i]',
+    ];
+
+    for (const sel of downloadLocators) {
+      const loc = this.page.locator(sel).first();
+      if ((await loc.count().catch(() => 0)) > 0 && (await loc.isVisible().catch(() => false))) {
+        try {
+          const downloadPromise = this.page.waitForEvent('download', { timeout: 8000 });
+          await loc.click();
+          const download = await downloadPromise;
+          await download.saveAs(destinationPath);
+          return { success: true, savedPath: destinationPath };
+        } catch (_) {}
       }
     }
 
-    // 2. Context request with cookie/session sharing
-    if (this.context) {
-      const response = await this.context.request.get(downloadUrl);
-      if (response.ok()) {
-        const buf = await response.body();
-        fs.writeFileSync(destinationPath, buf);
-        return { success: true, savedPath: destinationPath };
+    // 2. If downloadUrl is provided, validate origin and download via context request
+    if (downloadUrl && downloadUrl.trim().length > 0) {
+      const trimmedUrl = downloadUrl.trim();
+      const currentUrl = this.page.url();
+
+      let targetFullUrl: string;
+      if (trimmedUrl.startsWith('http://') || trimmedUrl.startsWith('https://')) {
+        const parsed = new URL(trimmedUrl);
+        const host = parsed.hostname.toLowerCase();
+        if (
+          !host.endsWith('labs.google') &&
+          !host.endsWith('googleusercontent.com') &&
+          !host.endsWith('googleapis.com') &&
+          host !== '127.0.0.1' &&
+          host !== 'localhost'
+        ) {
+          throw new Error(`SECURITY_VIOLATION: Untrusted download URL origin: ${trimmedUrl}`);
+        }
+        targetFullUrl = trimmedUrl;
+      } else {
+        const base = new URL(currentUrl);
+        targetFullUrl = new URL(trimmedUrl, base.origin).toString();
+      }
+
+      if (this.context) {
+        const response = await this.context.request.get(targetFullUrl);
+        if (response.ok()) {
+          const buf = await response.body();
+          fs.writeFileSync(destinationPath, buf);
+          return { success: true, savedPath: destinationPath };
+        }
       }
     }
 
-    throw new Error(`DOWNLOAD_FAILED: Could not download artifact from ${downloadUrl}`);
+    throw new Error(
+      'DOWNLOAD_CONTROL_NOT_OBSERVED: No valid download control or accessible URL was observed on the completed result'
+    );
   }
 
   async closeBrowser(): Promise<void> {

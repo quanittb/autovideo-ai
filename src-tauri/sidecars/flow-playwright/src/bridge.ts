@@ -45,6 +45,10 @@ export class FlowRpcBridge {
           const dlRes = await this.adapter.downloadArtifact(msg.params.downloadUrl, msg.params.destinationPath);
           return { id: msg.id, result: dlRes };
 
+        case 'dry_run_preflight':
+          const dryRunRes = await this.adapter.dryRunPreflight(msg.params);
+          return { id: msg.id, result: dryRunRes };
+
         case 'close_browser':
           await this.adapter.closeBrowser();
           return { id: msg.id, result: { success: true } };
@@ -66,6 +70,12 @@ export class FlowRpcBridge {
         code = 'UPLOAD_FAILED';
       } else if (errMsg.startsWith('CLICK_FAILED')) {
         code = 'CLICK_FAILED';
+      } else if (errMsg.startsWith('GENERATION_AMBIGUOUS')) {
+        code = 'GENERATION_AMBIGUOUS';
+      } else if (errMsg.startsWith('DOWNLOAD_CONTROL_NOT_OBSERVED')) {
+        code = 'DOWNLOAD_CONTROL_NOT_OBSERVED';
+      } else if (errMsg.startsWith('SECURITY_VIOLATION')) {
+        code = 'SECURITY_VIOLATION';
       }
 
       return {

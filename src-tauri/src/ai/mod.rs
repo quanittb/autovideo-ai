@@ -680,3 +680,6 @@ mod tests_phase19;
 
 #[cfg(test)]
 mod tests_phase20a;
+
+#[cfg(test)]
+mod tests_phase20b;

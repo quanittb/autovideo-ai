@@ -217,12 +217,28 @@ impl FlowOrchestrator {
             self.store.save_manifest_atomic(&mut manifest)?;
         }
 
-        // 2. Sequential Browser Generation Phase
+        // 2. Sequential Browser Generation Phase (Single Live Session)
         let frozen_prompt = manifest.submitted_prompt.clone();
         let total_segments = manifest.child_segments.len();
 
+        let mut active_session = match self.bridge.open_active_session(&profile_dir).await {
+            Ok(s) => Some(s),
+            Err(e) => {
+                manifest.state = FlowJobState::Failed;
+                manifest.error = Some(JobErrorRecord {
+                    code: "SESSION_SPAWN_FAILED".to_string(),
+                    sanitized_message: e,
+                });
+                self.store.save_manifest_atomic(&mut manifest)?;
+                return Ok(());
+            }
+        };
+
         for i in 0..total_segments {
             if manifest.cancellation_requested {
+                if let Some(s) = active_session.take() {
+                    s.close().await;
+                }
                 manifest.state = FlowJobState::Cancelled;
                 self.store.save_manifest_atomic(&mut manifest)?;
                 return Ok(());
@@ -246,6 +262,9 @@ impl FlowOrchestrator {
                 }
                 FlowChildSubmissionState::AttemptPersisted
                 | FlowChildSubmissionState::Ambiguous => {
+                    if let Some(s) = active_session.take() {
+                        s.close().await;
+                    }
                     // Crash happened in the Generate click window -> ZERO automatic resubmit!
                     manifest.state = FlowJobState::GenerationAmbiguous;
                     manifest.child_segments[i].state = FlowJobState::GenerationAmbiguous;
@@ -276,11 +295,13 @@ impl FlowOrchestrator {
 
                     let seg_input_path = segments_dir.join(&seg_filename);
 
-                    // Execute ONE browser submission via Playwright bridge
-                    match self
-                        .bridge
-                        .submit_generation(
-                            &profile_dir,
+                    // Execute ONE browser submission via active session
+                    let session_ref = active_session.as_mut().ok_or_else(|| {
+                        "INTERNAL_ERROR: Missing active browser session".to_string()
+                    })?;
+
+                    match session_ref
+                        .submit(
                             &frozen_prompt,
                             Some(&seg_input_path),
                             seg_duration,
@@ -298,6 +319,9 @@ impl FlowOrchestrator {
                             ev
                         }
                         Err(e) => {
+                            if let Some(s) = active_session.take() {
+                                s.close().await;
+                            }
                             manifest.state = FlowJobState::GenerationAmbiguous;
                             manifest.child_segments[i].state = FlowJobState::GenerationAmbiguous;
                             manifest.child_segments[i].submission_state =
@@ -314,13 +338,16 @@ impl FlowOrchestrator {
                 FlowChildSubmissionState::ProvenCompleted => continue,
             };
 
-            // 3. Poll until complete (with timeout and sleep)
+            // 3. Poll until complete (with timeout and sleep) on active session
             let poll_start = Utc::now();
             let poll_timeout = std::time::Duration::from_secs(600); // 10 minutes max for video generation
             let mut is_completed = false;
 
             while !is_completed {
                 if manifest.cancellation_requested {
+                    if let Some(s) = active_session.take() {
+                        s.close().await;
+                    }
                     manifest.state = FlowJobState::Cancelled;
                     self.store.save_manifest_atomic(&mut manifest)?;
                     return Ok(());
@@ -329,6 +356,9 @@ impl FlowOrchestrator {
                 if Utc::now().signed_duration_since(poll_start).num_seconds()
                     > poll_timeout.as_secs() as i64
                 {
+                    if let Some(s) = active_session.take() {
+                        s.close().await;
+                    }
                     manifest.state = FlowJobState::Failed;
                     manifest.child_segments[i].state = FlowJobState::Failed;
                     manifest.error = Some(JobErrorRecord {
@@ -341,28 +371,41 @@ impl FlowOrchestrator {
                     return Ok(());
                 }
 
-                let poll_result = self
-                    .bridge
-                    .poll_generation(&profile_dir, &submission_evidence)
-                    .await?;
+                let session_ref = active_session.as_mut().ok_or_else(|| {
+                    "INTERNAL_ERROR: Missing active browser session during poll".to_string()
+                })?;
+
+                let poll_result = session_ref.poll(&submission_evidence).await?;
 
                 match poll_result.status.as_str() {
                     "login_required" => {
+                        if let Some(s) = active_session.take() {
+                            s.close().await;
+                        }
                         manifest.state = FlowJobState::LoginRequired;
                         self.store.save_manifest_atomic(&mut manifest)?;
                         return Ok(());
                     }
                     "credits_required" => {
+                        if let Some(s) = active_session.take() {
+                            s.close().await;
+                        }
                         manifest.state = FlowJobState::CreditsRequired;
                         self.store.save_manifest_atomic(&mut manifest)?;
                         return Ok(());
                     }
                     "ui_changed" => {
+                        if let Some(s) = active_session.take() {
+                            s.close().await;
+                        }
                         manifest.state = FlowJobState::FlowUiChanged;
                         self.store.save_manifest_atomic(&mut manifest)?;
                         return Ok(());
                     }
                     "failed" => {
+                        if let Some(s) = active_session.take() {
+                            s.close().await;
+                        }
                         manifest.state = FlowJobState::Failed;
                         manifest.child_segments[i].state = FlowJobState::Failed;
                         manifest.error = Some(JobErrorRecord {
@@ -375,9 +418,6 @@ impl FlowOrchestrator {
                         return Ok(());
                     }
                     "ready" => {
-                        let download_url = poll_result
-                            .download_url
-                            .unwrap_or_else(|| "/download".to_string());
                         let seg_out_name = format!("child_out_{:03}.mp4", i);
                         let seg_out_path = outputs_dir.join(&seg_out_name);
 
@@ -385,8 +425,8 @@ impl FlowOrchestrator {
                         manifest.child_segments[i].state = FlowJobState::Downloading;
                         self.store.save_manifest_atomic(&mut manifest)?;
 
-                        self.bridge
-                            .download_artifact(&profile_dir, &download_url, &seg_out_path)
+                        session_ref
+                            .download(poll_result.download_url.as_deref(), &seg_out_path)
                             .await?;
 
                         // Validate segment
@@ -414,6 +454,11 @@ impl FlowOrchestrator {
                     }
                 }
             }
+        }
+
+        // Close session upon generation phase completion
+        if let Some(s) = active_session.take() {
+            s.close().await;
         }
 
         // 4. Final Stitching Phase

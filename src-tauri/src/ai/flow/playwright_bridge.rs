@@ -410,6 +410,57 @@ impl PlaywrightBridge {
         }
     }
 
+    pub async fn open_active_session(
+        &self,
+        profile_dir: &Path,
+    ) -> Result<FlowActiveBrowserSession, String> {
+        let url = self.target_url();
+        self.validate_url_security(&url)?;
+
+        let mut sidecar = PlaywrightSidecarProcess::spawn().await?;
+
+        if let Err(e) = sidecar
+            .call_rpc(
+                "launch_browser",
+                self.launch_browser_params(profile_dir, true),
+                Duration::from_secs(30),
+            )
+            .await
+        {
+            sidecar.close().await;
+            return Err(e);
+        }
+
+        if let Err(e) = sidecar
+            .call_rpc(
+                "navigate_to_flow",
+                serde_json::json!({ "flowUrl": url }),
+                Duration::from_secs(30),
+            )
+            .await
+        {
+            sidecar.close().await;
+            return Err(e);
+        }
+
+        Ok(FlowActiveBrowserSession {
+            sidecar,
+            target_url: url,
+        })
+    }
+
+    pub async fn dry_run_preflight(
+        &self,
+        profile_dir: &Path,
+        prompt: &str,
+        video_path: Option<&Path>,
+    ) -> Result<serde_json::Value, String> {
+        let mut session = self.open_active_session(profile_dir).await?;
+        let res = session.dry_run_preflight(prompt, video_path).await;
+        session.close().await;
+        res
+    }
+
     pub async fn submit_generation(
         &self,
         profile_dir: &Path,
@@ -418,29 +469,77 @@ impl PlaywrightBridge {
         duration_sec: f64,
         local_submission_attempt_id: &str,
     ) -> Result<String, String> {
-        let url = self.target_url();
-        self.validate_url_security(&url)?;
-
-        let mut sidecar = PlaywrightSidecarProcess::spawn().await?;
-
-        sidecar
-            .call_rpc(
-                "launch_browser",
-                self.launch_browser_params(profile_dir, true),
-                Duration::from_secs(30),
+        let mut session = self.open_active_session(profile_dir).await?;
+        let res = session
+            .submit(
+                prompt,
+                video_path,
+                duration_sec,
+                local_submission_attempt_id,
             )
-            .await?;
+            .await;
+        session.close().await;
+        res
+    }
 
-        sidecar
-            .call_rpc(
-                "navigate_to_flow",
-                serde_json::json!({ "flowUrl": url }),
-                Duration::from_secs(30),
-            )
-            .await?;
+    pub async fn poll_generation(
+        &self,
+        profile_dir: &Path,
+        submission_evidence: &str,
+    ) -> Result<FlowPollResult, String> {
+        let mut session = self.open_active_session(profile_dir).await?;
+        let res = session.poll(submission_evidence).await;
+        session.close().await;
+        res
+    }
 
+    pub async fn download_artifact(
+        &self,
+        profile_dir: &Path,
+        download_url: Option<&str>,
+        destination_path: &Path,
+    ) -> Result<PathBuf, String> {
+        let mut session = self.open_active_session(profile_dir).await?;
+        let res = session.download(download_url, destination_path).await;
+        session.close().await;
+        res
+    }
+}
+
+pub struct FlowActiveBrowserSession {
+    sidecar: PlaywrightSidecarProcess,
+    target_url: String,
+}
+
+impl FlowActiveBrowserSession {
+    pub async fn dry_run_preflight(
+        &mut self,
+        prompt: &str,
+        video_path: Option<&Path>,
+    ) -> Result<serde_json::Value, String> {
         let video_path_str = video_path.map(|p| p.to_string_lossy().to_string());
-        let submit_val = sidecar
+        self.sidecar
+            .call_rpc(
+                "dry_run_preflight",
+                serde_json::json!({
+                    "prompt": prompt,
+                    "videoPath": video_path_str
+                }),
+                Duration::from_secs(30),
+            )
+            .await
+    }
+
+    pub async fn submit(
+        &mut self,
+        prompt: &str,
+        video_path: Option<&Path>,
+        duration_sec: f64,
+        local_submission_attempt_id: &str,
+    ) -> Result<String, String> {
+        let video_path_str = video_path.map(|p| p.to_string_lossy().to_string());
+        let submit_val = self
+            .sidecar
             .call_rpc(
                 "submit_prompt_generation",
                 serde_json::json!({
@@ -451,92 +550,43 @@ impl PlaywrightBridge {
                 }),
                 Duration::from_secs(30),
             )
-            .await;
+            .await?;
 
-        sidecar.close().await;
-
-        match submit_val {
-            Ok(val) => {
-                let evidence = val
-                    .get("generationEvidence")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| "Missing generation evidence in sidecar response".to_string())?;
-                Ok(evidence.to_string())
-            }
-            Err(e) => Err(e),
-        }
+        let evidence = submit_val
+            .get("generationEvidence")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Missing generation evidence in sidecar response".to_string())?;
+        Ok(evidence.to_string())
     }
 
-    pub async fn poll_generation(
-        &self,
-        profile_dir: &Path,
-        submission_evidence: &str,
-    ) -> Result<FlowPollResult, String> {
-        let url = self.target_url();
-        self.validate_url_security(&url)?;
-
-        let mut sidecar = PlaywrightSidecarProcess::spawn().await?;
-
-        sidecar
-            .call_rpc(
-                "launch_browser",
-                self.launch_browser_params(profile_dir, true),
-                Duration::from_secs(30),
-            )
-            .await?;
-
-        sidecar
-            .call_rpc(
-                "navigate_to_flow",
-                serde_json::json!({ "flowUrl": url }),
-                Duration::from_secs(30),
-            )
-            .await?;
-
-        let poll_val = sidecar
+    pub async fn poll(&mut self, submission_evidence: &str) -> Result<FlowPollResult, String> {
+        let poll_val = self
+            .sidecar
             .call_rpc(
                 "poll_generation_progress",
                 serde_json::json!({ "submissionEvidence": submission_evidence }),
                 Duration::from_secs(20),
             )
-            .await;
-
-        sidecar.close().await;
-
-        match poll_val {
-            Ok(val) => serde_json::from_value(val)
-                .map_err(|e| format!("Failed to parse poll result: {}", e)),
-            Err(e) => Err(e),
-        }
-    }
-
-    pub async fn download_artifact(
-        &self,
-        profile_dir: &Path,
-        download_url: &str,
-        destination_path: &Path,
-    ) -> Result<PathBuf, String> {
-        let url = self.target_url();
-        self.validate_url_security(&url)?;
-
-        let mut sidecar = PlaywrightSidecarProcess::spawn().await?;
-
-        sidecar
-            .call_rpc(
-                "launch_browser",
-                self.launch_browser_params(profile_dir, true),
-                Duration::from_secs(30),
-            )
             .await?;
 
-        let full_download_url =
-            if download_url.starts_with("http://") || download_url.starts_with("https://") {
-                download_url.to_string()
-            } else {
-                format!("{}{}", url.trim_end_matches('/'), download_url)
-            };
+        serde_json::from_value(poll_val).map_err(|e| format!("Failed to parse poll result: {}", e))
+    }
 
-        let dl_val = sidecar
+    pub async fn download(
+        &mut self,
+        download_url: Option<&str>,
+        destination_path: &Path,
+    ) -> Result<PathBuf, String> {
+        let full_download_url = download_url.map(|dl| {
+            if dl.starts_with("http://") || dl.starts_with("https://") {
+                dl.to_string()
+            } else {
+                format!("{}{}", self.target_url.trim_end_matches('/'), dl)
+            }
+        });
+
+        let dl_val = self
+            .sidecar
             .call_rpc(
                 "download_artifact",
                 serde_json::json!({
@@ -545,22 +595,24 @@ impl PlaywrightBridge {
                 }),
                 Duration::from_secs(30),
             )
-            .await;
+            .await?;
 
-        sidecar.close().await;
+        let success = dl_val
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-        match dl_val {
-            Ok(_) => {
-                if destination_path.exists() {
-                    Ok(destination_path.to_path_buf())
-                } else {
-                    Err(format!(
-                        "DOWNLOAD_FAILED: Artifact was not created at {:?}",
-                        destination_path
-                    ))
-                }
-            }
-            Err(e) => Err(e),
+        if success && destination_path.exists() {
+            Ok(destination_path.to_path_buf())
+        } else {
+            Err(format!(
+                "DOWNLOAD_FAILED: Artifact was not created at {:?}",
+                destination_path
+            ))
         }
+    }
+
+    pub async fn close(mut self) {
+        self.sidecar.close().await;
     }
 }
