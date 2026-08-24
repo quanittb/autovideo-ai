@@ -76,19 +76,35 @@ export async function locatePromptComposer(page: Page) {
     for (let i = 0; i < count; i++) {
       const el = loc.nth(i);
       const isVisible = await el.isVisible().catch(() => false);
-      const isEditable = await el.isEditable().catch(() => false);
-      if (isVisible && isEditable) {
-        const name = ((await el.getAttribute('name').catch(() => '')) || '').toLowerCase();
-        const type = ((await el.getAttribute('type').catch(() => '')) || '').toLowerCase();
-        if (
-          name.includes('recaptcha') ||
-          name.includes('identifier') ||
-          type === 'password' ||
-          type === 'hidden'
-        ) {
-          continue;
+      if (isVisible) {
+        const tagName = await el.evaluate((node: any) => node.tagName.toLowerCase()).catch(() => '');
+        const isContentEditable = await el
+          .evaluate(
+            (node: any) =>
+              node.isContentEditable ||
+              node.getAttribute('contenteditable') === 'true' ||
+              node.getAttribute('role') === 'textbox' ||
+              node.hasAttribute('data-slate-editor')
+          )
+          .catch(() => false);
+        const disabled = await el.isDisabled().catch(() => false);
+        const ariaDisabled = ((await el.getAttribute('aria-disabled').catch(() => '')) || '').toLowerCase();
+
+        if (disabled || ariaDisabled === 'true') continue;
+
+        if (tagName === 'textarea' || tagName === 'input' || isContentEditable) {
+          const name = ((await el.getAttribute('name').catch(() => '')) || '').toLowerCase();
+          const type = ((await el.getAttribute('type').catch(() => '')) || '').toLowerCase();
+          if (
+            name.includes('recaptcha') ||
+            name.includes('identifier') ||
+            type === 'password' ||
+            type === 'hidden'
+          ) {
+            continue;
+          }
+          return el;
         }
-        return el;
       }
     }
   }
@@ -495,41 +511,50 @@ export class FlowUiAdapterV1 {
       return null;
     };
 
-    // First inspection pass
-    const initialStatus = await checkPage();
-    if (initialStatus) {
-      return initialStatus;
+    // If on non-localized landing URL, navigate directly to /fx/vi/tools/flow
+    const initialUrl = this.page.url();
+    if (initialUrl.endsWith('/fx/tools/flow') || initialUrl.includes('#models')) {
+      await this.page.goto('https://labs.google/fx/vi/tools/flow', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await this.page.waitForTimeout(3000);
     }
 
-    // Check if on public landing page with CTA
-    const landingCta = this.page
-      .locator(
-        'button:has-text("Create with Google Flow"), a:has-text("Create with Google Flow"), button:has-text("Try in Google Flow"), #cta-btn'
-      )
-      .first();
-    const landingCtaCount = await landingCta.count().catch(() => 0);
-
-    if (landingCtaCount > 0) {
-      try {
-        await landingCta.click({ timeout: 5000 });
-        await this.page.waitForTimeout(3000);
-      } catch (_) {}
-
-      const postCtaStatus = await checkPage();
-      if (postCtaStatus) {
-        return postCtaStatus;
+    // Bounded inspection loop allowing SPA hydration and redirects to settle
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const status = await checkPage();
+      if (status) {
+        return status;
       }
 
-      const postUrl = this.page.url();
-      if (
-        postUrl.includes('accounts.google.com') ||
-        postUrl.includes('ServiceLogin') ||
-        postUrl.includes('/signin')
-      ) {
-        return { status: 'LOGIN_REQUIRED' };
+      // Check if on public landing page with CTA
+      const landingCta = this.page
+        .locator(
+          'button:has-text("Create with Google Flow"), a:has-text("Create with Google Flow"), button:has-text("Try in Google Flow")'
+        )
+        .first();
+      const landingCtaCount = await landingCta.count().catch(() => 0);
+
+      if (landingCtaCount > 0 && (await landingCta.isVisible().catch(() => false))) {
+        try {
+          await landingCta.click({ timeout: 5000 });
+          await this.page.waitForTimeout(2000);
+        } catch (_) {}
+
+        const postCtaStatus = await checkPage();
+        if (postCtaStatus) {
+          return postCtaStatus;
+        }
+
+        const postUrl = this.page.url();
+        if (
+          postUrl.includes('accounts.google.com') ||
+          postUrl.includes('ServiceLogin') ||
+          postUrl.includes('/signin')
+        ) {
+          return { status: 'LOGIN_REQUIRED' };
+        }
       }
 
-      return { status: 'FLOW_LANDING' };
+      await this.page.waitForTimeout(500);
     }
 
     const currentUrl = this.page.url();
@@ -566,14 +591,31 @@ export class FlowUiAdapterV1 {
       };
     }
 
-    // If on project dashboard, enter active project workspace
-    const projectLink = this.page.locator('a[href*="/tools/flow/project/"]').first();
-    if ((await projectLink.count().catch(() => 0)) > 0 && !this.page.url().includes('/project/')) {
-      await projectLink.click().catch(() => {});
-      await this.page.waitForTimeout(4000);
+    // If on project dashboard, enter active project workspace (bounded check)
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (this.page.url().includes('/project/')) break;
+      const projectLink = this.page.locator('a[href*="/tools/flow/project/"]').first();
+      if ((await projectLink.count().catch(() => 0)) > 0 && (await projectLink.isVisible().catch(() => false))) {
+        await projectLink.click().catch(() => {});
+        await this.page.waitForTimeout(4000);
+        break;
+      }
+      const newProjBtn = this.page.locator('button:has-text("Dự án mới"), button:has-text("New Project")').first();
+      if ((await newProjBtn.count().catch(() => 0)) > 0 && (await newProjBtn.isVisible().catch(() => false))) {
+        await newProjBtn.click().catch(() => {});
+        await this.page.waitForTimeout(4000);
+        break;
+      }
+      await this.page.waitForTimeout(1000);
     }
 
-    const promptEl = await locatePromptComposer(this.page);
+    let promptEl = null;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      promptEl = await locatePromptComposer(this.page);
+      if (promptEl) break;
+      await this.page.waitForTimeout(1000);
+    }
+
     if (promptEl && params.prompt) {
       const tagName = await promptEl.evaluate((el: any) => el.tagName.toLowerCase());
       if (tagName === 'textarea' || tagName === 'input') {
@@ -616,19 +658,59 @@ export class FlowUiAdapterV1 {
     const page = this.page;
     if (!page) throw new Error('Browser not launched');
 
-    // If on project dashboard, enter active project workspace
-    const projectLink = page.locator('a[href*="/tools/flow/project/"]').first();
-    if ((await projectLink.count().catch(() => 0)) > 0 && !page.url().includes('/project/')) {
-      await projectLink.click().catch(() => {});
-      await page.waitForTimeout(4000);
+    console.error(`[submitPromptGeneration] Starting submit, initial url: ${page.url()}`);
+
+    // Ensure authenticated and past any landing CTA / agreement gates
+    const auth = await this.checkAuthStatus();
+    console.error(`[submitPromptGeneration] Auth check status: ${auth.status}, url: ${page.url()}`);
+    if (auth.status !== 'READY') {
+      throw new Error(`FLOW_AUTH_ERROR: Flow authentication status is ${auth.status}`);
     }
 
-    // 1. Locate Prompt Composer via shared helper
-    const promptInput = await locatePromptComposer(page);
+    // If on project dashboard, enter active project workspace (bounded check)
+    for (let attempt = 0; attempt < 8; attempt++) {
+      if (page.url().includes('/project/')) {
+        console.error(`[submitPromptGeneration] In project workspace: ${page.url()}`);
+        break;
+      }
+      const projectLink = page.locator('a[href*="/tools/flow/project/"]').first();
+      const pCount = await projectLink.count().catch(() => 0);
+      const pVis = await projectLink.isVisible().catch(() => false);
+      console.error(`[submitPromptGeneration] Attempt ${attempt}: projectLink count=${pCount}, visible=${pVis}`);
+      if (pCount > 0 && pVis) {
+        console.error('[submitPromptGeneration] Clicking projectLink...');
+        await projectLink.click().catch(() => {});
+        await page.waitForTimeout(4000);
+        break;
+      }
+      const newProjBtn = page.locator('button:has-text("Dự án mới"), button:has-text("New Project")').first();
+      const nVis = await newProjBtn.isVisible().catch(() => false);
+      if (nVis) {
+        console.error('[submitPromptGeneration] Clicking newProjBtn...');
+        await newProjBtn.click().catch(() => {});
+        await page.waitForTimeout(4000);
+        break;
+      }
+      await page.waitForTimeout(1000);
+    }
+
+    // 1. Locate Prompt Composer via shared helper (bounded wait)
+    let promptInput = null;
+    for (let attempt = 0; attempt < 15; attempt++) {
+      promptInput = await locatePromptComposer(page);
+      if (promptInput) {
+        console.error(`[submitPromptGeneration] Prompt composer located on attempt ${attempt}`);
+        break;
+      }
+      await page.waitForTimeout(1000);
+    }
+
     if (!promptInput) {
+      console.error(`[submitPromptGeneration] Failed to locate prompt composer, current url: ${page.url()}`);
       throw new Error('FLOW_UI_CHANGED: Prompt composer input not found or not actionable');
     }
 
+    console.error('[submitPromptGeneration] Entering prompt text...');
     const tagName = await promptInput.evaluate((el: any) => el.tagName.toLowerCase());
     if (tagName === 'textarea' || tagName === 'input') {
       await promptInput.fill(params.prompt);
@@ -642,40 +724,60 @@ export class FlowUiAdapterV1 {
 
     // 2. Locate File Input if Video Path is provided
     if (params.videoPath) {
+      console.error(`[submitPromptGeneration] Uploading video: ${params.videoPath}`);
       if (!fs.existsSync(params.videoPath)) {
         throw new Error(`FILE_NOT_FOUND: Upload video does not exist at ${params.videoPath}`);
       }
 
       const fileInput = await locateUploadControl(page);
       if (!fileInput) {
+        console.error('[submitPromptGeneration] File input element not found');
         throw new Error('FLOW_UI_CHANGED: Video file upload input element not found');
       }
 
       try {
         await fileInput.setInputFiles(params.videoPath);
+        console.error('[submitPromptGeneration] Video file set successfully, waiting for upload...');
+        await page.waitForTimeout(3000);
       } catch (err: any) {
         throw new Error(`UPLOAD_FAILED: Failed to set input file: ${err?.message || String(err)}`);
       }
     }
 
-    // 3. Locate Generate Button via shared helper
-    const generateBtn = await locateGenerateControl(page);
+    // 3. Locate Generate Button via shared helper (bounded wait for enabled state)
+    console.error('[submitPromptGeneration] Locating Generate button...');
+    let generateBtn = null;
+    let btnEnabled = false;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      generateBtn = await locateGenerateControl(page);
+      if (generateBtn) {
+        const disabled = await generateBtn.isDisabled().catch(() => false);
+        const ariaDisabled = await generateBtn.getAttribute('aria-disabled').catch(() => null);
+        btnEnabled = !disabled && ariaDisabled !== 'true';
+        if (btnEnabled) {
+          console.error(`[submitPromptGeneration] Generate button enabled on attempt ${attempt}`);
+          break;
+        }
+      }
+      await page.waitForTimeout(500);
+    }
+
     if (!generateBtn) {
+      console.error('[submitPromptGeneration] Generate button not found');
       throw new Error('FLOW_UI_CHANGED: Generate button not found or not actionable');
     }
 
-    const disabled = await generateBtn.isDisabled().catch(() => false);
-    const ariaDisabled = await generateBtn.getAttribute('aria-disabled').catch(() => null);
-    const btnEnabled = !disabled && ariaDisabled !== 'true';
-
     if (!btnEnabled) {
+      console.error('[submitPromptGeneration] Generate button is disabled');
       throw new Error('FLOW_UI_CHANGED: Generate button is disabled');
     }
 
     // 4. Perform the ONE paid click
     const submittedAt = new Date().toISOString();
+    console.error(`[submitPromptGeneration] CLICKING GENERATE EXACTLY ONCE at ${submittedAt}...`);
     try {
       await generateBtn.click({ timeout: 10000 });
+      console.error('[submitPromptGeneration] Generate button clicked!');
     } catch (err: any) {
       throw new Error(`CLICK_FAILED: Failed to execute Generate click: ${err?.message || String(err)}`);
     }
@@ -684,10 +786,12 @@ export class FlowUiAdapterV1 {
     let postClickEvidence: string | null = null;
     let postClickState = 'AMBIGUOUS';
 
-    for (let attempt = 0; attempt < 10; attempt++) {
-      await page.waitForTimeout(500);
+    console.error('[submitPromptGeneration] Observing post-click semantic transition...');
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await page.waitForTimeout(1000);
 
       const state = await detectGenerationState(page, params.localSubmissionAttemptId);
+      console.error(`[submitPromptGeneration] Post-click attempt ${attempt} state:`, state.status);
       if (state.status === 'generating') {
         postClickState = 'GENERATING_OBSERVED';
         postClickEvidence = `semantic:generating:${submittedAt}:${params.localSubmissionAttemptId}`;
@@ -706,11 +810,11 @@ export class FlowUiAdapterV1 {
         break;
       }
 
-      // Check if button changed to disabled or generating indicator
+      // Check if button changed to disabled or generating indicator (Click dispatched)
       const isStillEnabled = await generateBtn.isEnabled().catch(() => false);
       const isStillVisible = await generateBtn.isVisible().catch(() => false);
       if (!isStillEnabled || !isStillVisible) {
-        postClickState = 'SUBMIT_DISPATCHED_OBSERVED';
+        postClickState = 'CLICK_DISPATCHED_OBSERVED';
         postClickEvidence = `semantic:btn_dispatched:${submittedAt}:${params.localSubmissionAttemptId}`;
         break;
       }

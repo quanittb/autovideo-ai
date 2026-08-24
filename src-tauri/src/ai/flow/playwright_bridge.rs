@@ -249,7 +249,7 @@ pub struct PlaywrightBridge {
 }
 
 impl PlaywrightBridge {
-    pub const OFFICIAL_FLOW_URL: &'static str = "https://labs.google/fx/tools/flow";
+    pub const OFFICIAL_FLOW_URL: &'static str = "https://labs.google/fx/vi/tools/flow";
 
     pub fn new() -> Self {
         Self { mock_url: None }
@@ -269,7 +269,11 @@ impl PlaywrightBridge {
 
     pub fn validate_url_security(&self, url: &str) -> Result<(), String> {
         let trimmed = url.trim();
-        if trimmed == Self::OFFICIAL_FLOW_URL || trimmed == "https://labs.google/flow" {
+        if trimmed == Self::OFFICIAL_FLOW_URL
+            || trimmed == "https://labs.google/fx/tools/flow"
+            || trimmed == "https://labs.google/fx/en/tools/flow"
+            || trimmed == "https://labs.google/flow"
+        {
             return Ok(());
         }
 
@@ -377,7 +381,7 @@ impl PlaywrightBridge {
             .call_rpc(
                 "check_auth_status",
                 serde_json::json!({}),
-                Duration::from_secs(10),
+                Duration::from_secs(30),
             )
             .await;
 
@@ -548,7 +552,7 @@ impl FlowActiveBrowserSession {
                     "durationSec": duration_sec,
                     "localSubmissionAttemptId": local_submission_attempt_id
                 }),
-                Duration::from_secs(30),
+                Duration::from_secs(90),
             )
             .await?;
 
@@ -565,7 +569,7 @@ impl FlowActiveBrowserSession {
             .call_rpc(
                 "poll_generation_progress",
                 serde_json::json!({ "submissionEvidence": submission_evidence }),
-                Duration::from_secs(20),
+                Duration::from_secs(30),
             )
             .await?;
 
@@ -593,7 +597,7 @@ impl FlowActiveBrowserSession {
                     "downloadUrl": full_download_url,
                     "destinationPath": destination_path.to_string_lossy()
                 }),
-                Duration::from_secs(30),
+                Duration::from_secs(120),
             )
             .await?;
 

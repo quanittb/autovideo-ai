@@ -61,6 +61,14 @@ impl FlowStitcher {
             return Err(format!("FFmpeg concat demuxer failed: {}", stderr));
         }
 
+        // Duration Safety: Validate intermediate concatenated video duration before audio muxing
+        if let Err(err) =
+            FlowOutputValidator::validate_child_artifact(&temp_video, expected_total_duration_sec)
+        {
+            let _ = fs::remove_file(&temp_video);
+            return Err(err);
+        }
+
         // Mux original source audio ONCE into final output if requested and available
         if audio_policy.preserve_original_audio
             && source_audio_path.is_some()

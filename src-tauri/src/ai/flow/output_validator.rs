@@ -75,26 +75,7 @@ impl FlowOutputValidator {
             .get("duration")
             .and_then(|d| d.as_str())
             .and_then(|s| s.parse::<f64>().ok())
-            .or_else(|| {
-                val.get("format")
-                    .and_then(|f| f.get("duration"))
-                    .and_then(|d| d.as_str())
-                    .and_then(|s| s.parse::<f64>().ok())
-            })
             .unwrap_or(0.0);
-
-        if duration_sec <= 0.0 {
-            return Err("VALIDATION_FAILED: Video stream duration must be positive".to_string());
-        }
-
-        // Duration drift check: must not differ by more than tolerance (e.g. 2.0s)
-        let drift = (duration_sec - expected_duration_sec).abs();
-        if drift > 2.0 {
-            return Err(format!(
-                "VALIDATION_FAILED: Duration drift too large (expected {:.2}s, got {:.2}s, drift {:.2}s)",
-                expected_duration_sec, duration_sec, drift
-            ));
-        }
 
         let r_fps_str = stream
             .get("r_frame_rate")
@@ -108,17 +89,52 @@ impl FlowOutputValidator {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or_else(|| ((duration_sec * fps).round() as u64).max(1));
 
+        let effective_video_duration = if duration_sec > 0.0 {
+            duration_sec
+        } else if frame_count > 0 && fps > 0.0 {
+            (frame_count as f64) / fps
+        } else {
+            val.get("format")
+                .and_then(|f| f.get("duration"))
+                .and_then(|d| d.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0)
+        };
+
+        if effective_video_duration <= 0.0 {
+            return Err("VALIDATION_FAILED: Video stream duration must be positive".to_string());
+        }
+
         if frame_count == 0 {
             return Err("VALIDATION_FAILED: Video has 0 frames".to_string());
         }
 
-        // Check if has audio stream
-        let has_audio = check_has_audio_stream(file_path);
+        // Conservative duration drift tolerance: max(0.5s, 5% of expected duration)
+        let tolerance = (0.5_f64).max(expected_duration_sec * 0.05);
+        let drift = (effective_video_duration - expected_duration_sec).abs();
+        if drift > tolerance {
+            return Err(format!(
+                "FLOW_OUTPUT_DURATION_MISMATCH: Duration drift too large (expected {:.3}s, got {:.3}s, drift {:.3}s > tolerance {:.3}s)",
+                expected_duration_sec, effective_video_duration, drift, tolerance
+            ));
+        }
+
+        // Check audio stream and enforce audio-video timeline alignment
+        let (has_audio, audio_duration) = check_audio_stream_info(file_path);
+        if let Some(a_dur) = audio_duration {
+            let a_drift = (a_dur - effective_video_duration).abs();
+            if a_drift > tolerance {
+                return Err(format!(
+                    "FLOW_OUTPUT_DURATION_MISMATCH: Audio stream duration ({:.3}s) differs from video stream duration ({:.3}s) by {:.3}s > tolerance {:.3}s",
+                    a_dur, effective_video_duration, a_drift, tolerance
+                ));
+            }
+        }
 
         Ok(FlowOutputArtifactRecord {
             final_path: file_path.to_path_buf(),
             sha256,
-            duration_sec,
+            duration_sec: effective_video_duration,
             width,
             height,
             fps,
@@ -142,22 +158,50 @@ fn parse_fraction(val: &str) -> Option<f64> {
     None
 }
 
-fn check_has_audio_stream(file_path: &Path) -> bool {
+fn check_audio_stream_info(file_path: &Path) -> (bool, Option<f64>) {
     let output = Command::new("ffprobe")
         .arg("-v")
         .arg("error")
         .arg("-select_streams")
         .arg("a:0")
         .arg("-show_entries")
-        .arg("stream=codec_type")
+        .arg("stream=duration:format=duration")
         .arg("-of")
-        .arg("csv=p=0")
+        .arg("json")
         .arg(file_path)
         .output();
 
     if let Ok(out) = output {
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        return !stdout.is_empty() && stdout.contains("audio");
+        if out.status.success() {
+            let json_str = String::from_utf8_lossy(&out.stdout);
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                let stream_dur = val
+                    .get("streams")
+                    .and_then(|s| s.get(0))
+                    .and_then(|st| st.get("duration"))
+                    .and_then(|d| d.as_str())
+                    .and_then(|s| s.parse::<f64>().ok());
+
+                if let Some(dur) = stream_dur {
+                    return (true, Some(dur));
+                }
+
+                let has_stream = val
+                    .get("streams")
+                    .and_then(|s| s.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+
+                if has_stream {
+                    let fmt_dur = val
+                        .get("format")
+                        .and_then(|f| f.get("duration"))
+                        .and_then(|d| d.as_str())
+                        .and_then(|s| s.parse::<f64>().ok());
+                    return (true, fmt_dur);
+                }
+            }
+        }
     }
-    false
+    (false, None)
 }

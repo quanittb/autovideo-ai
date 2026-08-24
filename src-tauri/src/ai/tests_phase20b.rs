@@ -253,3 +253,149 @@ fn test_phase20b_08_no_synthetic_proof_accepted() {
     let valid_semantic_evidence = "semantic:generating:2026-08-24T12:00:00Z:att_123";
     assert!(valid_semantic_evidence.starts_with("semantic:"));
 }
+
+fn create_synthetic_mp4(
+    path: &std::path::Path,
+    duration_sec: f64,
+    fps: f64,
+    width: u32,
+    height: u32,
+    include_audio: bool,
+) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let mut cmd = std::process::Command::new("ffmpeg");
+    cmd.arg("-y").arg("-f").arg("lavfi").arg("-i").arg(format!(
+        "testsrc=duration={:.2}:size={}x{}:rate={:.2}",
+        duration_sec, width, height, fps
+    ));
+
+    if include_audio {
+        cmd.arg("-f")
+            .arg("lavfi")
+            .arg("-i")
+            .arg(format!("sine=frequency=1000:duration={:.2}", duration_sec))
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-c:a")
+            .arg("aac")
+            .arg("-shortest");
+    } else {
+        cmd.arg("-c:v").arg("libx264").arg("-an");
+    }
+
+    cmd.arg("-pix_fmt").arg("yuv420p").arg(path);
+
+    let output = cmd.output().expect("Failed to generate synthetic mp4");
+    assert!(output.status.success());
+}
+
+#[test]
+fn test_phase20b_09_expected_9_682s_generated_4s_fails_duration_validation() {
+    let temp_dir = tempdir().unwrap();
+    let file_4s = temp_dir.path().join("child_4s.mp4");
+    create_synthetic_mp4(&file_4s, 4.0, 24.0, 1280, 720, false);
+
+    let val_res = FlowOutputValidator::validate_child_artifact(&file_4s, 9.682);
+    assert!(val_res.is_err());
+    let err = val_res.unwrap_err();
+    assert!(err.contains("FLOW_OUTPUT_DURATION_MISMATCH"));
+    assert!(err.contains("Duration drift too large"));
+}
+
+#[test]
+fn test_phase20b_10_expected_10s_generated_9_95s_passes_within_tolerance() {
+    let temp_dir = tempdir().unwrap();
+    let file_9_95s = temp_dir.path().join("child_9_95s.mp4");
+    create_synthetic_mp4(&file_9_95s, 9.95, 30.0, 1280, 720, false);
+
+    let val_res = FlowOutputValidator::validate_child_artifact(&file_9_95s, 10.0);
+    assert!(val_res.is_ok());
+    let rec = val_res.unwrap();
+    assert!((rec.duration_sec - 9.95).abs() < 0.1);
+}
+
+#[test]
+fn test_phase20b_11_video_4s_source_audio_10s_stitcher_refuses_normal_completion() {
+    let temp_dir = tempdir().unwrap();
+    let video_4s = temp_dir.path().join("video_4s.mp4");
+    create_synthetic_mp4(&video_4s, 4.0, 24.0, 1280, 720, false);
+
+    let audio_src = temp_dir.path().join("audio_10s.mp4");
+    create_synthetic_mp4(&audio_src, 10.0, 30.0, 320, 240, true);
+
+    let out_file = temp_dir.path().join("out_stitched.mp4");
+    let policy = FlowFinalAudioPolicy {
+        preserve_original_audio: true,
+        codec: "aac".to_string(),
+    };
+
+    let stitch_res =
+        FlowStitcher::stitch_flow_segments(&[video_4s], Some(&audio_src), 10.0, &policy, &out_file);
+
+    assert!(stitch_res.is_err());
+    let err = stitch_res.unwrap_err();
+    assert!(err.contains("FLOW_OUTPUT_DURATION_MISMATCH"));
+    assert!(!out_file.exists());
+}
+
+#[test]
+fn test_phase20b_12_container_duration_10s_video_stream_4s_validator_fails() {
+    let temp_dir = tempdir().unwrap();
+    let video_4s = temp_dir.path().join("video_4s.mp4");
+    create_synthetic_mp4(&video_4s, 4.0, 24.0, 1280, 720, false);
+
+    let audio_10s = temp_dir.path().join("audio_10s.mp4");
+    create_synthetic_mp4(&audio_10s, 10.0, 30.0, 320, 240, true);
+
+    // Mux 4s video with 10s audio without -shortest
+    let mismatched_file = temp_dir.path().join("mismatched.mp4");
+    let mut cmd = std::process::Command::new("ffmpeg");
+    cmd.arg("-y")
+        .arg("-i")
+        .arg(&video_4s)
+        .arg("-i")
+        .arg(&audio_10s)
+        .arg("-map")
+        .arg("0:v:0")
+        .arg("-map")
+        .arg("1:a:0")
+        .arg("-c:v")
+        .arg("copy")
+        .arg("-c:a")
+        .arg("aac")
+        .arg(&mismatched_file);
+    let out = cmd.output().unwrap();
+    assert!(out.status.success());
+
+    // Expecting 10s: video is 4s -> must fail
+    let val_res_10 = FlowOutputValidator::validate_child_artifact(&mismatched_file, 10.0);
+    assert!(val_res_10.is_err());
+    assert!(val_res_10
+        .unwrap_err()
+        .contains("FLOW_OUTPUT_DURATION_MISMATCH"));
+
+    // Expecting 4s: video is 4s but audio is 10s -> must fail audio duration alignment check
+    let val_res_4 = FlowOutputValidator::validate_child_artifact(&mismatched_file, 4.0);
+    assert!(val_res_4.is_err());
+    assert!(val_res_4
+        .unwrap_err()
+        .contains("FLOW_OUTPUT_DURATION_MISMATCH"));
+}
+
+#[test]
+fn test_phase20b_13_normal_valid_matching_child_passes() {
+    let temp_dir = tempdir().unwrap();
+    let file_5s = temp_dir.path().join("child_5s.mp4");
+    create_synthetic_mp4(&file_5s, 5.0, 30.0, 1280, 720, true);
+
+    let val_res = FlowOutputValidator::validate_child_artifact(&file_5s, 5.0);
+    assert!(val_res.is_ok());
+    let rec = val_res.unwrap();
+    assert_eq!(rec.width, 1280);
+    assert_eq!(rec.height, 720);
+    assert!(rec.has_audio);
+    assert!((rec.duration_sec - 5.0).abs() < 0.2);
+}
