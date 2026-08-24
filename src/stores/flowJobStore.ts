@@ -21,6 +21,7 @@ interface FlowJobStoreState {
   selectProfile: (profileId: string) => void;
   openProfileBrowser: (profileId: string) => Promise<string>;
   closeProfileBrowser: (profileId: string) => Promise<void>;
+  verifyProfileLogin: (profileId: string) => Promise<string>;
   refreshProfileStatus: (profileId: string) => Promise<string>;
   loadGeminiStatus: () => Promise<void>;
   testGeminiApiKey: () => Promise<GeminiCredentialStatus>;
@@ -96,7 +97,13 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
     set((state) => ({
       profiles: state.profiles.map((p) =>
         p.profileId === profileId
-          ? { ...p, isLocked: true, browserSessionOpen: true }
+          ? {
+              ...p,
+              isLocked: true,
+              manualBrowserOpen: true,
+              browserSessionOpen: true,
+              status: 'UNKNOWN',
+            }
           : p
       ),
     }));
@@ -108,21 +115,31 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
     set((state) => ({
       profiles: state.profiles.map((p) =>
         p.profileId === profileId
-          ? { ...p, isLocked: false, browserSessionOpen: false }
+          ? {
+              ...p,
+              isLocked: false,
+              manualBrowserOpen: false,
+              browserSessionOpen: false,
+              status: 'UNKNOWN',
+            }
           : p
       ),
     }));
     await get().loadProfiles();
   },
 
-  refreshProfileStatus: async (profileId: string) => {
-    const status = await flowApi.refreshProfileStatus(profileId);
+  verifyProfileLogin: async (profileId: string) => {
+    const status = await flowApi.verifyProfileLogin(profileId);
     set((state) => ({
       profiles: state.profiles.map((p) =>
         p.profileId === profileId ? { ...p, status } : p
       ),
     }));
     return status;
+  },
+
+  refreshProfileStatus: async (profileId: string) => {
+    return await get().verifyProfileLogin(profileId);
   },
 
   loadGeminiStatus: async () => {

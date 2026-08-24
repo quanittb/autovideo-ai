@@ -8,6 +8,7 @@ vi.mock('../../lib/ipc', () => ({
     createProfile: vi.fn(),
     openProfileBrowser: vi.fn(),
     closeProfileBrowser: vi.fn(),
+    verifyProfileLogin: vi.fn(),
     refreshProfileStatus: vi.fn(),
     getGeminiStatus: vi.fn(),
     testGeminiApiKey: vi.fn(),
@@ -37,6 +38,7 @@ describe('flowJobStore', () => {
         name: 'Profile 1',
         status: 'READY',
         isLocked: false,
+        manualBrowserOpen: false,
         browserSessionOpen: false,
         createdAt: '2026-08-21T00:00:00Z',
         updatedAt: '2026-08-21T00:00:00Z',
@@ -57,6 +59,7 @@ describe('flowJobStore', () => {
       name: 'New Profile',
       status: 'UNKNOWN',
       isLocked: false,
+      manualBrowserOpen: false,
       browserSessionOpen: false,
       createdAt: '2026-08-21T00:00:00Z',
       updatedAt: '2026-08-21T00:00:00Z',
@@ -77,6 +80,7 @@ describe('flowJobStore', () => {
           name: 'Profile 1',
           status: 'UNKNOWN',
           isLocked: false,
+          manualBrowserOpen: false,
           browserSessionOpen: false,
           createdAt: '2026-08-21T00:00:00Z',
           updatedAt: '2026-08-21T00:00:00Z',
@@ -92,8 +96,8 @@ describe('flowJobStore', () => {
     expect(state.profiles[0].browserSessionOpen).toBe(true);
     expect(state.profiles[0].isLocked).toBe(true);
 
-    // Refresh auth -> READY
-    vi.mocked(flowApi.refreshProfileStatus).mockResolvedValueOnce('READY');
+    // Refresh auth / verify login -> READY
+    vi.mocked(flowApi.verifyProfileLogin).mockResolvedValueOnce('READY');
     const authRes = await useFlowJobStore.getState().refreshProfileStatus('prof_1');
     expect(authRes).toBe('READY');
     expect(useFlowJobStore.getState().profiles[0].status).toBe('READY');
@@ -105,6 +109,7 @@ describe('flowJobStore', () => {
         name: 'Profile 1',
         status: 'READY',
         isLocked: true,
+        manualBrowserOpen: true,
         browserSessionOpen: true,
         createdAt: '2026-08-21T00:00:00Z',
         updatedAt: '2026-08-21T00:00:00Z',
@@ -115,7 +120,7 @@ describe('flowJobStore', () => {
     expect(state.profiles[0].status).toBe('READY');
     expect(state.profiles[0].browserSessionOpen).toBe(true);
 
-    // Close bgemini-3.5-flashs -> auth status becomes UNKNOWN and browserSessionOpen=false
+    // Close browser -> auth status becomes UNKNOWN and browserSessionOpen=false
     vi.mocked(flowApi.closeProfileBrowser).mockResolvedValueOnce(undefined);
     vi.mocked(flowApi.listProfiles).mockResolvedValueOnce([
       {
@@ -123,6 +128,7 @@ describe('flowJobStore', () => {
         name: 'Profile 1',
         status: 'UNKNOWN',
         isLocked: false,
+        manualBrowserOpen: false,
         browserSessionOpen: false,
         createdAt: '2026-08-21T00:00:00Z',
         updatedAt: '2026-08-21T00:00:00Z',
@@ -140,7 +146,7 @@ describe('flowJobStore', () => {
     vi.mocked(flowApi.testGeminiApiKey).mockResolvedValueOnce({
       stored: true,
       verificationStatus: 'VALID',
-      model: 'gemini-2.5-flash-lite',
+      model: 'gemini-3.5-flash-lite',
       lastVerifiedAt: '2026-08-21T12:00:00Z',
       sanitizedMessage: null,
     });

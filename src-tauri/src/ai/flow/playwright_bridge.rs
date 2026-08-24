@@ -283,6 +283,20 @@ impl PlaywrightBridge {
         }
     }
 
+    pub fn launch_browser_params(&self, profile_dir: &Path, headless: bool) -> serde_json::Value {
+        let runtime_mode = if self.mock_url.is_some() {
+            "MOCK_CHROMIUM"
+        } else {
+            "PRODUCTION_CHROME"
+        };
+        serde_json::json!({
+            "profilePath": profile_dir.to_string_lossy(),
+            "headless": headless,
+            "runtimeMode": runtime_mode,
+            "channel": if runtime_mode == "PRODUCTION_CHROME" { "chrome" } else { "chromium" }
+        })
+    }
+
     pub async fn check_auth_status(&self, profile_dir: &Path) -> Result<bool, String> {
         let url = self.target_url();
         self.validate_url_security(&url)?;
@@ -292,10 +306,7 @@ impl PlaywrightBridge {
         let launch_res = sidecar
             .call_rpc(
                 "launch_browser",
-                serde_json::json!({
-                    "profilePath": profile_dir.to_string_lossy(),
-                    "headless": true
-                }),
+                self.launch_browser_params(profile_dir, true),
                 Duration::from_secs(30),
             )
             .await;
@@ -340,37 +351,6 @@ impl PlaywrightBridge {
         }
     }
 
-    pub async fn open_headed_browser_for_login(
-        &self,
-        profile_dir: &Path,
-    ) -> Result<String, String> {
-        let url = self.target_url();
-        self.validate_url_security(&url)?;
-
-        let mut sidecar = PlaywrightSidecarProcess::spawn().await?;
-
-        sidecar
-            .call_rpc(
-                "launch_browser",
-                serde_json::json!({
-                    "profilePath": profile_dir.to_string_lossy(),
-                    "headless": false
-                }),
-                Duration::from_secs(30),
-            )
-            .await?;
-
-        sidecar
-            .call_rpc(
-                "navigate_to_flow",
-                serde_json::json!({ "flowUrl": url }),
-                Duration::from_secs(30),
-            )
-            .await?;
-
-        Ok("Browser session opened for user login".to_string())
-    }
-
     pub async fn submit_generation(
         &self,
         profile_dir: &Path,
@@ -387,10 +367,7 @@ impl PlaywrightBridge {
         sidecar
             .call_rpc(
                 "launch_browser",
-                serde_json::json!({
-                    "profilePath": profile_dir.to_string_lossy(),
-                    "headless": true
-                }),
+                self.launch_browser_params(profile_dir, true),
                 Duration::from_secs(30),
             )
             .await?;
@@ -444,10 +421,7 @@ impl PlaywrightBridge {
         sidecar
             .call_rpc(
                 "launch_browser",
-                serde_json::json!({
-                    "profilePath": profile_dir.to_string_lossy(),
-                    "headless": true
-                }),
+                self.launch_browser_params(profile_dir, true),
                 Duration::from_secs(30),
             )
             .await?;
@@ -491,10 +465,7 @@ impl PlaywrightBridge {
         sidecar
             .call_rpc(
                 "launch_browser",
-                serde_json::json!({
-                    "profilePath": profile_dir.to_string_lossy(),
-                    "headless": true
-                }),
+                self.launch_browser_params(profile_dir, true),
                 Duration::from_secs(30),
             )
             .await?;

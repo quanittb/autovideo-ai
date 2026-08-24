@@ -2312,13 +2312,11 @@ pub fn list_flow_profiles(
     );
     let mut profiles = manager.list_profiles();
     for p in &mut profiles {
-        if session_mgr.is_session_open(&p.profile_id) {
-            p.browser_session_open = true;
-            p.status = session_mgr
-                .get_session_auth_status(&p.profile_id)
-                .unwrap_or_else(|| "UNKNOWN".to_string());
-        } else {
-            p.browser_session_open = false;
+        let is_open = session_mgr.is_session_open(&p.profile_id);
+        p.manual_browser_open = is_open;
+        p.browser_session_open = is_open;
+        if is_open {
+            p.is_locked = true;
             p.status = "UNKNOWN".to_string();
         }
     }
@@ -2335,14 +2333,12 @@ pub fn create_flow_profile(
         crate::system::StoragePaths::default_paths().app_data_dir,
     );
     let mut snapshot = manager.create_profile(&profile_id, &name)?;
-    snapshot.browser_session_open = session_mgr.is_session_open(&profile_id);
-    snapshot.status = if snapshot.browser_session_open {
-        session_mgr
-            .get_session_auth_status(&profile_id)
-            .unwrap_or_else(|| "UNKNOWN".to_string())
-    } else {
-        "UNKNOWN".to_string()
-    };
+    let is_open = session_mgr.is_session_open(&profile_id);
+    snapshot.manual_browser_open = is_open;
+    snapshot.browser_session_open = is_open;
+    if is_open {
+        snapshot.is_locked = true;
+    }
     Ok(snapshot)
 }
 
@@ -2363,7 +2359,26 @@ pub fn delete_flow_profile(
 }
 
 #[command]
-pub async fn open_flow_profile_browser(
+pub fn open_flow_profile_browser(
+    profile_id: String,
+    session_mgr: tauri::State<'_, Arc<crate::ai::flow::FlowBrowserSessionManager>>,
+) -> Result<String, String> {
+    let paths = crate::system::StoragePaths::default_paths();
+    let manager = crate::ai::flow::FlowProfileManager::new(paths.app_data_dir.clone());
+    let profile_dir = manager.get_profile_dir(&profile_id)?;
+    session_mgr.open_session(&profile_id, &profile_dir, &paths)
+}
+
+#[command]
+pub fn close_flow_profile_browser(
+    profile_id: String,
+    session_mgr: tauri::State<'_, Arc<crate::ai::flow::FlowBrowserSessionManager>>,
+) -> Result<(), String> {
+    session_mgr.close_session(&profile_id)
+}
+
+#[command]
+pub async fn verify_flow_profile_login(
     profile_id: String,
     session_mgr: tauri::State<'_, Arc<crate::ai::flow::FlowBrowserSessionManager>>,
 ) -> Result<String, String> {
@@ -2371,16 +2386,8 @@ pub async fn open_flow_profile_browser(
     let manager = crate::ai::flow::FlowProfileManager::new(paths.app_data_dir.clone());
     let profile_dir = manager.get_profile_dir(&profile_id)?;
     session_mgr
-        .open_session(&profile_id, &profile_dir, &paths)
+        .verify_login(&profile_id, &profile_dir, &paths)
         .await
-}
-
-#[command]
-pub async fn close_flow_profile_browser(
-    profile_id: String,
-    session_mgr: tauri::State<'_, Arc<crate::ai::flow::FlowBrowserSessionManager>>,
-) -> Result<(), String> {
-    session_mgr.close_session(&profile_id).await
 }
 
 #[command]
@@ -2388,12 +2395,7 @@ pub async fn refresh_flow_profile_status(
     profile_id: String,
     session_mgr: tauri::State<'_, Arc<crate::ai::flow::FlowBrowserSessionManager>>,
 ) -> Result<String, String> {
-    let paths = crate::system::StoragePaths::default_paths();
-    let manager = crate::ai::flow::FlowProfileManager::new(paths.app_data_dir.clone());
-    let profile_dir = manager.get_profile_dir(&profile_id)?;
-    session_mgr
-        .check_or_refresh_auth(&profile_id, &profile_dir, &paths)
-        .await
+    verify_flow_profile_login(profile_id, session_mgr).await
 }
 
 #[command]

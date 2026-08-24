@@ -18,7 +18,7 @@ use system::StoragePaths;
 use tauri::Manager;
 
 pub async fn handle_app_shutdown(session_manager: Arc<crate::ai::flow::FlowBrowserSessionManager>) {
-    session_manager.close_all().await;
+    session_manager.close_all();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -182,6 +182,7 @@ pub fn run() {
             delete_flow_profile,
             open_flow_profile_browser,
             close_flow_profile_browser,
+            verify_flow_profile_login,
             refresh_flow_profile_status,
             start_flow_generation,
             get_flow_job_status,

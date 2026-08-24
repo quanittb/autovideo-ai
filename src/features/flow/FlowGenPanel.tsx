@@ -90,6 +90,9 @@ export const FlowGenPanel: React.FC = () => {
 
   const selectedProfile = profiles.find((p) => p.profileId === selectedProfileId);
   const isProfileLocked = selectedProfile?.isLocked ?? false;
+  const isManualBrowserOpen =
+    selectedProfile?.manualBrowserOpen || selectedProfile?.browserSessionOpen || false;
+  const isProfileReady = selectedProfile?.status === 'READY';
 
   return (
     <div className="flex flex-col gap-6 max-w-5xl mx-auto p-6 text-slate-100">
@@ -191,6 +194,8 @@ export const FlowGenPanel: React.FC = () => {
           disabled={
             !projectId ||
             !selectedProfileId ||
+            !isProfileReady ||
+            isManualBrowserOpen ||
             isProfileLocked ||
             !prompt.trim() ||
             !selectedMediaId ||

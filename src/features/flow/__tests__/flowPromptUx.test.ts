@@ -112,7 +112,7 @@ describe('Frontend Prompt UX Behavioral Tests (Phase 20A)', () => {
 
     resolveFirst({
       optimizedPrompt: 'Optimized hero',
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3.5-flash-lite',
       promptSource: 'GEMINI_OPTIMIZED',
       promptHash: 'h1',
     });
@@ -124,7 +124,7 @@ describe('Frontend Prompt UX Behavioral Tests (Phase 20A)', () => {
   it('3. successful optimize -> editor replaces text and updates provenance', async () => {
     vi.mocked(flowApi.optimizePrompt).mockResolvedValueOnce({
       optimizedPrompt: 'Cinematic red fox in misty autumn forest',
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3.5-flash-lite',
       promptSource: 'GEMINI_OPTIMIZED',
       promptHash: 'h_fox',
     });
@@ -139,7 +139,7 @@ describe('Frontend Prompt UX Behavioral Tests (Phase 20A)', () => {
   it('4. Undo -> restores text + PromptSource', async () => {
     vi.mocked(flowApi.optimizePrompt).mockResolvedValueOnce({
       optimizedPrompt: 'Optimized fox',
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3.5-flash-lite',
       promptSource: 'GEMINI_OPTIMIZED',
       promptHash: 'h_fox',
     });
@@ -159,7 +159,7 @@ describe('Frontend Prompt UX Behavioral Tests (Phase 20A)', () => {
   it('5. Gen Again -> uses CURRENT editor text', async () => {
     vi.mocked(flowApi.optimizePrompt).mockResolvedValueOnce({
       optimizedPrompt: 'Second optimization result',
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3.5-flash-lite',
       promptSource: 'GEMINI_OPTIMIZED',
       promptHash: 'h2',
     });
@@ -178,7 +178,7 @@ describe('Frontend Prompt UX Behavioral Tests (Phase 20A)', () => {
   it('6. manual edit: GEMINI_OPTIMIZED -> GEMINI_OPTIMIZED_THEN_EDITED', async () => {
     vi.mocked(flowApi.optimizePrompt).mockResolvedValueOnce({
       optimizedPrompt: 'Optimized hero',
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3.5-flash-lite',
       promptSource: 'GEMINI_OPTIMIZED',
       promptHash: 'h1',
     });
@@ -210,7 +210,7 @@ describe('Frontend Prompt UX Behavioral Tests (Phase 20A)', () => {
     // Late Gemini response returns
     resolveStale({
       optimizedPrompt: 'Optimized Stale Text',
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3.5-flash-lite',
       promptSource: 'GEMINI_OPTIMIZED',
       promptHash: 'h_stale',
     });
@@ -245,7 +245,7 @@ describe('Frontend Prompt UX Behavioral Tests (Phase 20A)', () => {
   });
 
   it('10. Gemini unconfigured -> Generate Video remains available', () => {
-    const geminiStatus = { isConfigured: false, model: 'gemini-3.5-flash' };
+    const geminiStatus = { isConfigured: false, model: 'gemini-3.5-flash-lite' };
     const canGenerateVideo = true; // Flow generation remains unblocked
     expect(geminiStatus.isConfigured).toBe(false);
     expect(canGenerateVideo).toBe(true);

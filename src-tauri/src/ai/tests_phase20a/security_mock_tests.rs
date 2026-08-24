@@ -444,47 +444,40 @@ fn test_phase20a_44_zero_fake_policy_mock_acceptance_metrics() {
 }
 
 #[test]
-fn test_phase20a_45_browser_session_persistence_and_bounded_alive() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
+fn test_phase20a_45_manual_login_launcher_no_playwright_args_no_automation() {
     let temp_dir = tempdir().unwrap();
-    let paths = StoragePaths::resolve_from_base(temp_dir.path());
-    let profile_mgr = FlowProfileManager::new(paths.app_data_dir.clone());
-    profile_mgr
-        .create_profile("prof_persist_test", "Persist Test")
-        .unwrap();
-    let profile_dir = profile_mgr.get_profile_dir("prof_persist_test").unwrap();
+    let profile_dir = temp_dir.path().join("flow_profiles").join("prof_1");
+    let target_url = "https://labs.google/fx/tools/flow";
 
-    let server_handle = rt
-        .block_on(MockFlowServer::start(MockScenario::Ready))
-        .unwrap();
+    let args = SystemChromeLauncher::build_manual_chrome_args(&profile_dir, target_url);
 
-    let session_mgr = FlowBrowserSessionManager::with_mock_url(server_handle.base_url.clone());
+    // Conceptually allowed: --user-data-dir, --no-first-run, --no-default-browser-check, url
+    assert!(args.iter().any(|a| a.starts_with("--user-data-dir=")));
+    assert!(args.contains(&"--no-first-run".to_string()));
+    assert!(args.contains(&"--no-default-browser-check".to_string()));
+    assert!(args.contains(&target_url.to_string()));
 
-    // 1. Open session -> IPC returns -> managed session is alive
-    let open_res = rt.block_on(session_mgr.open_session("prof_persist_test", &profile_dir, &paths));
-    assert_eq!(open_res.unwrap(), "OPEN");
-    assert!(session_mgr.is_session_open("prof_persist_test"));
-
-    // 2. Bounded wait -> session remains alive
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    assert!(session_mgr.is_session_open("prof_persist_test"));
-
-    // 3. Clean up
-    rt.block_on(session_mgr.close_session("prof_persist_test"))
-        .unwrap();
-    assert!(!session_mgr.is_session_open("prof_persist_test"));
+    // Strictly forbidden: NO remote debugging, automation, headless, or stealth flags
+    for arg in &args {
+        assert!(!arg.contains("remote-debugging"));
+        assert!(!arg.contains("enable-automation"));
+        assert!(!arg.contains("disable-blink-features"));
+        assert!(!arg.contains("headless"));
+        assert!(!arg.contains("cdp"));
+        assert!(!arg.contains("webdriver"));
+    }
 }
 
 #[test]
-fn test_phase20a_46_same_session_auth_refresh() {
+fn test_phase20a_46_verify_while_manual_chrome_running_blocked() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let temp_dir = tempdir().unwrap();
     let paths = StoragePaths::resolve_from_base(temp_dir.path());
     let profile_mgr = FlowProfileManager::new(paths.app_data_dir.clone());
     profile_mgr
-        .create_profile("prof_refresh_test", "Refresh Test")
+        .create_profile("prof_block_test", "Block Test")
         .unwrap();
-    let profile_dir = profile_mgr.get_profile_dir("prof_refresh_test").unwrap();
+    let profile_dir = profile_mgr.get_profile_dir("prof_block_test").unwrap();
 
     let server_handle = rt
         .block_on(MockFlowServer::start(MockScenario::Ready))
@@ -492,20 +485,23 @@ fn test_phase20a_46_same_session_auth_refresh() {
 
     let session_mgr = FlowBrowserSessionManager::with_mock_url(server_handle.base_url.clone());
 
-    // Open session
-    let _ = rt
-        .block_on(session_mgr.open_session("prof_refresh_test", &profile_dir, &paths))
-        .unwrap();
+    // 1. Open manual login session
+    let open_res = session_mgr.open_session("prof_block_test", &profile_dir, &paths);
+    assert_eq!(open_res.unwrap(), "OPEN");
+    assert!(session_mgr.is_session_open("prof_block_test"));
 
-    // Refresh auth using SAME live session
-    let auth_status = rt
-        .block_on(session_mgr.check_or_refresh_auth("prof_refresh_test", &profile_dir, &paths))
-        .unwrap();
-    assert_eq!(auth_status, "READY");
+    // 2. Verify login while manual Chrome is open -> BLOCKED with LOGIN_BROWSER_STILL_OPEN
+    let verify_res = rt.block_on(session_mgr.verify_login("prof_block_test", &profile_dir, &paths));
+    assert!(verify_res.is_err());
+    assert!(verify_res.unwrap_err().contains("LOGIN_BROWSER_STILL_OPEN"));
 
-    // Close session
-    rt.block_on(session_mgr.close_session("prof_refresh_test"))
-        .unwrap();
+    // 3. Close manual Chrome -> verify login succeeds with READY
+    session_mgr.close_session("prof_block_test").unwrap();
+    assert!(!session_mgr.is_session_open("prof_block_test"));
+
+    let verify_after =
+        rt.block_on(session_mgr.verify_login("prof_block_test", &profile_dir, &paths));
+    assert_eq!(verify_after.unwrap(), "READY");
 }
 
 #[test]
@@ -525,19 +521,18 @@ fn test_phase20a_47_browser_already_open_guard() {
 
     let session_mgr = FlowBrowserSessionManager::with_mock_url(server_handle.base_url.clone());
 
-    let res1 = rt
-        .block_on(session_mgr.open_session("prof_dup_test", &profile_dir, &paths))
+    let res1 = session_mgr
+        .open_session("prof_dup_test", &profile_dir, &paths)
         .unwrap();
     assert_eq!(res1, "OPEN");
 
     // Second open on same profile -> BROWSER_ALREADY_OPEN
-    let res2 = rt
-        .block_on(session_mgr.open_session("prof_dup_test", &profile_dir, &paths))
+    let res2 = session_mgr
+        .open_session("prof_dup_test", &profile_dir, &paths)
         .unwrap();
     assert_eq!(res2, "BROWSER_ALREADY_OPEN");
 
-    rt.block_on(session_mgr.close_session("prof_dup_test"))
-        .unwrap();
+    session_mgr.close_session("prof_dup_test").unwrap();
 }
 
 #[test]
@@ -557,14 +552,13 @@ fn test_phase20a_48_explicit_browser_close_and_lock_release() {
 
     let session_mgr = FlowBrowserSessionManager::with_mock_url(server_handle.base_url.clone());
 
-    let _ = rt
-        .block_on(session_mgr.open_session("prof_close_test", &profile_dir, &paths))
+    let _ = session_mgr
+        .open_session("prof_close_test", &profile_dir, &paths)
         .unwrap();
     assert!(profile_dir.join(".session.lock").exists());
 
     // Explicit close releases lock
-    rt.block_on(session_mgr.close_session("prof_close_test"))
-        .unwrap();
+    session_mgr.close_session("prof_close_test").unwrap();
     assert!(!profile_dir.join(".session.lock").exists());
     assert!(!session_mgr.is_session_open("prof_close_test"));
 }
@@ -586,13 +580,13 @@ fn test_phase20a_49_session_manager_shutdown_cleanup() {
 
     let session_mgr = FlowBrowserSessionManager::with_mock_url(server_handle.base_url.clone());
 
-    let _ = rt
-        .block_on(session_mgr.open_session("prof_shut_test", &profile_dir, &paths))
+    let _ = session_mgr
+        .open_session("prof_shut_test", &profile_dir, &paths)
         .unwrap();
     assert!(session_mgr.is_session_open("prof_shut_test"));
 
     // App shutdown -> close_all
-    rt.block_on(session_mgr.close_all());
+    session_mgr.close_all();
     assert!(!session_mgr.is_session_open("prof_shut_test"));
 }
 
@@ -639,27 +633,19 @@ fn test_phase20a_58_profile_auth_refresh_reload_consistency() {
 
     let session_mgr = FlowBrowserSessionManager::with_mock_url(server_handle.base_url.clone());
 
-    // 1. Open session
-    let _ = rt
-        .block_on(session_mgr.open_session("prof_consistency_test", &profile_dir, &paths))
+    // 1. Open manual login session
+    let _ = session_mgr
+        .open_session("prof_consistency_test", &profile_dir, &paths)
         .unwrap();
 
-    // 2. Refresh auth -> READY
-    let refreshed = rt
-        .block_on(session_mgr.check_or_refresh_auth("prof_consistency_test", &profile_dir, &paths))
-        .unwrap();
-    assert_eq!(refreshed, "READY");
-
-    // 3. Re-read / overlay profiles as in list_flow_profiles
+    // 2. Profile snapshot during open Chrome: manualBrowserOpen=true, isLocked=true
     let mut profiles = profile_mgr.list_profiles();
     for p in &mut profiles {
-        if session_mgr.is_session_open(&p.profile_id) {
-            p.browser_session_open = true;
-            p.status = session_mgr
-                .get_session_auth_status(&p.profile_id)
-                .unwrap_or_else(|| "UNKNOWN".to_string());
-        } else {
-            p.browser_session_open = false;
+        let is_open = session_mgr.is_session_open(&p.profile_id);
+        p.manual_browser_open = is_open;
+        p.browser_session_open = is_open;
+        if is_open {
+            p.is_locked = true;
             p.status = "UNKNOWN".to_string();
         }
     }
@@ -668,33 +654,33 @@ fn test_phase20a_58_profile_auth_refresh_reload_consistency() {
         .iter()
         .find(|p| p.profile_id == "prof_consistency_test")
         .unwrap();
-    assert_eq!(p_snap.status, "READY");
-    assert!(p_snap.browser_session_open);
+    assert!(p_snap.manual_browser_open);
+    assert!(p_snap.is_locked);
+    assert_eq!(p_snap.status, "UNKNOWN");
 
-    // 4. Close browser session
-    rt.block_on(session_mgr.close_session("prof_consistency_test"))
+    // 3. Close manual session
+    session_mgr.close_session("prof_consistency_test").unwrap();
+
+    // 4. Verify login via temporary Playwright
+    let verified = rt
+        .block_on(session_mgr.verify_login("prof_consistency_test", &profile_dir, &paths))
         .unwrap();
+    assert_eq!(verified, "READY");
 
-    // 5. Re-read profiles after close -> auth status becomes UNKNOWN, browserSessionOpen=false
+    // 5. Re-read profiles after close & verify
     let mut profiles_after = profile_mgr.list_profiles();
     for p in &mut profiles_after {
-        if session_mgr.is_session_open(&p.profile_id) {
-            p.browser_session_open = true;
-            p.status = session_mgr
-                .get_session_auth_status(&p.profile_id)
-                .unwrap_or_else(|| "UNKNOWN".to_string());
-        } else {
-            p.browser_session_open = false;
-            p.status = "UNKNOWN".to_string();
-        }
+        let is_open = session_mgr.is_session_open(&p.profile_id);
+        p.manual_browser_open = is_open;
+        p.browser_session_open = is_open;
     }
 
     let p_snap_after = profiles_after
         .iter()
         .find(|p| p.profile_id == "prof_consistency_test")
         .unwrap();
-    assert_eq!(p_snap_after.status, "UNKNOWN");
-    assert!(!p_snap_after.browser_session_open);
+    assert!(!p_snap_after.manual_browser_open);
+    assert!(!p_snap_after.is_locked);
 }
 
 #[test]
@@ -717,8 +703,8 @@ fn test_phase20a_59_production_app_shutdown_lifecycle_callback_cleans_sessions()
     ));
 
     // Open active managed login session
-    let _ = rt
-        .block_on(session_mgr.open_session("prof_prod_shut", &profile_dir, &paths))
+    let _ = session_mgr
+        .open_session("prof_prod_shut", &profile_dir, &paths)
         .unwrap();
     assert!(session_mgr.is_session_open("prof_prod_shut"));
     assert!(profile_dir.join(".session.lock").exists());

@@ -55,13 +55,15 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
     setShowCreate(false);
   };
 
+  const isBrowserOpen = selected?.manualBrowserOpen || selected?.browserSessionOpen || false;
+
   const handleOpenBrowser = async () => {
     if (!selectedProfileId) return;
     setIsOpeningBrowser(true);
     setActionFeedback(null);
     try {
       await openProfileBrowser(selectedProfileId);
-      setActionFeedback('Browser launched for manual login.');
+      setActionFeedback('Chrome is open for manual Google sign-in.');
     } catch (err: any) {
       setActionFeedback(`Failed: ${err?.message || String(err)}`);
     } finally {
@@ -75,7 +77,8 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
     setActionFeedback(null);
     try {
       await closeProfileBrowser(selectedProfileId);
-      setActionFeedback('Browser closed. Profile lock released.');
+      setActionFeedback('Chrome closed. Profile lock released.');
+      if (onRefreshProfiles) onRefreshProfiles();
     } catch (err: any) {
       setActionFeedback(`Close failed: ${err?.message || String(err)}`);
     } finally {
@@ -83,16 +86,22 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
     }
   };
 
-  const handleRefreshStatus = async () => {
+  const handleVerifyLogin = async () => {
     if (!selectedProfileId) return;
     setIsRefreshing(true);
     setActionFeedback(null);
     try {
       const status = await refreshProfileStatus(selectedProfileId);
-      setActionFeedback(`Profile Status: ${status}`);
+      if (status === 'READY') {
+        setActionFeedback('✓ Google Flow session verified (READY)');
+      } else if (status === 'LOGIN_REQUIRED') {
+        setActionFeedback('Login required — please open Chrome to sign in.');
+      } else {
+        setActionFeedback(`Verification result: ${status}`);
+      }
       if (onRefreshProfiles) onRefreshProfiles();
     } catch (err: any) {
-      setActionFeedback(`Check failed: ${err?.message || String(err)}`);
+      setActionFeedback(`Verification failed: ${err?.message || String(err)}`);
     } finally {
       setIsRefreshing(false);
     }
@@ -180,10 +189,10 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
 
           {selected && (
             <div className="flex items-center gap-2 flex-wrap">
-              {selected.browserSessionOpen ? (
+              {isBrowserOpen ? (
                 <span className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-indigo-950/80 border border-indigo-500/50 text-indigo-300 rounded-lg">
                   <ExternalLink className="w-3.5 h-3.5" />
-                  Browser Open
+                  Chrome Open (Manual Login)
                 </span>
               ) : selected.isLocked ? (
                 <span className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-amber-950/60 border border-amber-600/40 text-amber-300 rounded-lg">
@@ -193,7 +202,7 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
               ) : selected.status === 'READY' ? (
                 <span className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-emerald-950/60 border border-emerald-600/40 text-emerald-300 rounded-lg">
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  Ready
+                  Verified Ready
                 </span>
               ) : selected.status === 'LOGIN_REQUIRED' ? (
                 <span className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-slate-800 border border-slate-700 text-amber-300 rounded-lg">
@@ -207,59 +216,59 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
                 </span>
               )}
 
-              {selected.browserSessionOpen ? (
+              {isBrowserOpen ? (
                 <button
                   type="button"
                   onClick={handleCloseBrowser}
                   disabled={isClosingBrowser}
                   className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-rose-300 hover:text-white bg-rose-950/60 hover:bg-rose-900 border border-rose-700/50 rounded-lg transition disabled:opacity-50 cursor-pointer"
-                  title="Close login Chromium session and release profile lock"
+                  title="Close login Chrome browser and release profile lock"
                 >
                   <XSquare className="w-3.5 h-3.5" />
-                  {isClosingBrowser ? 'Closing...' : 'Close Browser'}
+                  {isClosingBrowser ? 'Closing...' : 'Close Login Browser'}
                 </button>
               ) : (
-                <button
-                  type="button"
-                  onClick={handleOpenBrowser}
-                  disabled={isOpeningBrowser || selected.isLocked}
-                  className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-indigo-300 hover:text-white bg-indigo-950/40 hover:bg-indigo-900/60 border border-indigo-700/40 rounded-lg transition disabled:opacity-50 cursor-pointer"
-                  title="Launch headed Chromium browser to log into Google Flow manually"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  {isOpeningBrowser ? 'Opening...' : 'Open Browser / Login'}
-                </button>
-              )}
+                <>
+                  <button
+                    type="button"
+                    onClick={handleOpenBrowser}
+                    disabled={isOpeningBrowser || selected.isLocked}
+                    className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-indigo-300 hover:text-white bg-indigo-950/40 hover:bg-indigo-900/60 border border-indigo-700/40 rounded-lg transition disabled:opacity-50 cursor-pointer"
+                    title="Launch normal installed Google Chrome for manual sign-in"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    {isOpeningBrowser
+                      ? 'Opening...'
+                      : selected.status === 'READY'
+                        ? 'Re-open Chrome'
+                        : 'Open Chrome for Login'}
+                  </button>
 
-              <button
-                type="button"
-                onClick={handleRefreshStatus}
-                disabled={isRefreshing || (selected.isLocked && !selected.browserSessionOpen)}
-                className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition disabled:opacity-50 cursor-pointer"
-                title="Check auth readiness against Google Flow"
-              >
-                <RefreshCw
-                  className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`}
-                />
-                Refresh Status
-              </button>
+                  <button
+                    type="button"
+                    onClick={handleVerifyLogin}
+                    disabled={isRefreshing || selected.isLocked}
+                    className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition disabled:opacity-50 cursor-pointer"
+                    title="Run temporary Playwright check to verify Google Flow session"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`}
+                    />
+                    {selected.status === 'READY' ? 'Verify Again' : 'Verify Login'}
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>
       )}
 
-      {selected?.browserSessionOpen && (
+      {isBrowserOpen && (
         <div className="flex items-center gap-2 p-2.5 bg-indigo-950/50 border border-indigo-700/40 rounded-lg text-xs text-indigo-200">
           <Info className="w-4 h-4 text-indigo-400 shrink-0" />
-          {selected.status === 'READY' ? (
-            <span>
-              Google Flow login verified. <strong>Close the login browser</strong> before starting generation.
-            </span>
-          ) : (
-            <span>
-              Browser Open — complete Google login in the browser window, then click <strong>Refresh Status</strong>.
-            </span>
-          )}
+          <span>
+            Chrome is open for manual Google sign-in. Complete sign-in and any account verification directly in Chrome. AutoVideo does not access your credentials.
+          </span>
         </div>
       )}
 

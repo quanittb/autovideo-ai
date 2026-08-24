@@ -1054,7 +1054,8 @@ export interface FlowProfileSnapshot {
   name: string;
   status: string; // "READY" | "LOGIN_REQUIRED" | "UNKNOWN"
   isLocked: boolean;
-  browserSessionOpen: boolean;
+  manualBrowserOpen: boolean;
+  browserSessionOpen?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -1115,6 +1116,9 @@ export const flowApi = {
 
   closeProfileBrowser: (profileId: string): Promise<void> =>
     invoke('close_flow_profile_browser', { profileId }),
+
+  verifyProfileLogin: (profileId: string): Promise<string> =>
+    invoke('verify_flow_profile_login', { profileId }),
 
   refreshProfileStatus: (profileId: string): Promise<string> =>
     invoke('refresh_flow_profile_status', { profileId }),

@@ -11,6 +11,9 @@ pub struct FlowProfileSnapshot {
     pub name: String,
     pub status: String, // "READY" | "LOGIN_REQUIRED" | "UNKNOWN"
     pub is_locked: bool,
+    #[serde(default)]
+    pub manual_browser_open: bool,
+    #[serde(default)]
     pub browser_session_open: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -36,6 +39,7 @@ impl FlowProfileInfo {
             name: self.name.clone(),
             status: "UNKNOWN".to_string(),
             is_locked: self.is_locked,
+            manual_browser_open: false,
             browser_session_open: false,
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),

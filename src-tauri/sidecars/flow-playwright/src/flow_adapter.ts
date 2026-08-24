@@ -5,6 +5,8 @@ import path from 'path';
 export interface LaunchParams {
   profilePath: string;
   headless: boolean;
+  channel?: string;
+  runtimeMode?: 'MOCK_CHROMIUM' | 'PRODUCTION_CHROME';
 }
 
 export interface SubmitPromptParams {
@@ -42,11 +44,31 @@ export class FlowUiAdapterV1 {
       await this.closeBrowser();
     }
 
-    this.context = await chromium.launchPersistentContext(params.profilePath, {
+    const launchOptions: any = {
       headless: params.headless,
       viewport: { width: 1280, height: 800 },
       acceptDownloads: true,
-    });
+    };
+
+    if (params.runtimeMode === 'PRODUCTION_CHROME' || params.channel === 'chrome') {
+      launchOptions.channel = 'chrome';
+    }
+
+    try {
+      this.context = await chromium.launchPersistentContext(params.profilePath, launchOptions);
+    } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      if (
+        errMsg.includes("Can't find chrome client") ||
+        errMsg.includes("Executable doesn't exist") ||
+        errMsg.includes('channel chrome')
+      ) {
+        throw new Error(
+          'CHROME_NOT_INSTALLED: Google Chrome Stable is not installed on this system. Please install Google Chrome to use Flow automation.'
+        );
+      }
+      throw err;
+    }
 
     const pages = this.context.pages();
     this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
@@ -60,6 +82,15 @@ export class FlowUiAdapterV1 {
   async checkAuthStatus(): Promise<AuthStatusResult> {
     if (!this.page) throw new Error('Browser not launched');
 
+    const currentUrl = this.page.url();
+    if (
+      currentUrl.includes('accounts.google.com') ||
+      currentUrl.includes('ServiceLogin') ||
+      currentUrl.includes('signin')
+    ) {
+      return { status: 'LOGIN_REQUIRED' };
+    }
+
     const content = await this.page.content();
 
     // Check for explicit login required indicators
@@ -70,6 +101,15 @@ export class FlowUiAdapterV1 {
       (await this.page.locator('.login-prompt, #login-button, a[href*="accounts.google.com"]').count()) > 0
     ) {
       return { status: 'LOGIN_REQUIRED' };
+    }
+
+    // Check for eligibility / user action required
+    if (
+      content.includes('account not eligible') ||
+      content.includes('Age verification required') ||
+      content.includes('Identity verification required')
+    ) {
+      return { status: 'UNKNOWN' };
     }
 
     // Check for explicit authenticated ready indicators

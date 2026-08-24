@@ -82,6 +82,30 @@ pub struct GeminiCredentialStatus {
     pub sanitized_message: Option<String>,
 }
 
+pub const DEFAULT_PROMPT_OPTIMIZATION_MODEL: &'static str = "gemini-3.5-flash-lite";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptOptimizationCapabilityPolicy {
+    pub model: String,
+    pub policy_version: String,
+    pub max_output_tokens: u32,
+    pub timeout_sec: u64,
+    pub allow_paid_fallback: bool,
+}
+
+impl Default for PromptOptimizationCapabilityPolicy {
+    fn default() -> Self {
+        Self {
+            model: DEFAULT_PROMPT_OPTIMIZATION_MODEL.to_string(),
+            policy_version: "1.0".to_string(),
+            max_output_tokens: 800,
+            timeout_sec: 10,
+            allow_paid_fallback: false,
+        }
+    }
+}
+
 // Backward-compatible DTO alias for existing consumers
 pub type GeminiStatusResponse = GeminiCredentialStatus;
 
@@ -330,7 +354,7 @@ pub struct GeminiCredentialManager {
 }
 
 impl GeminiCredentialManager {
-    pub const DEFAULT_MODEL: &'static str = "gemini-3.5-flash";
+    pub const DEFAULT_MODEL: &'static str = DEFAULT_PROMPT_OPTIMIZATION_MODEL;
 
     pub fn new(secret_store: SecretStore) -> Self {
         let is_cfg = secret_store.is_gemini_configured();
@@ -525,11 +549,11 @@ pub struct GeminiPromptOptimizer {
     secret_store: SecretStore,
     client: reqwest::Client,
     endpoint_base: Option<String>,
-    model: String,
+    policy: PromptOptimizationCapabilityPolicy,
 }
 
 impl GeminiPromptOptimizer {
-    pub const DEFAULT_MODEL: &'static str = "gemini-3.5-flash";
+    pub const DEFAULT_MODEL: &'static str = DEFAULT_PROMPT_OPTIMIZATION_MODEL;
 
     pub fn new(secret_store: SecretStore) -> Self {
         let client = reqwest::Client::builder()
@@ -541,7 +565,7 @@ impl GeminiPromptOptimizer {
             secret_store,
             client,
             endpoint_base: None,
-            model: Self::DEFAULT_MODEL.to_string(),
+            policy: PromptOptimizationCapabilityPolicy::default(),
         }
     }
 
@@ -559,8 +583,15 @@ impl GeminiPromptOptimizer {
             secret_store,
             client,
             endpoint_base,
-            model,
+            policy: PromptOptimizationCapabilityPolicy {
+                model,
+                ..Default::default()
+            },
         }
+    }
+
+    pub fn policy(&self) -> &PromptOptimizationCapabilityPolicy {
+        &self.policy
     }
 
     pub fn is_configured(&self) -> bool {
@@ -608,8 +639,7 @@ Avoid commentary or conversational filler. Output ONLY the optimized prompt text
                 "parts": [{ "text": user_content }]
             }],
             "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 800
+                "maxOutputTokens": self.policy.max_output_tokens
             }
         });
 
@@ -620,7 +650,7 @@ Avoid commentary or conversational filler. Output ONLY the optimized prompt text
         let endpoint = format!(
             "{}/models/{}:generateContent",
             base_url.trim_end_matches('/'),
-            self.model
+            self.policy.model
         );
 
         let response = match self
@@ -682,7 +712,7 @@ Avoid commentary or conversational filler. Output ONLY the optimized prompt text
 
         Ok(OptimizePromptResponse {
             optimized_prompt: clean_optimized,
-            model: self.model.clone(),
+            model: self.policy.model.clone(),
             prompt_source: PromptSource::GeminiOptimized,
             prompt_hash,
         })
