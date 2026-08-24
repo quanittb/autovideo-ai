@@ -64,6 +64,9 @@ Triển khai hoàn chỉnh hệ thống **Google Flow Browser Driver & Gemini Pr
 | **PRODUCTION_PLAYWRIGHT_BROWSER** | **GOOGLE_CHROME_STABLE** | Playwright sidecar sử dụng Google Chrome Stable (`channel: 'chrome'`) |
 | **MOCK_PLAYWRIGHT_CHROMIUM_VERIFIED** | **YES** | Đã xác thực qua Real Sidecar + Real Playwright + Real Chromium + Local Mock Server |
 | **LOGIN_BROWSER_SESSION_PERSISTENCE_VERIFIED** | **YES** | Tiến trình manual Chrome sống bền bỉ theo vòng đời cửa sổ của người dùng |
+| **AUTH_STATUS_SEMANTICS_PRESERVED** | **YES** | Ánh xạ kiểu ngữ nghĩa `FlowAuthStatus` (`READY`, `LOGIN_REQUIRED`, `UNKNOWN`, `FLOW_UI_CHANGED`, `FLOW_ELIGIBILITY_REQUIRED`) |
+| **MANUAL_CHROME_PROFILE_LIVENESS_HARDENED** | **YES** | Theo dõi PID qua `--user-data-dir`, không mất lock khi có launcher process handoff |
+| **TARGETED_PROFILE_PROCESS_CLEANUP_VERIFIED** | **YES** | Chỉ đóng tiến trình thuộc profile quản lý, không ảnh hưởng Chrome riêng của người dùng |
 | **FLOW_AUTH_SESSION_REUSE_VERIFIED** | **NO** | Chưa kiểm thử tái sử dụng session live giữa Chrome thủ công và automation trên Google Flow thật |
 | **PROFILE_AUTH_REFRESH_RELOAD_CONSISTENCY** | **YES** | Tách biệt trạng thái `manualBrowserOpen`, `isLocked`, và kết quả xác thực `READY`/`LOGIN_REQUIRED` |
 | **APP_SHUTDOWN_SESSION_CLEANUP_WIRED** | **YES** | Hook `handle_app_shutdown` giải phóng toàn bộ tiến trình Chrome và file lock khi ứng dụng thoát |
@@ -133,7 +136,7 @@ Exit code: 0
 **Kết quả**: ✅ **0 compile errors, 0 warnings.**
 
 ### 3.6. Rust Test Regression Suites (Serial Execution)
-- `cargo test --lib -- tests_phase20a --test-threads=1`: **59/59 passed (100%)**
+- `cargo test --lib -- tests_phase20a --test-threads=1`: **63/63 passed (100%)**
   - `test_phase20a_01` -> `test_phase20a_12`: Prompt optimization provenance, sanitization, single active request & undo tests với `gemini-3.5-flash-lite`.
   - `test_phase20a_13` -> `test_phase20a_19`: Flow manifest freeze, submitted prompt hash, credit calculation & log secrecy.
   - `test_phase20a_20` -> `test_phase20a_27`: Legal segmentation, fractional CFR frames, audio mux & corruption rejection.
@@ -153,9 +156,13 @@ Exit code: 0
   - `test_phase20a_57_zero_credential_leakage_in_diagnostics`: Che dấu API key trong toàn bộ chuỗi chẩn đoán.
   - `test_phase20a_58_profile_auth_refresh_reload_consistency`: Quản lý nhất quán trạng thái qua các bước mở Chrome -> đóng Chrome -> xác thực Playwright.
   - `test_phase20a_59_production_app_shutdown_lifecycle_callback_cleans_sessions`: Callback shutdown của app gọi `close_all()` giải phóng lock và tiến trình.
-- Workspace regression suite (`cargo test --workspace -- --test-threads=1`): **849/849 passed (100%)**
+  - `test_phase20a_60_auth_status_typed_semantics_mapping`: Kiểm thử toàn diện enum `FlowAuthStatus` và parser không làm mất kiểu ngữ nghĩa.
+  - `test_phase20a_61_mock_server_scenarios_auth_inspection`: Xác thực chính xác `READY`, `LOGIN_REQUIRED`, `FLOW_UI_CHANGED`, `FLOW_ELIGIBILITY_REQUIRED` qua MockFlowServer.
+  - `test_phase20a_62_manual_chrome_profile_liveness_handoff_and_user_exit`: Kiểm thử vòng đời liveness handoff và tự giải phóng session khi người dùng đóng Chrome.
+  - `test_phase20a_63_close_login_browser_only_targets_managed_profile_pids`: Xác thực close chỉ kết thúc PID thuộc profile chỉ định, tuyệt đối không diệt Chrome của người dùng.
+- Workspace regression suite (`cargo test --workspace -- --test-threads=1`): **853/853 passed (100%)**
 
-**Tổng cộng Rust tests**: ✅ **849/849 tests PASSED (100%), 0 failures, 0 regressions.**
+**Tổng cộng Rust tests**: ✅ **853/853 tests PASSED (100%), 0 failures, 0 regressions.**
 
 ---
 

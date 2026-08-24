@@ -17,6 +17,7 @@ pub enum MockScenario {
     CorruptDownload,
     WrongDownload,
     DelayAfterGenerateClick,
+    EligibilityRequired,
 }
 
 pub struct MockFlowServerHandle {
@@ -151,6 +152,10 @@ impl MockFlowServer {
             }
             MockScenario::UiChanged => {
                 let html = "<html><body><div id='completely-redesigned-layout'>Unknown elements</div></body></html>";
+                ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+            }
+            MockScenario::EligibilityRequired => {
+                let html = "<html><body><div id='eligibility-gate'><div class='alert'>Account not eligible: Age verification required. Please verify your age with Google.</div></div></body></html>";
                 ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
             }
             MockScenario::GenerationError => {

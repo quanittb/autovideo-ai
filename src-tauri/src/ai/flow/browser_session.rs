@@ -181,11 +181,17 @@ impl FlowBrowserSessionManager {
         drop(profile_guard);
 
         match check_res {
-            Ok(true) => Ok("READY".to_string()),
-            Ok(false) => Ok("LOGIN_REQUIRED".to_string()),
+            Ok(status) => Ok(status.as_str().to_string()),
             Err(e) => {
-                if e.contains("FLOW_UI_CHANGED") || e.contains("UNKNOWN") {
+                if e.contains("FLOW_UI_CHANGED") {
                     Ok("FLOW_UI_CHANGED".to_string())
+                } else if e.contains("FLOW_ELIGIBILITY_REQUIRED")
+                    || e.contains("ELIGIBILITY_REQUIRED")
+                    || e.contains("USER_ACTION_REQUIRED")
+                {
+                    Ok("FLOW_ELIGIBILITY_REQUIRED".to_string())
+                } else if e.contains("LOGIN_REQUIRED") {
+                    Ok("LOGIN_REQUIRED".to_string())
                 } else {
                     Err(e)
                 }

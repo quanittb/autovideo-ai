@@ -329,8 +329,8 @@ fn test_phase20a_38_real_mock_playwright_chromium_e2e() {
     let bridge = PlaywrightBridge::with_mock_url(server_handle.base_url.clone());
 
     // 1. Check auth status
-    let is_auth = rt.block_on(bridge.check_auth_status(&profile_dir)).unwrap();
-    assert!(is_auth);
+    let auth_status = rt.block_on(bridge.check_auth_status(&profile_dir)).unwrap();
+    assert_eq!(auth_status, FlowAuthStatus::Ready);
 
     // 2. Submit prompt generation (real Node sidecar + real Playwright + real Chromium)
     let evidence = rt
@@ -377,7 +377,7 @@ fn test_phase20a_39_mock_flow_scenarios_logged_out_credits_and_ui_changed() {
     let auth_logout = rt
         .block_on(b_logout.check_auth_status(&profile_dir))
         .unwrap();
-    assert!(!auth_logout);
+    assert_eq!(auth_logout, FlowAuthStatus::LoginRequired);
 
     let h_credits = rt
         .block_on(MockFlowServer::start(MockScenario::CreditsRequired))
@@ -715,4 +715,149 @@ fn test_phase20a_59_production_app_shutdown_lifecycle_callback_cleans_sessions()
     // Assert session is closed, lock is removed, no orphan processes
     assert!(!session_mgr.is_session_open("prof_prod_shut"));
     assert!(!profile_dir.join(".session.lock").exists());
+}
+
+#[test]
+fn test_phase20a_60_auth_status_typed_semantics_mapping() {
+    // 1. Precise enum variant string serialization
+    assert_eq!(FlowAuthStatus::Ready.as_str(), "READY");
+    assert_eq!(FlowAuthStatus::LoginRequired.as_str(), "LOGIN_REQUIRED");
+    assert_eq!(FlowAuthStatus::Unknown.as_str(), "UNKNOWN");
+    assert_eq!(FlowAuthStatus::FlowUiChanged.as_str(), "FLOW_UI_CHANGED");
+    assert_eq!(
+        FlowAuthStatus::FlowEligibilityRequired.as_str(),
+        "FLOW_ELIGIBILITY_REQUIRED"
+    );
+
+    // 2. Loose parsing preservation
+    assert_eq!(
+        FlowAuthStatus::from_str_loose("READY"),
+        FlowAuthStatus::Ready
+    );
+    assert_eq!(
+        FlowAuthStatus::from_str_loose("LOGIN_REQUIRED"),
+        FlowAuthStatus::LoginRequired
+    );
+    assert_eq!(
+        FlowAuthStatus::from_str_loose("FLOW_UI_CHANGED"),
+        FlowAuthStatus::FlowUiChanged
+    );
+    assert_eq!(
+        FlowAuthStatus::from_str_loose("FLOW_ELIGIBILITY_REQUIRED"),
+        FlowAuthStatus::FlowEligibilityRequired
+    );
+    assert_eq!(
+        FlowAuthStatus::from_str_loose("ELIGIBILITY_REQUIRED"),
+        FlowAuthStatus::FlowEligibilityRequired
+    );
+    assert_eq!(
+        FlowAuthStatus::from_str_loose("USER_ACTION_REQUIRED"),
+        FlowAuthStatus::FlowEligibilityRequired
+    );
+
+    // 3. UNKNOWN must never collapse to LoginRequired
+    assert_eq!(
+        FlowAuthStatus::from_str_loose("UNKNOWN"),
+        FlowAuthStatus::Unknown
+    );
+    assert_eq!(
+        FlowAuthStatus::from_str_loose("arbitrary_unrecognized_dom"),
+        FlowAuthStatus::Unknown
+    );
+    assert_ne!(
+        FlowAuthStatus::from_str_loose("UNKNOWN"),
+        FlowAuthStatus::LoginRequired
+    );
+}
+
+#[test]
+fn test_phase20a_61_mock_server_scenarios_auth_inspection() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let temp_dir = tempdir().unwrap();
+    let profile_dir = temp_dir.path().join("chrome_profile");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+
+    // 1. Ready scenario -> FlowAuthStatus::Ready
+    let h_ready = rt
+        .block_on(MockFlowServer::start(MockScenario::Ready))
+        .unwrap();
+    let b_ready = PlaywrightBridge::with_mock_url(h_ready.base_url.clone());
+    let res_ready = rt
+        .block_on(b_ready.check_auth_status(&profile_dir))
+        .unwrap();
+    assert_eq!(res_ready, FlowAuthStatus::Ready);
+
+    // 2. LoggedOut scenario -> FlowAuthStatus::LoginRequired
+    let h_logout = rt
+        .block_on(MockFlowServer::start(MockScenario::LoggedOut))
+        .unwrap();
+    let b_logout = PlaywrightBridge::with_mock_url(h_logout.base_url.clone());
+    let res_logout = rt
+        .block_on(b_logout.check_auth_status(&profile_dir))
+        .unwrap();
+    assert_eq!(res_logout, FlowAuthStatus::LoginRequired);
+
+    // 3. UiChanged scenario -> FlowAuthStatus::FlowUiChanged (NOT LOGIN_REQUIRED)
+    let h_ui = rt
+        .block_on(MockFlowServer::start(MockScenario::UiChanged))
+        .unwrap();
+    let b_ui = PlaywrightBridge::with_mock_url(h_ui.base_url.clone());
+    let res_ui = rt.block_on(b_ui.check_auth_status(&profile_dir)).unwrap();
+    assert_eq!(res_ui, FlowAuthStatus::FlowUiChanged);
+    assert_ne!(res_ui, FlowAuthStatus::LoginRequired);
+
+    // 4. EligibilityRequired scenario -> FlowAuthStatus::FlowEligibilityRequired
+    let h_elig = rt
+        .block_on(MockFlowServer::start(MockScenario::EligibilityRequired))
+        .unwrap();
+    let b_elig = PlaywrightBridge::with_mock_url(h_elig.base_url.clone());
+    let res_elig = rt.block_on(b_elig.check_auth_status(&profile_dir)).unwrap();
+    assert_eq!(res_elig, FlowAuthStatus::FlowEligibilityRequired);
+}
+
+#[test]
+fn test_phase20a_62_manual_chrome_profile_liveness_handoff_and_user_exit() {
+    let temp_dir = tempdir().unwrap();
+    let profile_dir = temp_dir.path().join("prof_handoff");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+
+    // 1. Initial launcher process alive -> is_running = true
+    let mut proc_initial = ManualChromeProcess::mock_with_handoff(&profile_dir, true, false);
+    assert!(proc_initial.is_running());
+
+    // 2. Launcher process exited, but handed-off Chrome process still active -> is_running remains true
+    let mut proc_handoff = ManualChromeProcess::mock_with_handoff(&profile_dir, false, true);
+    assert!(proc_handoff.is_running());
+
+    // 3. All Chrome processes for this profile exit -> is_running = false
+    let mut proc_exited = ManualChromeProcess::mock_with_handoff(&profile_dir, false, false);
+    assert!(!proc_exited.is_running());
+
+    // 4. Explicit close terminates both initial and handed off
+    let mut proc_close = ManualChromeProcess::mock_with_handoff(&profile_dir, true, true);
+    assert!(proc_close.is_running());
+    proc_close.close().unwrap();
+    assert!(!proc_close.is_running());
+}
+
+#[test]
+fn test_phase20a_63_close_login_browser_only_targets_managed_profile_pids() {
+    let temp_dir = tempdir().unwrap();
+    let profile_dir = temp_dir.path().join("prof_target_test");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+
+    // Safe execution check of pid killer with zero or current PID
+    ManualChromeProcess::kill_specific_pids(&[]);
+    ManualChromeProcess::kill_specific_pids(&[0]);
+
+    // Build args contains user-data-dir and no automation flags
+    let args = SystemChromeLauncher::build_manual_chrome_args(
+        &profile_dir,
+        "https://labs.google/fx/tools/flow",
+    );
+    assert!(args.iter().any(|a| a.contains("prof_target_test")));
+    for a in &args {
+        assert!(!a.contains("remote-debugging"));
+        assert!(!a.contains("enable-automation"));
+    }
 }

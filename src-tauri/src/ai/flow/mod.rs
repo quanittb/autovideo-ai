@@ -25,7 +25,9 @@ pub use manual_chrome::{ManualChromeProcess, SystemChromeLauncher};
 pub use mock_flow_server::{MockFlowServer, MockFlowServerHandle, MockScenario};
 pub use orchestrator::FlowOrchestrator;
 pub use output_validator::FlowOutputValidator;
-pub use playwright_bridge::{FlowPollResult, PlaywrightBridge, PlaywrightSidecarProcess};
+pub use playwright_bridge::{
+    FlowAuthStatus, FlowPollResult, PlaywrightBridge, PlaywrightSidecarProcess,
+};
 pub use profile::{FlowProfileGuard, FlowProfileInfo, FlowProfileManager, FlowProfileSnapshot};
 pub use prompt_optimizer::{
     calculate_prompt_hash, parse_google_error, GeminiCredentialManager, GeminiCredentialStatus,

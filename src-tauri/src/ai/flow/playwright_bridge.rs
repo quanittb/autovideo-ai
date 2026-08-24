@@ -199,6 +199,47 @@ pub fn resolve_sidecar_script_path() -> PathBuf {
     PathBuf::from("src-tauri/sidecars/flow-playwright/dist/index.js")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FlowAuthStatus {
+    Ready,
+    LoginRequired,
+    Unknown,
+    FlowUiChanged,
+    FlowEligibilityRequired,
+}
+
+impl FlowAuthStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ready => "READY",
+            Self::LoginRequired => "LOGIN_REQUIRED",
+            Self::Unknown => "UNKNOWN",
+            Self::FlowUiChanged => "FLOW_UI_CHANGED",
+            Self::FlowEligibilityRequired => "FLOW_ELIGIBILITY_REQUIRED",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.trim().to_uppercase().as_str() {
+            "READY" => Self::Ready,
+            "LOGIN_REQUIRED" | "LOGINREQUIRED" => Self::LoginRequired,
+            "FLOW_UI_CHANGED" | "FLOWUICHANGED" | "UI_CHANGED" => Self::FlowUiChanged,
+            "FLOW_ELIGIBILITY_REQUIRED"
+            | "FLOWELIGIBILITYREQUIRED"
+            | "ELIGIBILITY_REQUIRED"
+            | "USER_ACTION_REQUIRED" => Self::FlowEligibilityRequired,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl std::fmt::Display for FlowAuthStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PlaywrightBridge {
     mock_url: Option<String>,
@@ -297,7 +338,7 @@ impl PlaywrightBridge {
         })
     }
 
-    pub async fn check_auth_status(&self, profile_dir: &Path) -> Result<bool, String> {
+    pub async fn check_auth_status(&self, profile_dir: &Path) -> Result<FlowAuthStatus, String> {
         let url = self.target_url();
         self.validate_url_security(&url)?;
 
@@ -341,13 +382,26 @@ impl PlaywrightBridge {
 
         match auth_val {
             Ok(val) => {
-                let status = val
+                let status_str = val
                     .get("status")
                     .and_then(|v| v.as_str())
                     .unwrap_or("UNKNOWN");
-                Ok(status == "READY")
+                Ok(FlowAuthStatus::from_str_loose(status_str))
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                if e.contains("FLOW_UI_CHANGED") {
+                    Ok(FlowAuthStatus::FlowUiChanged)
+                } else if e.contains("FLOW_ELIGIBILITY_REQUIRED")
+                    || e.contains("ELIGIBILITY_REQUIRED")
+                    || e.contains("USER_ACTION_REQUIRED")
+                {
+                    Ok(FlowAuthStatus::FlowEligibilityRequired)
+                } else if e.contains("LOGIN_REQUIRED") {
+                    Ok(FlowAuthStatus::LoginRequired)
+                } else {
+                    Err(e)
+                }
+            }
         }
     }
 

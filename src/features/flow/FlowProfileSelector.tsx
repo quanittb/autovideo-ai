@@ -95,7 +95,19 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
       if (status === 'READY') {
         setActionFeedback('✓ Google Flow session verified (READY)');
       } else if (status === 'LOGIN_REQUIRED') {
-        setActionFeedback('Login required — please open Chrome to sign in.');
+        setActionFeedback('Google sign-in is required. Open Chrome for Login.');
+      } else if (status === 'FLOW_UI_CHANGED') {
+        setActionFeedback(
+          "Google session may be valid, but Flow's interface could not be recognized."
+        );
+      } else if (
+        status === 'FLOW_ELIGIBILITY_REQUIRED' ||
+        status === 'ELIGIBILITY_REQUIRED' ||
+        status === 'USER_ACTION_REQUIRED'
+      ) {
+        setActionFeedback(
+          'Google Flow requires account eligibility or account action. Complete the required action manually in Chrome.'
+        );
       } else {
         setActionFeedback(`Verification result: ${status}`);
       }
@@ -208,6 +220,18 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
                 <span className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-slate-800 border border-slate-700 text-amber-300 rounded-lg">
                   <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
                   Login Required
+                </span>
+              ) : selected.status === 'FLOW_UI_CHANGED' ? (
+                <span className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-purple-950/60 border border-purple-600/40 text-purple-300 rounded-lg">
+                  <AlertCircle className="w-3.5 h-3.5 text-purple-400" />
+                  Flow UI Changed
+                </span>
+              ) : selected.status === 'FLOW_ELIGIBILITY_REQUIRED' ||
+                selected.status === 'ELIGIBILITY_REQUIRED' ||
+                selected.status === 'USER_ACTION_REQUIRED' ? (
+                <span className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-amber-950/60 border border-amber-600/40 text-amber-300 rounded-lg">
+                  <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+                  Action Required
                 </span>
               ) : (
                 <span className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-slate-800 border border-slate-700 text-slate-400 rounded-lg">

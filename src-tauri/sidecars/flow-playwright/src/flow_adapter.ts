@@ -24,7 +24,13 @@ export interface PollResult {
 }
 
 export interface AuthStatusResult {
-  status: 'READY' | 'LOGIN_REQUIRED' | 'UNKNOWN';
+  status:
+    | 'READY'
+    | 'LOGIN_REQUIRED'
+    | 'UNKNOWN'
+    | 'FLOW_UI_CHANGED'
+    | 'FLOW_ELIGIBILITY_REQUIRED'
+    | 'USER_ACTION_REQUIRED';
 }
 
 export interface SubmitResult {
@@ -50,28 +56,22 @@ export class FlowUiAdapterV1 {
       acceptDownloads: true,
     };
 
-    if (params.runtimeMode === 'PRODUCTION_CHROME' || params.channel === 'chrome') {
+    if (params.runtimeMode === 'PRODUCTION_CHROME') {
       launchOptions.channel = 'chrome';
+    } else if (params.channel) {
+      launchOptions.channel = params.channel;
     }
 
     try {
       this.context = await chromium.launchPersistentContext(params.profilePath, launchOptions);
+      this.page = this.context.pages()[0] || (await this.context.newPage());
     } catch (err: any) {
       const errMsg = err?.message || String(err);
-      if (
-        errMsg.includes("Can't find chrome client") ||
-        errMsg.includes("Executable doesn't exist") ||
-        errMsg.includes('channel chrome')
-      ) {
-        throw new Error(
-          'CHROME_NOT_INSTALLED: Google Chrome Stable is not installed on this system. Please install Google Chrome to use Flow automation.'
-        );
+      if (errMsg.includes('Executable doesn\'t exist') || errMsg.includes('Cannot find installed Chrome')) {
+        throw new Error('CHROME_NOT_INSTALLED: Google Chrome Stable was not found. Please install Google Chrome to use Flow automation.');
       }
       throw err;
     }
-
-    const pages = this.context.pages();
-    this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
   }
 
   async navigateToFlow(flowUrl: string): Promise<void> {
@@ -83,36 +83,46 @@ export class FlowUiAdapterV1 {
     if (!this.page) throw new Error('Browser not launched');
 
     const currentUrl = this.page.url();
+
+    // 1. Authoritative positive evidence for LOGIN_REQUIRED
     if (
       currentUrl.includes('accounts.google.com') ||
       currentUrl.includes('ServiceLogin') ||
-      currentUrl.includes('signin')
+      currentUrl.includes('/signin')
     ) {
       return { status: 'LOGIN_REQUIRED' };
     }
 
     const content = await this.page.content();
 
-    // Check for explicit login required indicators
     if (
       content.includes('Sign in with Google') ||
       content.includes('Sign in - Google Accounts') ||
-      content.includes('login-prompt') ||
-      (await this.page.locator('.login-prompt, #login-button, a[href*="accounts.google.com"]').count()) > 0
+      content.includes('accounts.google.com/signin') ||
+      (await this.page.locator('.login-prompt, #login-button, a[href*="accounts.google.com/ServiceLogin"], a[href*="accounts.google.com/signin"]').count()) > 0
     ) {
       return { status: 'LOGIN_REQUIRED' };
     }
 
-    // Check for eligibility / user action required
+    // 2. Account eligibility / Action Required gates (fail-closed, requires manual account action)
+    const contentLower = content.toLowerCase();
     if (
-      content.includes('account not eligible') ||
-      content.includes('Age verification required') ||
-      content.includes('Identity verification required')
+      contentLower.includes('account not eligible') ||
+      contentLower.includes('age verification required') ||
+      contentLower.includes('identity verification required') ||
+      contentLower.includes('verify your age') ||
+      contentLower.includes('verify your identity') ||
+      contentLower.includes('subscription required') ||
+      contentLower.includes('country is not supported') ||
+      contentLower.includes('region is not supported') ||
+      contentLower.includes('join the waitlist') ||
+      contentLower.includes('request access') ||
+      (await this.page.locator('#eligibility-gate, .eligibility-alert, [data-testid="eligibility-gate"]').count()) > 0
     ) {
-      return { status: 'UNKNOWN' };
+      return { status: 'FLOW_ELIGIBILITY_REQUIRED' };
     }
 
-    // Check for explicit authenticated ready indicators
+    // 3. Authenticated Ready indicators
     const hasAppRoot = (await this.page.locator('#flow-app[data-authenticated="true"], #flow-app').count()) > 0;
     const hasPromptInput = (await this.page.locator('textarea#prompt-input, textarea[placeholder*="prompt" i]').count()) > 0;
 
@@ -120,7 +130,16 @@ export class FlowUiAdapterV1 {
       return { status: 'READY' };
     }
 
-    // Fail-closed: do not assume authenticated
+    // 4. Official Flow URL or Mock server without login redirect, but elements cannot be recognized
+    if (
+      currentUrl.includes('labs.google') ||
+      currentUrl.includes('127.0.0.1') ||
+      currentUrl.includes('localhost')
+    ) {
+      return { status: 'FLOW_UI_CHANGED' };
+    }
+
+    // Fail-closed fallback: do not assume login failure
     return { status: 'UNKNOWN' };
   }
 
