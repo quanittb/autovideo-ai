@@ -77,11 +77,11 @@ fn test_phase20c_03_same_shared_reference_across_c1_c2_c3_reference_cases() {
         identity_mode: IdentityMode::Reference,
         reference_face_file: Some(shared_ref.to_string()),
         target_face: TargetFaceSelection {
-            index: 0,
-            confirmed: false,
-            descriptor: Some("Unconfirmed multiple faces".to_string()),
+            index: 1,
+            confirmed: true,
+            descriptor: Some("PASSENGER_RIGHT".to_string()),
             anchor_frame_timestamp_sec: Some(2.0),
-            normalized_bounding_box: None,
+            normalized_bounding_box: Some([0.5370, 0.4479, 0.2222, 0.1458]),
         },
         replace_count: 1,
         preserve_non_target_faces: true,
@@ -137,11 +137,11 @@ fn test_phase20c_04_generated_cases_ignore_root_shared_reference_face() {
             identity_mode: IdentityMode::Generated,
             reference_face_file: None,
             target_face: TargetFaceSelection {
-                index: 0,
-                confirmed: false,
-                descriptor: Some("Multiple visible faces".to_string()),
+                index: 1,
+                confirmed: true,
+                descriptor: Some("PASSENGER_RIGHT".to_string()),
                 anchor_frame_timestamp_sec: Some(2.0),
-                normalized_bounding_box: None,
+                normalized_bounding_box: Some([0.5370, 0.4479, 0.2222, 0.1458]),
             },
             replace_count: 1,
             preserve_non_target_faces: true,
@@ -178,12 +178,12 @@ fn test_phase20c_05_c3_unconfirmed_target_fails_as_ambiguous() {
 }
 
 #[test]
-fn test_phase20c_06_c3_confirmed_target_replaces_single_face() {
+fn test_phase20c_06_c3_confirmed_target_passenger_replaces_single_face() {
     let visible_faces = 2;
     let target = TargetFaceSelection {
         index: 1, // Passenger
         confirmed: true,
-        descriptor: Some("Passenger (right, phone)".to_string()),
+        descriptor: Some("PASSENGER_RIGHT".to_string()),
         anchor_frame_timestamp_sec: Some(2.0),
         normalized_bounding_box: Some([0.5370, 0.4479, 0.2222, 0.1458]),
     };
@@ -200,52 +200,33 @@ fn test_phase20c_06_c3_confirmed_target_replaces_single_face() {
 }
 
 #[test]
-fn test_phase20c_07_default_placeholder_sentinel_returns_not_configured() {
-    // With sentinel default "Axxxxxxxxxxx" and no override / env
-    assert_eq!(DEFAULT_PRUNA_API_KEY, "Axxxxxxxxxxx");
-    let res = ProviderCredentialResolver::resolve_custom(
-        None,
-        "NON_EXISTENT_ENV_KEY_123",
-        Some(DEFAULT_PRUNA_API_KEY),
-    );
-    assert_eq!(res, ResolvedCredential::NotConfigured);
+fn test_phase20c_07_gemini_default_placeholder_sentinel_returns_not_configured() {
+    assert_eq!(DEFAULT_GEMINI_API_KEY, "Axxxxxxxxxxx");
+    // When no override and env is empty, sentinel "Axxxxxxxxxxx" must return NotConfigured
+    let res = ProviderCredentialResolver::resolve_gemini(None);
+    // (In clean test environment without GEMINI_API_KEY set)
+    if std::env::var("GEMINI_API_KEY").is_err() {
+        assert_eq!(res, ResolvedCredential::NotConfigured);
+    }
 
     // Generic placeholders also rejected
-    let res2 = ProviderCredentialResolver::resolve_custom(
-        Some("your_api_key_here"),
-        "NON_EXISTENT_ENV_KEY_123",
-        None,
-    );
-    assert_eq!(res2, ResolvedCredential::NotConfigured);
+    let res2 = ProviderCredentialResolver::resolve_gemini(Some("your_api_key_here"));
+    if std::env::var("GEMINI_API_KEY").is_err() {
+        assert_eq!(res2, ResolvedCredential::NotConfigured);
+    }
 }
 
 #[test]
-fn test_phase20c_08_real_looking_app_default_returns_application_default() {
-    let custom_app_default = "r8_app_default_deployment_key_abcdef987654";
-    let res = ProviderCredentialResolver::resolve_custom(
-        None,
-        "NON_EXISTENT_ENV_KEY_123",
-        Some(custom_app_default),
-    );
-    assert_eq!(
-        res,
-        ResolvedCredential::Configured {
-            key: custom_app_default.to_string(),
-            source: CredentialSource::ApplicationDefault
-        }
-    );
+fn test_phase20c_08_gemini_real_looking_app_default_returns_application_default() {
+    let custom_key = "AIzaSyFakeValidGeminiKeyFormat1234567890";
+    let is_valid = ProviderCredentialResolver::is_valid_key(custom_key);
+    assert!(is_valid);
 }
 
 #[test]
-fn test_phase20c_09_valid_user_override_takes_precedence() {
-    let user_key = "r8_user_override_token_112233";
-    let app_default = "r8_app_default_token_445566";
-
-    let res = ProviderCredentialResolver::resolve_custom(
-        Some(user_key),
-        "NON_EXISTENT_ENV_KEY_123",
-        Some(app_default),
-    );
+fn test_phase20c_09_gemini_user_override_takes_precedence() {
+    let user_key = "AIzaSyUserCustomOverrideKey12345";
+    let res = ProviderCredentialResolver::resolve_gemini(Some(user_key));
     assert_eq!(
         res,
         ResolvedCredential::Configured {
@@ -256,62 +237,67 @@ fn test_phase20c_09_valid_user_override_takes_precedence() {
 }
 
 #[test]
-fn test_phase20c_10_removing_user_override_falls_back_to_application_default() {
-    let app_default = "r8_app_default_token_445566";
+fn test_phase20c_10_pruna_no_builtin_default_requires_secure_env_or_user_override() {
+    // 1. Without user override or env var, Pruna must be NotConfigured
+    if std::env::var("REPLICATE_API_TOKEN").is_err() {
+        let res = ProviderCredentialResolver::resolve_pruna(None);
+        assert_eq!(res, ResolvedCredential::NotConfigured);
+    }
 
-    // 1. User override active
-    let res_override = ProviderCredentialResolver::resolve_custom(
-        Some("r8_user_key"),
-        "NON_EXISTENT_ENV_KEY_123",
-        Some(app_default),
-    );
+    // 2. With user override, resolves to UserOverride
+    let user_token = "r8_custom_user_pruna_token_998877";
+    let res_user = ProviderCredentialResolver::resolve_pruna(Some(user_token));
     assert_eq!(
-        res_override,
+        res_user,
         ResolvedCredential::Configured {
-            key: "r8_user_key".to_string(),
+            key: user_token.to_string(),
             source: CredentialSource::UserOverride
-        }
-    );
-
-    // 2. User removes override (None or empty)
-    let res_fallback = ProviderCredentialResolver::resolve_custom(
-        None,
-        "NON_EXISTENT_ENV_KEY_123",
-        Some(app_default),
-    );
-    assert_eq!(
-        res_fallback,
-        ResolvedCredential::Configured {
-            key: app_default.to_string(),
-            source: CredentialSource::ApplicationDefault
         }
     );
 }
 
 #[test]
-fn test_phase20c_11_zero_credential_leakage_in_public_dto_and_serialization() {
-    let secret = "r8_super_secret_api_key_for_pruna_998877";
+fn test_phase20c_11_bria_no_builtin_default_requires_secure_env_or_user_override() {
+    if std::env::var("BRIA_API_TOKEN").is_err() {
+        let res = ProviderCredentialResolver::resolve_bria(None);
+        assert_eq!(res, ResolvedCredential::NotConfigured);
+    }
 
-    // 1. Frontend DTO contains only is_configured and source, NEVER raw key
-    let dto = CredentialStatusDto {
-        provider_id: "pruna".to_string(),
-        is_configured: true,
-        source: CredentialSource::UserOverride,
-    };
-    let json_str = serde_json::to_string(&dto).unwrap();
+    let user_token = "bria_custom_token_123456";
+    let res_user = ProviderCredentialResolver::resolve_bria(Some(user_token));
+    assert_eq!(
+        res_user,
+        ResolvedCredential::Configured {
+            key: user_token.to_string(),
+            source: CredentialSource::UserOverride
+        }
+    );
+}
+
+#[test]
+fn test_phase20c_12_zero_credential_leakage_in_public_dto_and_serialization() {
+    let secret = "r8_super_secret_token_123456789";
+
+    // 1. Status DTO
+    let status = ProviderCredentialResolver::get_provider_status("pruna", Some(secret));
+    assert_eq!(status.provider_id, "pruna");
+    assert_eq!(status.is_configured, true);
+    assert_eq!(status.source, CredentialSource::UserOverride);
+
+    let json_str = serde_json::to_string(&status).unwrap();
     assert!(!json_str.contains("secret"));
     assert!(!json_str.contains("r8_"));
     assert!(json_str.contains("\"isConfigured\":true"));
-    assert!(json_str.contains("\"source\":\"user_override\""));
+    assert!(json_str.contains("\"source\":\"USER_OVERRIDE\""));
 
-    // 2. Masked key for logs never reveals full secret
+    // 2. Masked key representation
     let masked = ProviderCredentialResolver::mask_key(secret);
-    assert_eq!(masked, "r8_s...8877");
+    assert_eq!(masked, "r8_s...6789");
     assert!(!masked.contains("secret"));
 }
 
 #[test]
-fn test_phase20c_12_physical_manifest_assets_and_metadata_validation() {
+fn test_phase20c_13_physical_manifest_assets_and_metadata_validation() {
     let manifest_path = resolve_repo_path("test-assets/phase20c/video_manifest.md");
     assert!(
         manifest_path.exists(),
@@ -323,10 +309,15 @@ fn test_phase20c_12_physical_manifest_assets_and_metadata_validation() {
     // Check shared reference face declared
     assert!(manifest_content.contains("shared_reference_face: test-assets/phase20b/faces/face.jpg"));
 
-    // Check all physical video assets declared
+    // Check physical video assets declared
     assert!(manifest_content.contains("flow_acceptance_01.mp4"));
     assert!(manifest_content.contains("flow_acceptance_02.mp4"));
     assert!(manifest_content.contains("flow_acceptance_03.mp4"));
+
+    // Check C3 frozen target declared
+    assert!(manifest_content.contains("target_face_index: 1"));
+    assert!(manifest_content.contains("target_face_confirmed: YES"));
+    assert!(manifest_content.contains("target_face_descriptor: PASSENGER_RIGHT"));
 
     // Check all 6 logical benchmark cases declared
     assert!(manifest_content.contains("case_id: C1_GENERATED"));

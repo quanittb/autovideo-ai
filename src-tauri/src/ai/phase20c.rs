@@ -125,25 +125,27 @@ impl IdentityResolver {
 }
 
 // -----------------------------------------------------------------------------
-// Backend Credential Management & Application Default Credential Layer
+// Authoritative Credential Resolution Layer
 // -----------------------------------------------------------------------------
 
-/// Backend-isolated development placeholder for Pruna.
-/// If left as sentinel "Axxxxxxxxxxx", it is treated as NOT_CONFIGURED.
-pub const DEFAULT_PRUNA_API_KEY: &str = "Axxxxxxxxxxx";
+/// Authoritative isolated default key placeholder for Gemini Gen Prompt.
+/// When left as "Axxxxxxxxxxx", it is treated as GEMINI_API_KEY_NOT_CONFIGURED.
+pub const DEFAULT_GEMINI_API_KEY: &'static str = "Axxxxxxxxxxx";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CredentialSource {
-    UserOverride,
-    DeploymentDefault,
     ApplicationDefault,
+    UserOverride,
+    SecureDeployment,
     NotConfigured,
+    AuthenticatedProfile,
+    LoginRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CredentialStatusDto {
+pub struct ProviderCredentialStatusDto {
     pub provider_id: String,
     pub is_configured: bool,
     pub source: CredentialSource,
@@ -161,13 +163,12 @@ pub enum ResolvedCredential {
 pub struct ProviderCredentialResolver;
 
 impl ProviderCredentialResolver {
-    /// Resolves Pruna credential with strict precedence:
-    /// 1. Valid user override
-    /// 2. Deployment / Environment variable (`REPLICATE_API_TOKEN`)
-    /// 3. Application Default Development Credential (`DEFAULT_PRUNA_API_KEY`)
-    /// 4. NotConfigured (if sentinel "Axxxxxxxxxxx" or unconfigured)
-    pub fn resolve_pruna(user_override: Option<&str>) -> ResolvedCredential {
-        // 1. User override
+    /// Resolves Gemini Gen Prompt key:
+    /// 1. User override in Settings
+    /// 2. GEMINI_API_KEY environment variable (if non-empty and not sentinel)
+    /// 3. DEFAULT_GEMINI_API_KEY (if non-empty and not sentinel)
+    /// 4. NotConfigured
+    pub fn resolve_gemini(user_override: Option<&str>) -> ResolvedCredential {
         if let Some(key) = user_override {
             let trimmed = key.trim();
             if Self::is_valid_key(trimmed) {
@@ -178,19 +179,17 @@ impl ProviderCredentialResolver {
             }
         }
 
-        // 2. Deployment / Environment variable
-        if let Ok(env_val) = std::env::var("REPLICATE_API_TOKEN") {
+        if let Ok(env_val) = std::env::var("GEMINI_API_KEY") {
             let trimmed = env_val.trim();
             if Self::is_valid_key(trimmed) {
                 return ResolvedCredential::Configured {
                     key: trimmed.to_string(),
-                    source: CredentialSource::DeploymentDefault,
+                    source: CredentialSource::SecureDeployment,
                 };
             }
         }
 
-        // 3. Application Default
-        let app_default = DEFAULT_PRUNA_API_KEY.trim();
+        let app_default = DEFAULT_GEMINI_API_KEY.trim();
         if Self::is_valid_key(app_default) {
             return ResolvedCredential::Configured {
                 key: app_default.to_string(),
@@ -201,12 +200,11 @@ impl ProviderCredentialResolver {
         ResolvedCredential::NotConfigured
     }
 
-    /// Resolves generic API key given custom app default and env variable name (for testing/custom providers).
-    pub fn resolve_custom(
-        user_override: Option<&str>,
-        env_var_name: &str,
-        app_default_key: Option<&str>,
-    ) -> ResolvedCredential {
+    /// Resolves Pruna credential:
+    /// 1. Secure user override
+    /// 2. REPLICATE_API_TOKEN secure deployment credential
+    /// 3. NotConfigured (NO application hardcoded default key)
+    pub fn resolve_pruna(user_override: Option<&str>) -> ResolvedCredential {
         if let Some(key) = user_override {
             let trimmed = key.trim();
             if Self::is_valid_key(trimmed) {
@@ -217,22 +215,12 @@ impl ProviderCredentialResolver {
             }
         }
 
-        if let Ok(env_val) = std::env::var(env_var_name) {
+        if let Ok(env_val) = std::env::var("REPLICATE_API_TOKEN") {
             let trimmed = env_val.trim();
             if Self::is_valid_key(trimmed) {
                 return ResolvedCredential::Configured {
                     key: trimmed.to_string(),
-                    source: CredentialSource::DeploymentDefault,
-                };
-            }
-        }
-
-        if let Some(app_default) = app_default_key {
-            let trimmed = app_default.trim();
-            if Self::is_valid_key(trimmed) {
-                return ResolvedCredential::Configured {
-                    key: trimmed.to_string(),
-                    source: CredentialSource::ApplicationDefault,
+                    source: CredentialSource::SecureDeployment,
                 };
             }
         }
@@ -240,16 +228,83 @@ impl ProviderCredentialResolver {
         ResolvedCredential::NotConfigured
     }
 
-    /// Returns a frontend-safe status DTO with zero credential leakage.
-    pub fn get_pruna_status(user_override: Option<&str>) -> CredentialStatusDto {
-        match Self::resolve_pruna(user_override) {
-            ResolvedCredential::Configured { source, .. } => CredentialStatusDto {
-                provider_id: "pruna".to_string(),
-                is_configured: true,
-                source,
+    /// Resolves BRIA credential:
+    /// 1. Secure user override
+    /// 2. BRIA_API_TOKEN secure deployment credential
+    /// 3. NotConfigured (NO application hardcoded default key)
+    pub fn resolve_bria(user_override: Option<&str>) -> ResolvedCredential {
+        if let Some(key) = user_override {
+            let trimmed = key.trim();
+            if Self::is_valid_key(trimmed) {
+                return ResolvedCredential::Configured {
+                    key: trimmed.to_string(),
+                    source: CredentialSource::UserOverride,
+                };
+            }
+        }
+
+        if let Ok(env_val) = std::env::var("BRIA_API_TOKEN") {
+            let trimmed = env_val.trim();
+            if Self::is_valid_key(trimmed) {
+                return ResolvedCredential::Configured {
+                    key: trimmed.to_string(),
+                    source: CredentialSource::SecureDeployment,
+                };
+            }
+        }
+
+        ResolvedCredential::NotConfigured
+    }
+
+    /// Returns a frontend-safe status DTO for any provider with zero credential leakage.
+    pub fn get_provider_status(
+        provider_id: &str,
+        user_override: Option<&str>,
+    ) -> ProviderCredentialStatusDto {
+        match provider_id {
+            "gemini" => match Self::resolve_gemini(user_override) {
+                ResolvedCredential::Configured { source, .. } => ProviderCredentialStatusDto {
+                    provider_id: "gemini".to_string(),
+                    is_configured: true,
+                    source,
+                },
+                ResolvedCredential::NotConfigured => ProviderCredentialStatusDto {
+                    provider_id: "gemini".to_string(),
+                    is_configured: false,
+                    source: CredentialSource::NotConfigured,
+                },
             },
-            ResolvedCredential::NotConfigured => CredentialStatusDto {
-                provider_id: "pruna".to_string(),
+            "pruna" => match Self::resolve_pruna(user_override) {
+                ResolvedCredential::Configured { source, .. } => ProviderCredentialStatusDto {
+                    provider_id: "pruna".to_string(),
+                    is_configured: true,
+                    source,
+                },
+                ResolvedCredential::NotConfigured => ProviderCredentialStatusDto {
+                    provider_id: "pruna".to_string(),
+                    is_configured: false,
+                    source: CredentialSource::NotConfigured,
+                },
+            },
+            "bria" => match Self::resolve_bria(user_override) {
+                ResolvedCredential::Configured { source, .. } => ProviderCredentialStatusDto {
+                    provider_id: "bria".to_string(),
+                    is_configured: true,
+                    source,
+                },
+                ResolvedCredential::NotConfigured => ProviderCredentialStatusDto {
+                    provider_id: "bria".to_string(),
+                    is_configured: false,
+                    source: CredentialSource::NotConfigured,
+                },
+            },
+            "flow" => ProviderCredentialStatusDto {
+                provider_id: "flow".to_string(),
+                is_configured: true,
+                source: CredentialSource::AuthenticatedProfile,
+            },
+            other => ProviderCredentialStatusDto {
+                provider_id: other.to_string(),
                 is_configured: false,
                 source: CredentialSource::NotConfigured,
             },
@@ -261,7 +316,8 @@ impl ProviderCredentialResolver {
             return false;
         }
         // Reject common template placeholders and sentinels
-        if key.starts_with("Axxxx")
+        if key == DEFAULT_GEMINI_API_KEY
+            || key.starts_with("Axxxx")
             || key == "your_api_key_here"
             || key == "PLACEHOLDER"
             || key

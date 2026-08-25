@@ -54,7 +54,7 @@ replace_count: 1
 
 ### C3 Physical Asset
 video_file: test-assets/phase20c/videos/flow_acceptance_03.mp4
-description: multiple visible people, replace exactly ONE selected target face
+description: multiple visible people, replace exactly ONE selected target face (Passenger / Right)
 sha256: C2D030FCE3788E29C808B117A087F239D1E4B92B583EA9999CAF5191F76838DA
 file_size: 5567429
 container_duration: 9.898667
@@ -67,9 +67,13 @@ fps: 30.00
 frame_count: 297
 video_codec: h264
 audio_codec: aac
-visible_face_count: multiple
-target_face_index: REQUIRED_MANUAL_VALUE
-target_face_confirmed: NO
+visible_face_count: 2
+target_face_index: 1
+target_face_confirmed: YES
+target_face_descriptor: PASSENGER_RIGHT
+target_description: Right passenger seat, black jacket, holding mobile phone, front / 3-quarter view, talking to driver.
+anchor_frame_timestamp_sec: 2.0
+normalized_bounding_box: [0.5370, 0.4479, 0.2222, 0.1458]
 replace_count: 1
 preserve_non_target_faces: true
 
@@ -123,8 +127,11 @@ video_file: test-assets/phase20c/videos/flow_acceptance_03.mp4
 transformation_intent: FACE_REPLACE
 identity_mode: GENERATED
 reference_face_file: null
-target_face_index: REQUIRED_MANUAL_VALUE
-target_face_confirmed: NO
+target_face_index: 1
+target_face_confirmed: YES
+target_face_descriptor: PASSENGER_RIGHT
+anchor_frame_timestamp_sec: 2.0
+normalized_bounding_box: [0.5370, 0.4479, 0.2222, 0.1458]
 replace_count: 1
 preserve_non_target_faces: true
 
@@ -134,7 +141,10 @@ video_file: test-assets/phase20c/videos/flow_acceptance_03.mp4
 transformation_intent: FACE_REPLACE
 identity_mode: REFERENCE
 reference_face_file: test-assets/phase20b/faces/face.jpg
-target_face_index: REQUIRED_MANUAL_VALUE
-target_face_confirmed: NO
+target_face_index: 1
+target_face_confirmed: YES
+target_face_descriptor: PASSENGER_RIGHT
+anchor_frame_timestamp_sec: 2.0
+normalized_bounding_box: [0.5370, 0.4479, 0.2222, 0.1458]
 replace_count: 1
 preserve_non_target_faces: true
