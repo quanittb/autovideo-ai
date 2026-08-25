@@ -985,7 +985,7 @@ export interface SegmentedCloudSubmissionPreflight {
 // Flow Subsystem Types & API
 // -----------------------------------------------------------------------------
 
-export type PromptSource = 'USER' | 'GEMINI_OPTIMIZED' | 'GEMINI_OPTIMIZED_THEN_EDITED';
+export type PromptSource = 'USER' | 'GEMINI_OPTIMIZED' | 'GEMINI_OPTIMIZED_THEN_EDITED' | 'SYSTEM_DEFAULT';
 
 export type FlowJobState =
   | 'PLANNING'
@@ -1044,7 +1044,8 @@ export type GeminiVerificationStatus =
   | 'PROVIDER_TEMPORARY_FAILURE'
   | 'NETWORK_ERROR'
   | 'TIMEOUT'
-  | 'UNKNOWN';
+  | 'UNKNOWN'
+  | 'BLOCKED';
 
 export type GeminiCredentialSource =
   | 'USER_OVERRIDE'
@@ -1117,6 +1118,9 @@ export interface FlowJobSnapshot {
   submittedPrompt: string;
   promptHash: string;
   promptSource: PromptSource;
+  transformationIntent?: TransformationIntent;
+  identityMode?: IdentityMode;
+  targetFace?: TargetFaceSelection;
   state: FlowJobState;
   stateRevision: number;
   activeSegmentIndex: number;
@@ -1124,6 +1128,7 @@ export interface FlowJobSnapshot {
   estimatedCredits: number;
   observedCreditBalance?: number;
   creditBudgetLimit?: number;
+  reservedCredits?: number;
   completedGenerations: number;
   finalOutputReady: boolean;
   finalOutputPath?: string;
@@ -1216,6 +1221,12 @@ export const flowApi = {
   revealOutputInFolder: (projectId: string, parentId: string): Promise<string> =>
     invoke('reveal_flow_output_in_folder', { projectId, parentId }),
 
-  useOutputInProject: (projectId: string, parentId: string): Promise<string> =>
+  useOutputInProject: (projectId: string, parentId: string): Promise<import('../types/contracts').UseFlowOutputResult> =>
     invoke('use_flow_output_in_project', { projectId, parentId }),
+
+  useInProject: (projectId: string, parentId: string): Promise<import('../types/contracts').UseFlowOutputResult> =>
+    invoke('use_flow_output_in_project', { projectId, parentId }),
+
+  authorizeProjectMediaPreview: (projectId: string, mediaId?: string): Promise<string> =>
+    invoke('authorize_project_media_preview', { projectId, mediaId }),
 };

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Play, Sparkles, AlertCircle, Info, RefreshCw, Folder, LogIn, ExternalLink } from 'lucide-react';
+import { Play, Sparkles, AlertCircle, Info, RefreshCw, Folder, LogIn, ExternalLink, Film } from 'lucide-react';
 import { useFlowJobStore } from '../../stores/flowJobStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { usePromptOptimization } from './usePromptOptimization';
@@ -22,6 +22,7 @@ export const FlowGenPanel: React.FC = () => {
     selectProfile,
     openProfileBrowser,
     loadGeminiStatus,
+    loadFlowJobs,
     startFlowJob,
     pollJobStatus,
   } = useFlowJobStore();
@@ -44,7 +45,7 @@ export const FlowGenPanel: React.FC = () => {
     handleGenPrompt,
     handleUndo,
   } = usePromptOptimization({
-    initialPrompt: 'Transform character into a neon-lit cyber guardian while preserving realistic background motion',
+    initialPrompt: '',
     taskType: 'FLOW_VIDEO_EDIT',
     transformationIntent,
     identityMode: 'GENERATED',
@@ -61,12 +62,42 @@ export const FlowGenPanel: React.FC = () => {
   }, [loadProfiles, loadGeminiStatus]);
 
   useEffect(() => {
-    if (activeProject?.sourceAsset?.id) {
-      setSelectedMediaId(activeProject.sourceAsset.id);
-    } else if (activeProject?.sourceMedia?.sourcePath) {
-      setSelectedMediaId(activeProject.sourceMedia.sourcePath);
+    if (projectId) {
+      loadFlowJobs(projectId);
     }
-  }, [activeProject]);
+  }, [projectId, loadFlowJobs]);
+
+  const availableMediaList: { id: string; label: string; isDerived: boolean; durationSec: number }[] = [];
+  if (activeProject?.sourceMedia) {
+    availableMediaList.push({
+      id: activeProject.sourceMedia.mediaId,
+      label: `Original: ${activeProject.sourceMedia.originalFileName}`,
+      isDerived: false,
+      durationSec: Math.round(activeProject.sourceMedia.durationMs / 1000),
+    });
+  }
+  if (activeProject?.derivedMediaAssets) {
+    activeProject.derivedMediaAssets.forEach((d, idx) => {
+      availableMediaList.push({
+        id: d.media.mediaId,
+        label: `Flow Derived #${idx + 1}: ${d.media.originalFileName}`,
+        isDerived: true,
+        durationSec: Math.round(d.media.durationMs / 1000),
+      });
+    });
+  }
+
+  useEffect(() => {
+    if (activeProject?.editorState?.activeMediaId) {
+      setSelectedMediaId(activeProject.editorState.activeMediaId);
+    } else if (activeProject?.sourceMedia?.mediaId) {
+      setSelectedMediaId(activeProject.sourceMedia.mediaId);
+    } else if (availableMediaList.length > 0) {
+      setSelectedMediaId(availableMediaList[0].id);
+    } else {
+      setSelectedMediaId('');
+    }
+  }, [activeProject?.id, activeProject?.editorState?.activeMediaId, activeProject?.sourceMedia?.mediaId]);
 
   // Polling active job
   useEffect(() => {
@@ -75,7 +106,12 @@ export const FlowGenPanel: React.FC = () => {
       activeJob.state === 'COMPLETED' ||
       activeJob.state === 'FAILED' ||
       activeJob.state === 'CANCELLED' ||
-      activeJob.state === 'BLOCKED'
+      activeJob.state === 'BLOCKED' ||
+      activeJob.state === 'LOGIN_REQUIRED' ||
+      activeJob.state === 'CREDITS_REQUIRED' ||
+      activeJob.state === 'FLOW_UI_CHANGED' ||
+      activeJob.state === 'GENERATION_AMBIGUOUS' ||
+      activeJob.state === 'USER_ACTION_REQUIRED'
     ) {
       return;
     }
@@ -87,8 +123,11 @@ export const FlowGenPanel: React.FC = () => {
     return () => clearInterval(timer);
   }, [activeJob, projectId, pollJobStatus]);
 
+  const isPromptValid =
+    transformationIntent === 'FACE_REPLACE' ? true : prompt.trim().length > 0;
+
   const handleStartGeneration = async () => {
-    if (!projectId || !selectedProfileId || !prompt.trim() || !selectedMediaId.trim()) return;
+    if (!projectId || !selectedProfileId || !selectedMediaId.trim() || !isPromptValid) return;
 
     const maxCredits = maxCreditsInput.trim() ? parseInt(maxCreditsInput.trim(), 10) : undefined;
 
@@ -134,6 +173,7 @@ export const FlowGenPanel: React.FC = () => {
           onClick={() => {
             loadProfiles();
             loadGeminiStatus();
+            if (projectId) loadFlowJobs(projectId);
           }}
           className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200 bg-slate-900 border border-slate-800 rounded-lg hover:border-slate-700 transition cursor-pointer"
         >
@@ -181,28 +221,45 @@ export const FlowGenPanel: React.FC = () => {
         <div className="flex flex-col gap-2 p-4 bg-slate-900/60 border border-slate-800 rounded-xl">
           <div className="flex items-center gap-2">
             <Folder className="w-4 h-4 text-indigo-400" />
-            <span className="text-sm font-semibold text-slate-200">Project Source Media</span>
+            <span className="text-sm font-semibold text-slate-200">Project Working Media</span>
           </div>
 
           {!activeProject ? (
             <div className="p-3 bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs rounded-lg">
               No active project loaded. Please open or create a project to select source video.
             </div>
+          ) : availableMediaList.length === 0 ? (
+            <div className="p-3 bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs rounded-lg">
+              Please import a video into this project before starting Google Flow generation.
+            </div>
           ) : (
-            <div className="flex flex-col gap-1.5 text-xs text-slate-400">
-              <div className="flex items-center justify-between">
+            <div className="flex flex-col gap-2 text-xs">
+              <div className="flex items-center justify-between text-slate-400">
                 <span>Active Project:</span>
                 <strong className="text-slate-200">{activeProject.name}</strong>
               </div>
-              <div className="flex items-center justify-between">
-                <span>Source Media:</span>
-                <strong className="text-slate-200 truncate max-w-[200px]">{selectedMediaId || 'No media imported'}</strong>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] text-slate-400 font-medium flex items-center gap-1">
+                  <Film className="w-3.5 h-3.5 text-indigo-400" />
+                  Select Working Media (Original or Derived):
+                </label>
+                <select
+                  value={selectedMediaId}
+                  onChange={(e) => setSelectedMediaId(e.target.value)}
+                  className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-indigo-500 font-sans"
+                >
+                  {availableMediaList.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label} ({m.durationSec}s)
+                    </option>
+                  ))}
+                </select>
               </div>
-              {!selectedMediaId && (
-                <span className="text-xs text-amber-400 mt-1">
-                  Please import a video into this project before starting Google Flow generation.
-                </span>
-              )}
+
+              <div className="text-[11px] text-slate-500 font-mono">
+                mediaId: {selectedMediaId || 'none'}
+              </div>
             </div>
           )}
         </div>
@@ -304,7 +361,7 @@ export const FlowGenPanel: React.FC = () => {
             !isProfileReady ||
             isManualBrowserOpen ||
             isProfileLocked ||
-            !prompt.trim() ||
+            !isPromptValid ||
             !selectedMediaId ||
             isStarting ||
             (activeJob !== null && activeJob.state !== 'COMPLETED' && activeJob.state !== 'FAILED' && activeJob.state !== 'CANCELLED')

@@ -195,6 +195,7 @@ pub fn run() {
             open_flow_output_artifact,
             reveal_flow_output_in_folder,
             use_flow_output_in_project,
+            authorize_project_media_preview,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

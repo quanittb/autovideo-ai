@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { FlowJobSnapshot, FlowJobState } from '../../lib/ipc';
 import { useFlowJobStore } from '../../stores/flowJobStore';
+import { useProjectStore } from '../../stores/projectStore';
 
 interface FlowJobProgressProps {
   job: FlowJobSnapshot;
@@ -20,8 +21,15 @@ interface FlowJobProgressProps {
 export const FlowJobProgress: React.FC<FlowJobProgressProps> = ({ job }) => {
   const { cancelFlowJob, openOutputArtifact, revealOutputInFolder, useOutputInProject } =
     useFlowJobStore();
+  const { activeProject, setActiveProject } = useProjectStore();
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [isActing, setIsActing] = useState(false);
+
+  const isAlreadyAdded = Boolean(
+    activeProject?.derivedMediaAssets?.some(
+      (d) => d.provenance.provider === 'FLOW' && d.provenance.providerJobId === job.parentId
+    )
+  );
 
   const getFriendlyStateLabel = (state: FlowJobState, currentIdx: number, total: number) => {
     switch (state) {
@@ -138,8 +146,9 @@ export const FlowJobProgress: React.FC<FlowJobProgressProps> = ({ job }) => {
     setIsActing(true);
     setActionMessage(null);
     try {
-      const derivedPath = await useOutputInProject(job.projectId, job.parentId);
-      setActionMessage(`Imported as derived asset: ${derivedPath}`);
+      const result = await useOutputInProject(job.projectId, job.parentId);
+      setActiveProject(result.project);
+      setActionMessage(`Added to project as working media: ${result.derivedAsset.media.originalFileName}`);
     } catch (err: any) {
       setActionMessage(typeof err === 'string' ? err : err?.message || 'Failed to import in project');
     } finally {
@@ -245,11 +254,11 @@ export const FlowJobProgress: React.FC<FlowJobProgressProps> = ({ job }) => {
 
               <button
                 onClick={handleUseInProject}
-                disabled={isActing}
-                className="px-2.5 py-1 rounded bg-indigo-700 hover:bg-indigo-600 border border-indigo-500 text-white text-xs flex items-center gap-1 transition cursor-pointer"
+                disabled={isActing || isAlreadyAdded}
+                className="px-2.5 py-1 rounded bg-indigo-700 hover:bg-indigo-600 disabled:bg-indigo-950 disabled:border-indigo-800 disabled:text-indigo-300 border border-indigo-500 text-white text-xs flex items-center gap-1 transition cursor-pointer"
               >
                 <PlusCircle className="w-3 h-3" />
-                <span>Use in Project</span>
+                <span>{isAlreadyAdded ? 'Added to Project' : 'Use in Project'}</span>
               </button>
             </div>
           </div>

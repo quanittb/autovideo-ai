@@ -252,7 +252,7 @@ impl FlowOrchestrator {
             TransformationIntent::FaceReplace => {
                 if identity_mode == IdentityMode::Reference {
                     return Err(
-                        "FLOW_CAPABILITY_UNSUPPORTED: Face replacement with custom reference image is not supported by standard Flow generation".to_string(),
+                        "FLOW_REFERENCE_IDENTITY_NOT_SUPPORTED: Face replacement with custom reference image is not supported by Google Flow".to_string(),
                     );
                 }
             }
@@ -260,13 +260,18 @@ impl FlowOrchestrator {
         }
 
         let mut clean_prompt = request.prompt.trim().to_string();
-        if clean_prompt.is_empty() {
-            if intent == TransformationIntent::FaceReplace {
-                clean_prompt = "Replace only the selected target person's facial identity with a new, temporally consistent synthetic identity. Preserve: body, clothing, hair where practical, pose, expression dynamics, mouth movement, head movement, action, camera motion, background, lighting, composition, timing, and all non-target people.".to_string();
+        let resolved_prompt_source = if clean_prompt.is_empty() {
+            if intent == TransformationIntent::FaceReplace
+                && identity_mode == IdentityMode::Generated
+            {
+                clean_prompt = "Replace only the selected target person's facial identity with a new, temporally consistent synthetic identity. Strictly preserve: body, clothing, hair where practical, pose, expression dynamics, mouth movement, head movement, action, camera motion, background, lighting, composition, timing, and all non-target people.".to_string();
+                PromptSource::SystemDefault
             } else {
-                return Err("REQUEST_INVALID: Prompt cannot be empty".to_string());
+                return Err("REQUEST_INVALID: Prompt cannot be empty for non-default transformation intents".to_string());
             }
-        }
+        } else {
+            request.prompt_source.unwrap_or(PromptSource::User)
+        };
 
         if !canonical_source_path.exists() {
             return Err(format!(
@@ -299,7 +304,6 @@ impl FlowOrchestrator {
         let client_request_id = format!("req_{}", Utc::now().timestamp_millis());
         let submitted_prompt = clean_prompt.clone();
         let prompt_hash = calculate_prompt_hash(&submitted_prompt);
-        let source_provenance = request.prompt_source.unwrap_or(PromptSource::User);
 
         // Derive deterministic config hash
         let mut hasher = Sha256::new();
@@ -328,18 +332,31 @@ impl FlowOrchestrator {
             codec: "aac".to_string(),
         };
 
+        let source_file_name = canonical_source_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .map(|s| s.to_string());
+        let source_media_id = if request.source_media_id.trim().is_empty() {
+            None
+        } else {
+            Some(request.source_media_id.clone())
+        };
+
         let mut manifest = FlowGenerationManifest::new(
             parent_id.clone(),
             client_request_id,
             request.project_id.clone(),
             request.profile_id,
             config_hash,
-            None,
-            prompt_hash,
-            None,
+            source_media_id,
+            prompt_hash.clone(),
+            source_file_name,
+            intent,
+            identity_mode,
+            request.target_face.clone(),
             submitted_prompt,
-            calculate_prompt_hash(&clean_prompt),
-            source_provenance,
+            prompt_hash,
+            resolved_prompt_source,
             self.capability_policy.capability_policy_version,
             self.capability_policy.split_policy_version,
             facts.clone(),

@@ -11,6 +11,7 @@ pub enum PromptSource {
     User,
     GeminiOptimized,
     GeminiOptimizedThenEdited,
+    SystemDefault,
 }
 
 impl Default for PromptSource {
@@ -25,6 +26,7 @@ impl PromptSource {
             Self::User => "USER",
             Self::GeminiOptimized => "GEMINI_OPTIMIZED",
             Self::GeminiOptimizedThenEdited => "GEMINI_OPTIMIZED_THEN_EDITED",
+            Self::SystemDefault => "SYSTEM_DEFAULT",
         }
     }
 }

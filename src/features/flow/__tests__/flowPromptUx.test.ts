@@ -6,6 +6,7 @@ vi.mock('../../../lib/ipc', () => ({
   flowApi: {
     optimizePrompt: vi.fn(),
     startFlowGeneration: vi.fn(),
+    startGeneration: vi.fn(),
     listProfiles: vi.fn(),
     getGeminiStatus: vi.fn(),
     getFlowJobStatus: vi.fn(),
@@ -252,8 +253,8 @@ describe('Frontend Prompt UX Behavioral Tests (Phase 20A)', () => {
   });
 
   it('11. Generate Video -> exact current editor prompt submitted', async () => {
-    vi.mocked(flowApi.startFlowGeneration).mockResolvedValueOnce({
-      parentId: 'flow_exact_1',
+    vi.mocked(flowApi.startGeneration).mockResolvedValueOnce({
+      parentId: 'flow_frozen',
       projectId: 'proj_1',
       profileId: 'prof_1',
       submittedPrompt: 'Exact current editor prompt string',
@@ -279,15 +280,17 @@ describe('Frontend Prompt UX Behavioral Tests (Phase 20A)', () => {
         'prof_1',
         'Exact current editor prompt string',
         'GEMINI_OPTIMIZED_THEN_EDITED',
-        '/data/source.mp4'
+        'media_001'
       );
 
-    expect(flowApi.startFlowGeneration).toHaveBeenCalledWith(
-      'proj_1',
-      'prof_1',
-      'Exact current editor prompt string',
-      'GEMINI_OPTIMIZED_THEN_EDITED',
-      '/data/source.mp4'
+    expect(flowApi.startGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: 'proj_1',
+        profileId: 'prof_1',
+        prompt: 'Exact current editor prompt string',
+        promptSource: 'GEMINI_OPTIMIZED_THEN_EDITED',
+        sourceMediaId: 'media_001',
+      })
     );
   });
 

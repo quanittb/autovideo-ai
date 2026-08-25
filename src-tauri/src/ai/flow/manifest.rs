@@ -7,7 +7,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const CURRENT_FLOW_MANIFEST_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_FLOW_MANIFEST_SCHEMA_VERSION: u32 = 3;
 
 // -----------------------------------------------------------------------------
 // 1. 21-State Flow Machine
@@ -34,14 +34,14 @@ pub enum FlowJobState {
 
     Stitching,
     ValidatingFinal,
-    Completed,
 
-    CreditsRequired,
-    UserActionRequired,
-    FlowUiChanged,
-    Blocked,
+    Completed,
     Failed,
     Cancelled,
+    Blocked,
+    CreditsRequired,
+    FlowUiChanged,
+    UserActionRequired,
 }
 
 impl FlowJobState {
@@ -194,6 +194,12 @@ pub struct FlowGenerationManifest {
     pub source_media_id: Option<String>,
     pub source_content_hash: String,
     pub source_file_name: Option<String>,
+    #[serde(default)]
+    pub transformation_intent: crate::ai::transformation::TransformationIntent,
+    #[serde(default)]
+    pub identity_mode: crate::ai::transformation::IdentityMode,
+    #[serde(default)]
+    pub target_face: Option<crate::ai::transformation::TargetFaceSelection>,
     pub submitted_prompt: String,
     pub prompt_hash: String,
     pub prompt_source: PromptSource,
@@ -222,6 +228,9 @@ impl FlowGenerationManifest {
         source_media_id: Option<String>,
         source_content_hash: String,
         source_file_name: Option<String>,
+        transformation_intent: crate::ai::transformation::TransformationIntent,
+        identity_mode: crate::ai::transformation::IdentityMode,
+        target_face: Option<crate::ai::transformation::TargetFaceSelection>,
         submitted_prompt: String,
         prompt_hash: String,
         prompt_source: PromptSource,
@@ -244,6 +253,9 @@ impl FlowGenerationManifest {
             source_media_id,
             source_content_hash,
             source_file_name,
+            transformation_intent,
+            identity_mode,
+            target_face,
             submitted_prompt,
             prompt_hash,
             prompt_source,
@@ -279,6 +291,9 @@ impl FlowGenerationManifest {
             submitted_prompt: self.submitted_prompt.clone(),
             prompt_hash: self.prompt_hash.clone(),
             prompt_source: self.prompt_source,
+            transformation_intent: Some(self.transformation_intent),
+            identity_mode: Some(self.identity_mode),
+            target_face: self.target_face.clone(),
             state: self.state,
             state_revision: self.state_revision,
             active_segment_index: self.active_segment_index,
@@ -286,6 +301,7 @@ impl FlowGenerationManifest {
             estimated_credits: self.credit_record.estimated_credits,
             observed_credit_balance: self.credit_record.observed_credit_balance,
             credit_budget_limit: self.credit_record.credit_budget_limit,
+            reserved_credits: self.credit_record.reserved_credits,
             completed_generations: self.credit_record.completed_generations,
             final_output_ready: self.final_output.is_some(),
             final_output_path: self
@@ -312,6 +328,12 @@ pub struct FlowJobSnapshot {
     pub submitted_prompt: String,
     pub prompt_hash: String,
     pub prompt_source: PromptSource,
+    #[serde(default)]
+    pub transformation_intent: Option<crate::ai::transformation::TransformationIntent>,
+    #[serde(default)]
+    pub identity_mode: Option<crate::ai::transformation::IdentityMode>,
+    #[serde(default)]
+    pub target_face: Option<crate::ai::transformation::TargetFaceSelection>,
     pub state: FlowJobState,
     pub state_revision: u64,
     pub active_segment_index: usize,
@@ -319,6 +341,8 @@ pub struct FlowJobSnapshot {
     pub estimated_credits: u32,
     pub observed_credit_balance: Option<u32>,
     pub credit_budget_limit: Option<u32>,
+    #[serde(default)]
+    pub reserved_credits: u32,
     pub completed_generations: u32,
     pub final_output_ready: bool,
     pub final_output_path: Option<String>,

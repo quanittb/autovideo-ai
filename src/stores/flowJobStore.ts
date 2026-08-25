@@ -10,12 +10,14 @@ import {
   IdentityMode,
   TargetFaceSelection,
 } from '../lib/ipc';
+import { UseFlowOutputResult } from '../types/contracts';
 
 interface FlowJobStoreState {
   profiles: FlowProfileInfo[];
   selectedProfileId: string | null;
   geminiStatus: GeminiCredentialStatus | null;
   activeJob: FlowJobSnapshot | null;
+  jobs: FlowJobSnapshot[];
   isStarting: boolean;
   isLoadingProfiles: boolean;
   error: string | null;
@@ -29,6 +31,7 @@ interface FlowJobStoreState {
   refreshProfileStatus: (profileId: string) => Promise<string>;
   loadGeminiStatus: () => Promise<void>;
   testGeminiApiKey: () => Promise<GeminiCredentialStatus>;
+  loadFlowJobs: (projectId: string) => Promise<void>;
   startFlowJob: (
     projectId: string,
     profileId: string,
@@ -47,7 +50,7 @@ interface FlowJobStoreState {
   pollJobStatus: (projectId: string, parentId: string) => Promise<void>;
   openOutputArtifact: (projectId: string, parentId: string) => Promise<string>;
   revealOutputInFolder: (projectId: string, parentId: string) => Promise<string>;
-  useOutputInProject: (projectId: string, parentId: string) => Promise<string>;
+  useOutputInProject: (projectId: string, parentId: string) => Promise<UseFlowOutputResult>;
   clearError: () => void;
 }
 
@@ -56,6 +59,7 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
   selectedProfileId: null,
   geminiStatus: null,
   activeJob: null,
+  jobs: [],
   isStarting: false,
   isLoadingProfiles: false,
   error: null,
@@ -173,6 +177,16 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
     return status;
   },
 
+  loadFlowJobs: async (projectId: string) => {
+    if (!projectId) return;
+    try {
+      const jobs = await flowApi.listFlowJobs(projectId);
+      set({ jobs });
+    } catch (err) {
+      // Ignored non-blocking
+    }
+  },
+
   startFlowJob: async (
     projectId,
     profileId,
@@ -195,16 +209,12 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
         maxCredits: options?.maxCredits,
         preserveOriginalAudio: options?.preserveOriginalAudio,
       };
-      const job = options
-        ? await flowApi.startGeneration(req)
-        : await flowApi.startFlowGeneration(
-            projectId,
-            profileId,
-            prompt,
-            promptSource,
-            sourceMediaId
-          );
-      set({ activeJob: job, isStarting: false });
+      const job = await flowApi.startGeneration(req);
+      set((state) => ({
+        activeJob: job,
+        jobs: [job, ...state.jobs.filter((j) => j.parentId !== job.parentId)],
+        isStarting: false,
+      }));
     } catch (err: any) {
       set({
         error:
@@ -219,7 +229,10 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
   cancelFlowJob: async (projectId: string, parentId: string) => {
     try {
       const cancelled = await flowApi.cancelFlowJob(projectId, parentId);
-      set({ activeJob: cancelled });
+      set((state) => ({
+        activeJob: cancelled,
+        jobs: state.jobs.map((j) => (j.parentId === parentId ? cancelled : j)),
+      }));
     } catch (err: any) {
       set({
         error:
@@ -233,7 +246,10 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
   pollJobStatus: async (projectId: string, parentId: string) => {
     try {
       const updated = await flowApi.getFlowJobStatus(projectId, parentId);
-      set({ activeJob: updated });
+      set((state) => ({
+        activeJob: updated,
+        jobs: state.jobs.map((j) => (j.parentId === parentId ? updated : j)),
+      }));
     } catch (err) {
       // Ignore polling hiccups
     }
@@ -247,7 +263,7 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
     return await flowApi.revealOutputInFolder(projectId, parentId);
   },
 
-  useOutputInProject: async (projectId: string, parentId: string) => {
+  useOutputInProject: async (projectId: string, parentId: string): Promise<UseFlowOutputResult> => {
     return await flowApi.useOutputInProject(projectId, parentId);
   },
 

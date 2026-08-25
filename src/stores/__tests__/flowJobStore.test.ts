@@ -13,6 +13,9 @@ vi.mock('../../lib/ipc', () => ({
     getGeminiStatus: vi.fn(),
     testGeminiApiKey: vi.fn(),
     startFlowGeneration: vi.fn(),
+    startGeneration: vi.fn(),
+    listFlowJobs: vi.fn(),
+    useOutputInProject: vi.fn(),
     getFlowJobStatus: vi.fn(),
   },
 }));
@@ -157,7 +160,7 @@ describe('flowJobStore', () => {
   });
 
   it('starts Flow generation job and sets activeJob', async () => {
-    vi.mocked(flowApi.startFlowGeneration).mockResolvedValueOnce({
+    vi.mocked(flowApi.startGeneration).mockResolvedValueOnce({
       parentId: 'flow_parent_test',
       projectId: 'proj_test',
       profileId: 'prof_1',

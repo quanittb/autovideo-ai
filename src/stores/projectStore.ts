@@ -109,7 +109,7 @@ export const defaultFoxRabbitProject: Project = {
 };
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
-  activeProject: defaultFoxRabbitProject,
+  activeProject: null,
   projects: [],
   isLoading: false,
   error: null,
@@ -129,13 +129,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       const created = await invokeCommand<Project>('create_project', { name });
-      const enriched: Project = {
-        ...created,
-        scenes: defaultScenes,
-        selectedSceneId: 'scene-1',
-      };
       set((state) => ({
-        activeProject: enriched,
+        activeProject: created,
         projects: [
           {
             id: created.id,
@@ -151,7 +146,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         ],
         isLoading: false,
       }));
-      return enriched;
+      return created;
     } catch (err: any) {
       set({ error: err?.message || 'Failed to create project', isLoading: false });
       throw err;
@@ -162,13 +157,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       const loaded = await invokeCommand<Project>('get_project', { id });
-      const enriched: Project = {
-        ...loaded,
-        scenes: loaded.scenes || defaultScenes,
-        selectedSceneId: loaded.selectedSceneId || 'scene-1',
-      };
-      set({ activeProject: enriched, isLoading: false });
-      return enriched;
+      set({ activeProject: loaded, isLoading: false });
+      return loaded;
     } catch (err: any) {
       set({ error: err?.message || 'Failed to load project', isLoading: false });
       throw err;
@@ -221,26 +211,21 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }
 
       const updated = await invokeCommand<Project>('import_media', { projectId: targetProjectId, filePath });
-      const enriched: Project = {
-        ...updated,
-        scenes: updated.scenes || defaultScenes,
-        selectedSceneId: updated.selectedSceneId || 'scene-1',
-      };
       set((state) => ({
-        activeProject: enriched,
-        projects: state.projects.some((p) => p.id === enriched.id)
+        activeProject: updated,
+        projects: state.projects.some((p) => p.id === updated.id)
           ? state.projects.map((p) =>
-              p.id === enriched.id
-                ? { ...p, name: enriched.name, status: enriched.status, updatedAt: enriched.updatedAt }
+              p.id === updated.id
+                ? { ...p, name: updated.name, status: updated.status, updatedAt: updated.updatedAt }
                 : p
             )
           : [
               {
-                id: enriched.id,
-                name: enriched.name,
-                createdAt: enriched.createdAt,
-                updatedAt: enriched.updatedAt,
-                status: enriched.status,
+                id: updated.id,
+                name: updated.name,
+                createdAt: updated.createdAt,
+                updatedAt: updated.updatedAt,
+                status: updated.status,
                 hasOutput: false,
                 isFixture: false,
               },
@@ -248,7 +233,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             ],
         isLoading: false,
       }));
-      return enriched;
+      return updated;
     } catch (err: any) {
       set({ error: err?.message || 'Failed to import video file', isLoading: false });
       throw err;

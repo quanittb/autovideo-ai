@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::system::StoragePaths;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -36,6 +36,32 @@ pub struct SourceMedia {
     pub video_codec: String,
     pub audio_codec: Option<String>,
     pub has_audio: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DerivedMediaProvenance {
+    pub provider: String,
+    pub provider_job_id: String,
+    pub source_media_id: String,
+    pub transformation_intent: crate::ai::transformation::TransformationIntent,
+    pub identity_mode: crate::ai::transformation::IdentityMode,
+    pub prompt_hash: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DerivedMediaAsset {
+    pub media: SourceMedia,
+    pub provenance: DerivedMediaProvenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UseFlowOutputResult {
+    pub derived_asset: DerivedMediaAsset,
+    pub project: Project,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,6 +145,8 @@ pub struct ProjectEditorState {
     pub current_time: f64,
     pub timeline_zoom: f64,
     pub selected_track: Option<String>,
+    #[serde(default)]
+    pub active_media_id: Option<String>,
 }
 
 impl Default for ProjectEditorState {
@@ -127,6 +155,7 @@ impl Default for ProjectEditorState {
             current_time: 0.0,
             timeline_zoom: 1.0,
             selected_track: None,
+            active_media_id: None,
         }
     }
 }
@@ -141,6 +170,8 @@ pub struct Project {
     pub updated_at: String,
     pub status: ProjectStatus,
     pub source_media: Option<SourceMedia>,
+    #[serde(default)]
+    pub derived_media_assets: Vec<DerivedMediaAsset>,
     pub transformation_config: TransformationConfig,
     pub transformation_plan: Option<TransformationPlan>,
     pub outputs: Vec<ProjectOutput>,
@@ -159,6 +190,7 @@ impl Project {
             updated_at: now,
             status: ProjectStatus::Empty,
             source_media: None,
+            derived_media_assets: Vec::new(),
             transformation_config: TransformationConfig::default(),
             transformation_plan: None,
             outputs: Vec::new(),

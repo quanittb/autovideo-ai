@@ -1810,8 +1810,9 @@ pub fn list_cloud_jobs(
     Ok(jobs.into_iter().map(|j| j.to_event_payload()).collect())
 }
 
-pub fn resolve_project_source_preview_path(
+pub fn resolve_project_media_by_id(
     project_id: &str,
+    media_id: Option<&str>,
     storage_paths: &StoragePaths,
 ) -> Result<(PathBuf, crate::projects::SourceMedia), String> {
     crate::ai::cloud::validate_identifier(project_id, "projectId").map_err(|e| format!("{}", e))?;
@@ -1820,11 +1821,81 @@ pub fn resolve_project_source_preview_path(
     let project = manager
         .get_project(project_id)
         .map_err(|e| format!("{}", e))?;
-    let source_media = project.source_media.ok_or_else(|| {
-        "PROJECT_HAS_NO_SOURCE_MEDIA: Project does not have imported source media".to_string()
-    })?;
 
-    let raw_path = PathBuf::from(&source_media.source_path);
+    let target_media = match media_id {
+        Some(mid) if !mid.trim().is_empty() => {
+            if let Some(ref sm) = project.source_media {
+                if sm.media_id == mid {
+                    sm.clone()
+                } else if let Some(derived) = project
+                    .derived_media_assets
+                    .iter()
+                    .find(|d| d.media.media_id == mid)
+                {
+                    derived.media.clone()
+                } else {
+                    return Err(format!(
+                        "MEDIA_NOT_FOUND: Media ID '{}' not found in project '{}'",
+                        mid, project_id
+                    ));
+                }
+            } else if let Some(derived) = project
+                .derived_media_assets
+                .iter()
+                .find(|d| d.media.media_id == mid)
+            {
+                derived.media.clone()
+            } else {
+                return Err(format!(
+                    "MEDIA_NOT_FOUND: Media ID '{}' not found in project '{}'",
+                    mid, project_id
+                ));
+            }
+        }
+        _ => {
+            if let Some(ref ed) = project.editor_state {
+                if let Some(ref active_id) = ed.active_media_id {
+                    if let Some(ref sm) = project.source_media {
+                        if sm.media_id == *active_id {
+                            sm.clone()
+                        } else if let Some(derived) = project
+                            .derived_media_assets
+                            .iter()
+                            .find(|d| d.media.media_id == *active_id)
+                        {
+                            derived.media.clone()
+                        } else {
+                            sm.clone()
+                        }
+                    } else if let Some(derived) = project
+                        .derived_media_assets
+                        .iter()
+                        .find(|d| d.media.media_id == *active_id)
+                    {
+                        derived.media.clone()
+                    } else {
+                        return Err("PROJECT_HAS_NO_MEDIA: Project does not have media".to_string());
+                    }
+                } else if let Some(ref sm) = project.source_media {
+                    sm.clone()
+                } else {
+                    return Err(
+                        "PROJECT_HAS_NO_SOURCE_MEDIA: Project does not have imported source media"
+                            .to_string(),
+                    );
+                }
+            } else if let Some(ref sm) = project.source_media {
+                sm.clone()
+            } else {
+                return Err(
+                    "PROJECT_HAS_NO_SOURCE_MEDIA: Project does not have imported source media"
+                        .to_string(),
+                );
+            }
+        }
+    };
+
+    let raw_path = PathBuf::from(&target_media.source_path);
     let candidate = if raw_path.is_file() {
         raw_path
     } else {
@@ -1832,14 +1903,24 @@ pub fn resolve_project_source_preview_path(
             .projects_dir
             .join(project_id)
             .join("media")
-            .join(&source_media.original_file_name);
+            .join(&target_media.original_file_name);
         if fallback.is_file() {
             fallback
         } else {
-            return Err(format!(
-                "SOURCE_FILE_NOT_FOUND: Source media file could not be found at {}",
-                source_media.source_path.display()
-            ));
+            let derived_fallback = storage_paths
+                .projects_dir
+                .join(project_id)
+                .join("media")
+                .join("derived")
+                .join(&target_media.original_file_name);
+            if derived_fallback.is_file() {
+                derived_fallback
+            } else {
+                return Err(format!(
+                    "SOURCE_FILE_NOT_FOUND: Media file could not be found at {}",
+                    target_media.source_path.display()
+                ));
+            }
         }
     };
 
@@ -1853,14 +1934,35 @@ pub fn resolve_project_source_preview_path(
 
     if !canonical_file.starts_with(&canonical_media_root) {
         return Err(
-            "SECURITY_VIOLATION: Source media file is outside project media directory".to_string(),
+            "SECURITY_VIOLATION: Media file is outside project media directory".to_string(),
         );
     }
     if !canonical_file.is_file() {
-        return Err("INVALID_TARGET: Source media path is not a regular file".to_string());
+        return Err("INVALID_TARGET: Media path is not a regular file".to_string());
     }
 
-    Ok((canonical_file, source_media))
+    Ok((canonical_file, target_media))
+}
+
+pub fn resolve_project_source_preview_path(
+    project_id: &str,
+    storage_paths: &StoragePaths,
+) -> Result<(PathBuf, crate::projects::SourceMedia), String> {
+    resolve_project_media_by_id(project_id, None, storage_paths)
+}
+
+#[command]
+pub fn authorize_project_media_preview(
+    app: AppHandle,
+    project_id: String,
+    media_id: Option<String>,
+) -> Result<String, String> {
+    let storage_paths = StoragePaths::default_paths();
+    let (canonical_file, _) =
+        resolve_project_media_by_id(&project_id, media_id.as_deref(), &storage_paths)?;
+
+    let _ = app.asset_protocol_scope().allow_file(&canonical_file);
+    Ok(canonical_file.to_string_lossy().to_string())
 }
 
 pub fn resolve_cloud_artifact_preview_path(
@@ -2419,24 +2521,14 @@ pub async fn start_flow_generation(
     flow_service: tauri::State<'_, Arc<crate::ai::flow::FlowRuntimeService>>,
 ) -> Result<crate::ai::flow::FlowJobSnapshot, String> {
     let paths = crate::system::StoragePaths::default_paths();
-    let project_dir = paths.projects_dir.join(&request.project_id);
-    let media_root = project_dir.join("media");
-
-    let candidate = if request.source_media_id.trim().is_empty() {
-        let (canonical_file, _) = resolve_project_source_preview_path(&request.project_id, &paths)?;
-        canonical_file
+    let media_id_opt = if request.source_media_id.trim().is_empty() {
+        None
     } else {
-        let raw = PathBuf::from(&request.source_media_id);
-        if raw.is_absolute() {
-            raw
-        } else {
-            media_root.join(&request.source_media_id)
-        }
+        Some(request.source_media_id.as_str())
     };
 
-    let canonical_source =
-        crate::ai::flow::PlaywrightBridge::validate_path_confinement(&candidate, &media_root)
-            .map_err(|e| format!("SOURCE_MEDIA_UNAUTHORIZED: {}", e))?;
+    let (canonical_source, _) =
+        resolve_project_media_by_id(&request.project_id, media_id_opt, &paths)?;
 
     if !canonical_source.exists() {
         return Err(format!("SOURCE_MEDIA_NOT_FOUND: {:?}", canonical_source));
@@ -2588,7 +2680,7 @@ pub fn use_flow_output_in_project(
     project_id: String,
     parent_id: String,
     flow_service: tauri::State<'_, Arc<crate::ai::flow::FlowRuntimeService>>,
-) -> Result<String, String> {
+) -> Result<crate::projects::UseFlowOutputResult, String> {
     let manifest = flow_service
         .orchestrator
         .store()
@@ -2597,16 +2689,114 @@ pub fn use_flow_output_in_project(
         "ARTIFACT_NOT_READY: Flow generation output artifact has not been created".to_string()
     })?;
 
+    let flow_job_dir = flow_service
+        .orchestrator
+        .store()
+        .parent_flow_job_dir(&project_id, &parent_id)?;
+    let canonical_job_dir = flow_job_dir
+        .canonicalize()
+        .map_err(|e| format!("CANONICALIZE_FAILED: {}", e))?;
+    let canonical_artifact = final_record
+        .final_path
+        .canonicalize()
+        .map_err(|e| format!("OUTPUT_NOT_FOUND: {}", e))?;
+
+    if !canonical_artifact.starts_with(&canonical_job_dir) {
+        return Err(
+            "SECURITY_VIOLATION: Output artifact is outside flow job directory".to_string(),
+        );
+    }
+
     let paths = crate::system::StoragePaths::default_paths();
+    let manager = ProjectManager::new(paths.clone());
+    let mut project = manager
+        .get_project(&project_id)
+        .map_err(|e| format!("{}", e))?;
+
+    // Idempotency check: if project already has a derived asset with this provider job ID, return it
+    if let Some(existing) = project
+        .derived_media_assets
+        .iter()
+        .find(|d| d.provenance.provider == "FLOW" && d.provenance.provider_job_id == parent_id)
+    {
+        return Ok(crate::projects::UseFlowOutputResult {
+            derived_asset: existing.clone(),
+            project,
+        });
+    }
+
     let project_dir = paths.projects_dir.join(&project_id);
-    let media_root = project_dir.join("media");
-    let _ = std::fs::create_dir_all(&media_root);
+    let derived_dir = project_dir.join("media").join("derived");
+    std::fs::create_dir_all(&derived_dir)
+        .map_err(|e| format!("Failed to create project derived media directory: {}", e))?;
 
-    let derived_filename = format!("derived_flow_{}.mp4", parent_id);
-    let destination_path = media_root.join(&derived_filename);
+    let new_asset_id = format!("media_flow_{}", uuid::Uuid::new_v4().simple());
+    let derived_filename = format!("flow_{}_{}.mp4", parent_id, new_asset_id);
+    let destination_path = derived_dir.join(&derived_filename);
 
-    std::fs::copy(&final_record.final_path, &destination_path)
+    std::fs::copy(&canonical_artifact, &destination_path)
         .map_err(|e| format!("Failed to copy derived asset into project media: {}", e))?;
 
-    Ok(destination_path.to_string_lossy().to_string())
+    // Probe the destination file to ensure independent metadata
+    let media_service = crate::media::MediaService::new();
+    let probed_metadata = media_service
+        .probe(&destination_path)
+        .map_err(|e| format!("Failed to probe copied derived media: {}", e))?;
+
+    let source_media_id_used = manifest.source_media_id.clone().unwrap_or_else(|| {
+        project
+            .source_media
+            .as_ref()
+            .map(|s| s.media_id.clone())
+            .unwrap_or_default()
+    });
+
+    let derived_source_media = crate::projects::SourceMedia {
+        media_id: new_asset_id.clone(),
+        original_file_name: derived_filename,
+        source_path: destination_path,
+        duration_ms: probed_metadata.duration_ms,
+        width: probed_metadata.width,
+        height: probed_metadata.height,
+        fps: probed_metadata.fps,
+        file_size_bytes: probed_metadata.file_size_bytes,
+        container: probed_metadata.container,
+        video_codec: probed_metadata.video_codec,
+        audio_codec: probed_metadata.audio_codec,
+        has_audio: probed_metadata.has_audio,
+    };
+
+    let provenance = crate::projects::DerivedMediaProvenance {
+        provider: "FLOW".to_string(),
+        provider_job_id: parent_id,
+        source_media_id: source_media_id_used,
+        transformation_intent: manifest.transformation_intent,
+        identity_mode: manifest.identity_mode,
+        prompt_hash: manifest.prompt_hash.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    let derived_asset = crate::projects::DerivedMediaAsset {
+        media: derived_source_media,
+        provenance,
+    };
+
+    project.derived_media_assets.push(derived_asset.clone());
+    if let Some(ref mut ed) = project.editor_state {
+        ed.active_media_id = Some(new_asset_id);
+    } else {
+        project.editor_state = Some(crate::projects::ProjectEditorState {
+            active_media_id: Some(new_asset_id),
+            ..Default::default()
+        });
+    }
+
+    let updated_project = manager
+        .update_project(&project)
+        .map_err(|e| format!("{}", e))?;
+
+    Ok(crate::projects::UseFlowOutputResult {
+        derived_asset,
+        project: updated_project,
+    })
 }

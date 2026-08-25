@@ -321,10 +321,51 @@ export interface ProjectOutput {
   createdAt: string;
 }
 
+export type TransformationIntent =
+  | 'FACE_REPLACE'
+  | 'BACKGROUND_REPLACE'
+  | 'BACKGROUND_REMOVE'
+  | 'LIGHTING_EDIT'
+  | 'STYLE_EDIT'
+  | 'OBJECT_EDIT'
+  | 'GENERIC_PROMPT_EDIT';
+
+export type IdentityMode = 'GENERATED' | 'REFERENCE';
+
+export interface TargetFaceSelection {
+  index: number;
+  descriptor?: string;
+  confirmed: boolean;
+  anchorTimestampSec?: number;
+  anchorFrameTimestampSec?: number;
+  normalizedBoundingBox?: [number, number, number, number];
+}
+
+export interface DerivedMediaProvenance {
+  provider: string;
+  providerJobId: string;
+  sourceMediaId: string;
+  transformationIntent: TransformationIntent;
+  identityMode: IdentityMode;
+  promptHash: string;
+  createdAt: string;
+}
+
+export interface DerivedMediaAsset {
+  media: SourceMedia;
+  provenance: DerivedMediaProvenance;
+}
+
+export interface UseFlowOutputResult {
+  derivedAsset: DerivedMediaAsset;
+  project: Project;
+}
+
 export interface ProjectEditorState {
   currentTime: number;
   timelineZoom: number;
   selectedTrack?: string;
+  activeMediaId?: string;
 }
 
 export interface ResolvedMediaAsset {
@@ -372,6 +413,7 @@ export interface Project {
   updatedAt: string;
   status: ProjectStatus;
   sourceMedia?: SourceMedia;
+  derivedMediaAssets?: DerivedMediaAsset[];
   sourceAsset?: MediaAsset;
   transformationConfig: TransformationRequest;
   transformationRequest?: TransformationRequest;

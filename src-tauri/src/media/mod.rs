@@ -1578,6 +1578,7 @@ mod tests {
             current_time: 14.5,
             timeline_zoom: 1.75,
             selected_track: Some("V1".to_string()),
+            active_media_id: None,
         });
 
         manager
