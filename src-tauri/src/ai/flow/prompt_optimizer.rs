@@ -121,8 +121,11 @@ fn default_gemini_source() -> GeminiCredentialSource {
 
 pub const DEFAULT_PROMPT_OPTIMIZATION_MODEL: &'static str = "gemini-3.5-flash-lite";
 
+/// Immutable sentinel string indicating an unconfigured placeholder key.
+pub const GEMINI_API_KEY_SENTINEL: &'static str = "Axxxxxxxxxxx";
+
 /// Authoritative single application default key placeholder for Gemini Gen Prompt.
-/// Sentinel value "Axxxxxxxxxxx" is treated as NOT_CONFIGURED.
+/// May be replaced locally by internal distribution with a real API key.
 pub const DEFAULT_GEMINI_API_KEY: &'static str = "Axxxxxxxxxxx";
 
 pub fn is_valid_gemini_key(key: &str) -> bool {
@@ -130,13 +133,10 @@ pub fn is_valid_gemini_key(key: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
-    if trimmed == DEFAULT_GEMINI_API_KEY
-        || trimmed.starts_with("Axxxx")
+    if trimmed == GEMINI_API_KEY_SENTINEL
         || trimmed == "your_api_key_here"
         || trimmed == "PLACEHOLDER"
-        || trimmed
-            .chars()
-            .all(|c| c == 'x' || c == 'X' || c == '0' || c == '*')
+        || trimmed == "YOUR_GEMINI_API_KEY"
     {
         return false;
     }

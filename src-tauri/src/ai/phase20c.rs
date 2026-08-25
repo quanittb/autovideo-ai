@@ -2,39 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub use crate::ai::flow::prompt_optimizer::{is_valid_gemini_key, DEFAULT_GEMINI_API_KEY};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum TransformationIntent {
-    FaceReplace,
-    BackgroundReplace,
-    BackgroundRemove,
-    LightingEdit,
-    StyleEdit,
-    GenericPromptEdit,
-}
-
-impl Default for TransformationIntent {
-    fn default() -> Self {
-        Self::FaceReplace
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum IdentityMode {
-    Generated,
-    Reference,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TargetFaceSelection {
-    pub index: usize,
-    pub confirmed: bool,
-    pub descriptor: Option<String>,
-    pub anchor_frame_timestamp_sec: Option<f64>,
-    pub normalized_bounding_box: Option<[f64; 4]>, // [x, y, w, h]
-}
+pub use crate::ai::transformation::{
+    IdentityMode, TargetFaceCandidate, TargetFaceError, TargetFacePolicy, TargetFaceSelection,
+    TransformationIntent,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FaceReplaceContract {
@@ -46,65 +17,6 @@ pub struct FaceReplaceContract {
     pub target_face: TargetFaceSelection,
     pub replace_count: usize,
     pub preserve_non_target_faces: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TargetFaceError {
-    TargetFaceAmbiguous(String),
-    MultipleFacesNotAllowed(String),
-    InvalidTargetIndex(usize),
-}
-
-impl std::fmt::Display for TargetFaceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TargetFaceAmbiguous(msg) => write!(f, "TARGET_FACE_AMBIGUOUS: {}", msg),
-            Self::MultipleFacesNotAllowed(msg) => {
-                write!(f, "MULTIPLE_FACES_NOT_ALLOWED: {}", msg)
-            }
-            Self::InvalidTargetIndex(idx) => write!(f, "INVALID_TARGET_INDEX: {}", idx),
-        }
-    }
-}
-
-impl std::error::Error for TargetFaceError {}
-
-pub struct TargetFacePolicy;
-
-impl TargetFacePolicy {
-    /// Validates target face specification before execution.
-    /// In multi-face videos (e.g. C3), target_face_confirmed MUST be true, exactly ONE face must be replaced,
-    /// and all non-target faces must be preserved.
-    pub fn validate_target(
-        visible_face_count: usize,
-        target: &TargetFaceSelection,
-        replace_count: usize,
-    ) -> Result<usize, TargetFaceError> {
-        if replace_count != 1 {
-            return Err(TargetFaceError::MultipleFacesNotAllowed(format!(
-                "Replace count must be exactly 1, got {}",
-                replace_count
-            )));
-        }
-
-        if visible_face_count == 1 {
-            return Ok(target.index);
-        }
-
-        // Multi-face scenario (visible_face_count > 1)
-        if !target.confirmed {
-            return Err(TargetFaceError::TargetFaceAmbiguous(
-                "Multiple visible faces detected but target face has not been positively confirmed"
-                    .to_string(),
-            ));
-        }
-
-        if target.index >= visible_face_count {
-            return Err(TargetFaceError::InvalidTargetIndex(target.index));
-        }
-
-        Ok(target.index)
-    }
 }
 
 pub struct IdentityResolver;

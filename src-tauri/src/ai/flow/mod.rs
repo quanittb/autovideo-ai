@@ -23,7 +23,9 @@ pub use manifest::{
 };
 pub use manual_chrome::{ManualChromeProcess, SystemChromeLauncher};
 pub use mock_flow_server::{MockFlowServer, MockFlowServerHandle, MockScenario};
-pub use orchestrator::FlowOrchestrator;
+pub use orchestrator::{
+    FlowCancellationRegistry, FlowGenerationRequest, FlowOrchestrator, FlowRuntimeService,
+};
 pub use output_validator::FlowOutputValidator;
 pub use playwright_bridge::{
     FlowAuthStatus, FlowGenerationSettings, FlowPollResult, FlowSettingsReadback, PlaywrightBridge,
@@ -35,7 +37,7 @@ pub use prompt_optimizer::{
     GeminiCredentialSource, GeminiCredentialStatus, GeminiPromptOptimizer, GeminiStatusResponse,
     GeminiVerificationStatus, OptimizePromptRequest, OptimizePromptResponse,
     PromptOptimizationCapabilityPolicy, PromptSource, ResolvedGeminiCredential, SecretStore,
-    DEFAULT_GEMINI_API_KEY, DEFAULT_PROMPT_OPTIMIZATION_MODEL,
+    DEFAULT_GEMINI_API_KEY, DEFAULT_PROMPT_OPTIMIZATION_MODEL, GEMINI_API_KEY_SENTINEL,
 };
 pub use segment::FlowVideoSegmenter;
 pub use stitcher::FlowStitcher;

@@ -7,7 +7,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const CURRENT_FLOW_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_FLOW_MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 // -----------------------------------------------------------------------------
 // 1. 21-State Flow Machine
@@ -269,6 +269,9 @@ impl FlowGenerationManifest {
     }
 
     pub fn to_snapshot(&self) -> FlowJobSnapshot {
+        let total_segments =
+            std::cmp::max(self.segment_plan.segments.len(), self.child_segments.len());
+
         FlowJobSnapshot {
             parent_id: self.parent_id.clone(),
             project_id: self.project_id.clone(),
@@ -279,11 +282,17 @@ impl FlowGenerationManifest {
             state: self.state,
             state_revision: self.state_revision,
             active_segment_index: self.active_segment_index,
-            total_segments: self.child_segments.len(),
+            total_segments,
             estimated_credits: self.credit_record.estimated_credits,
             observed_credit_balance: self.credit_record.observed_credit_balance,
+            credit_budget_limit: self.credit_record.credit_budget_limit,
             completed_generations: self.credit_record.completed_generations,
             final_output_ready: self.final_output.is_some(),
+            final_output_path: self
+                .final_output
+                .as_ref()
+                .map(|o| o.final_path.to_string_lossy().to_string()),
+            error_code: self.error.as_ref().map(|e| e.code.clone()),
             error_message: self.error.as_ref().map(|e| e.sanitized_message.clone()),
             timestamps: self.timestamps.clone(),
         }
@@ -309,8 +318,11 @@ pub struct FlowJobSnapshot {
     pub total_segments: usize,
     pub estimated_credits: u32,
     pub observed_credit_balance: Option<u32>,
+    pub credit_budget_limit: Option<u32>,
     pub completed_generations: u32,
     pub final_output_ready: bool,
+    pub final_output_path: Option<String>,
+    pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub timestamps: JobTimestamps,
 }

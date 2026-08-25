@@ -513,21 +513,59 @@ impl MockFlowServer {
 }
 
 fn generate_minimal_valid_mp4() -> Vec<u8> {
-    // 32-byte standard ftyp box (mp42/isom)
-    let mut bytes = vec![
-        0x00, 0x00, 0x00, 0x20, // size 32
-        0x66, 0x74, 0x79, 0x70, // 'ftyp'
-        0x69, 0x73, 0x6f, 0x6d, // 'isom'
-        0x00, 0x00, 0x02, 0x00, // minor version
-        0x69, 0x73, 0x6f, 0x6d, // compatible brand 1
-        0x69, 0x73, 0x6f, 0x32, // compatible brand 2
-        0x61, 0x76, 0x63, 0x31, // compatible brand 3
-        0x6d, 0x70, 0x34, 0x31, // compatible brand 4
-    ];
-    // Free box / minimal data
-    bytes.extend_from_slice(&[
-        0x00, 0x00, 0x00, 0x08, // size 8
-        0x66, 0x72, 0x65, 0x65, // 'free'
-    ]);
-    bytes
+    use std::sync::OnceLock;
+    static CACHED_MP4: OnceLock<Vec<u8>> = OnceLock::new();
+    CACHED_MP4
+        .get_or_init(|| {
+            let temp_file =
+                std::env::temp_dir().join(format!("mock_flow_sample_{}.mp4", uuid::Uuid::new_v4()));
+            let res = std::process::Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc=duration=1:size=320x240:rate=30",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=1000:duration=1",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    temp_file.to_str().unwrap(),
+                ])
+                .output();
+
+            if let Ok(out) = res {
+                if out.status.success() {
+                    if let Ok(bytes) = std::fs::read(&temp_file) {
+                        let _ = std::fs::remove_file(&temp_file);
+                        return bytes;
+                    }
+                }
+            }
+            let _ = std::fs::remove_file(&temp_file);
+
+            // Fallback minimal ftyp
+            let mut bytes = vec![
+                0x00, 0x00, 0x00, 0x20, // size 32
+                0x66, 0x74, 0x79, 0x70, // 'ftyp'
+                0x69, 0x73, 0x6f, 0x6d, // 'isom'
+                0x00, 0x00, 0x02, 0x00, // minor version
+                0x69, 0x73, 0x6f, 0x6d, // compatible brand 1
+                0x69, 0x73, 0x6f, 0x32, // compatible brand 2
+                0x61, 0x76, 0x63, 0x31, // compatible brand 3
+                0x6d, 0x70, 0x34, 0x31, // compatible brand 4
+            ];
+            bytes.extend_from_slice(&[
+                0x00, 0x00, 0x00, 0x08, // size 8
+                0x66, 0x72, 0x65, 0x65, // 'free'
+            ]);
+            bytes
+        })
+        .clone()
 }

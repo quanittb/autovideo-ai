@@ -1,10 +1,14 @@
 import { create } from 'zustand';
 import {
   flowApi,
+  FlowGenerationRequest,
   FlowJobSnapshot,
   FlowProfileInfo,
   GeminiCredentialStatus,
   PromptSource,
+  TransformationIntent,
+  IdentityMode,
+  TargetFaceSelection,
 } from '../lib/ipc';
 
 interface FlowJobStoreState {
@@ -30,9 +34,20 @@ interface FlowJobStoreState {
     profileId: string,
     prompt: string,
     promptSource: PromptSource,
-    sourceMediaId: string
+    sourceMediaId: string,
+    options?: {
+      transformationIntent?: TransformationIntent;
+      identityMode?: IdentityMode;
+      targetFace?: TargetFaceSelection;
+      maxCredits?: number;
+      preserveOriginalAudio?: boolean;
+    }
   ) => Promise<void>;
+  cancelFlowJob: (projectId: string, parentId: string) => Promise<void>;
   pollJobStatus: (projectId: string, parentId: string) => Promise<void>;
+  openOutputArtifact: (projectId: string, parentId: string) => Promise<string>;
+  revealOutputInFolder: (projectId: string, parentId: string) => Promise<string>;
+  useOutputInProject: (projectId: string, parentId: string) => Promise<string>;
   clearError: () => void;
 }
 
@@ -163,17 +178,32 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
     profileId,
     prompt,
     promptSource,
-    sourceMediaId
+    sourceMediaId,
+    options
   ) => {
     set({ isStarting: true, error: null });
     try {
-      const job = await flowApi.startFlowGeneration(
+      const req: FlowGenerationRequest = {
         projectId,
         profileId,
         prompt,
         promptSource,
-        sourceMediaId
-      );
+        sourceMediaId,
+        transformationIntent: options?.transformationIntent,
+        identityMode: options?.identityMode,
+        targetFace: options?.targetFace,
+        maxCredits: options?.maxCredits,
+        preserveOriginalAudio: options?.preserveOriginalAudio,
+      };
+      const job = options
+        ? await flowApi.startGeneration(req)
+        : await flowApi.startFlowGeneration(
+            projectId,
+            profileId,
+            prompt,
+            promptSource,
+            sourceMediaId
+          );
       set({ activeJob: job, isStarting: false });
     } catch (err: any) {
       set({
@@ -186,6 +216,20 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
     }
   },
 
+  cancelFlowJob: async (projectId: string, parentId: string) => {
+    try {
+      const cancelled = await flowApi.cancelFlowJob(projectId, parentId);
+      set({ activeJob: cancelled });
+    } catch (err: any) {
+      set({
+        error:
+          typeof err === 'string'
+            ? err
+            : err?.message || 'Failed to cancel Flow job',
+      });
+    }
+  },
+
   pollJobStatus: async (projectId: string, parentId: string) => {
     try {
       const updated = await flowApi.getFlowJobStatus(projectId, parentId);
@@ -193,6 +237,18 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
     } catch (err) {
       // Ignore polling hiccups
     }
+  },
+
+  openOutputArtifact: async (projectId: string, parentId: string) => {
+    return await flowApi.openOutputArtifact(projectId, parentId);
+  },
+
+  revealOutputInFolder: async (projectId: string, parentId: string) => {
+    return await flowApi.revealOutputInFolder(projectId, parentId);
+  },
+
+  useOutputInProject: async (projectId: string, parentId: string) => {
+    return await flowApi.useOutputInProject(projectId, parentId);
   },
 
   clearError: () => set({ error: null }),

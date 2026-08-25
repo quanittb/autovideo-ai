@@ -1077,6 +1077,39 @@ export interface FlowProfileSnapshot {
 
 export type FlowProfileInfo = FlowProfileSnapshot;
 
+export type TransformationIntent =
+  | 'FACE_REPLACE'
+  | 'BACKGROUND_REPLACE'
+  | 'BACKGROUND_REMOVE'
+  | 'LIGHTING_EDIT'
+  | 'STYLE_EDIT'
+  | 'OBJECT_EDIT'
+  | 'GENERIC_PROMPT_EDIT';
+
+export type IdentityMode = 'GENERATED' | 'REFERENCE';
+
+export interface TargetFaceSelection {
+  index: number;
+  descriptor?: string;
+  confirmed: boolean;
+  anchorTimestampSec?: number;
+  anchorFrameTimestampSec?: number;
+  normalizedBoundingBox?: [number, number, number, number];
+}
+
+export interface FlowGenerationRequest {
+  projectId: string;
+  sourceMediaId: string;
+  profileId: string;
+  transformationIntent?: TransformationIntent;
+  identityMode?: IdentityMode;
+  prompt: string;
+  promptSource?: PromptSource;
+  targetFace?: TargetFaceSelection;
+  maxCredits?: number;
+  preserveOriginalAudio?: boolean;
+}
+
 export interface FlowJobSnapshot {
   parentId: string;
   projectId: string;
@@ -1090,8 +1123,11 @@ export interface FlowJobSnapshot {
   totalSegments: number;
   estimatedCredits: number;
   observedCreditBalance?: number;
+  creditBudgetLimit?: number;
   completedGenerations: number;
   finalOutputReady: boolean;
+  finalOutputPath?: string;
+  errorCode?: string;
   errorMessage?: string;
   timestamps: {
     createdAt: string;
@@ -1138,6 +1174,12 @@ export const flowApi = {
   refreshProfileStatus: (profileId: string): Promise<string> =>
     invoke('refresh_flow_profile_status', { profileId }),
 
+  getAuthStatus: (profileId: string): Promise<string> =>
+    invoke('refresh_flow_profile_status', { profileId }),
+
+  startGeneration: (request: FlowGenerationRequest): Promise<FlowJobSnapshot> =>
+    invoke('start_flow_generation', { request }),
+
   startFlowGeneration: (
     projectId: string,
     profileId: string,
@@ -1145,17 +1187,35 @@ export const flowApi = {
     promptSource?: PromptSource,
     sourceMediaId?: string
   ): Promise<FlowJobSnapshot> =>
-    invoke('start_flow_generation', {
+    flowApi.startGeneration({
       projectId,
       profileId,
       prompt,
       promptSource,
-      sourceMediaId,
+      sourceMediaId: sourceMediaId || '',
     }),
+
+  cancelGeneration: (projectId: string, jobId: string): Promise<FlowJobSnapshot> =>
+    invoke('cancel_flow_generation', { projectId, parentId: jobId }),
+
+  cancelFlowJob: (projectId: string, parentId: string): Promise<FlowJobSnapshot> =>
+    invoke('cancel_flow_generation', { projectId, parentId }),
+
+  getGenerationJob: (projectId: string, jobId: string): Promise<FlowJobSnapshot> =>
+    invoke('get_flow_job_status', { projectId, parentId: jobId }),
 
   getFlowJobStatus: (projectId: string, parentId: string): Promise<FlowJobSnapshot> =>
     invoke('get_flow_job_status', { projectId, parentId }),
 
   listFlowJobs: (projectId: string): Promise<FlowJobSnapshot[]> =>
     invoke('list_flow_jobs', { projectId }),
+
+  openOutputArtifact: (projectId: string, parentId: string): Promise<string> =>
+    invoke('open_flow_output_artifact', { projectId, parentId }),
+
+  revealOutputInFolder: (projectId: string, parentId: string): Promise<string> =>
+    invoke('reveal_flow_output_in_folder', { projectId, parentId }),
+
+  useOutputInProject: (projectId: string, parentId: string): Promise<string> =>
+    invoke('use_flow_output_in_project', { projectId, parentId }),
 };

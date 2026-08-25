@@ -59,12 +59,16 @@ pub fn run() {
             let gemini_manager =
                 Arc::new(crate::ai::flow::GeminiCredentialManager::new(secret_store));
             let session_manager = Arc::new(crate::ai::flow::FlowBrowserSessionManager::new());
+            let flow_service = Arc::new(crate::ai::flow::FlowRuntimeService::new(
+                storage_paths.clone(),
+            ));
 
             app.manage(lifecycle.clone());
             app.manage(seg_store.clone());
             app.manage(orchestrator.clone());
             app.manage(gemini_manager);
             app.manage(session_manager.clone());
+            app.manage(flow_service);
 
             let orchestrator_clone = orchestrator.clone();
             tauri::async_runtime::spawn(async move {
@@ -185,8 +189,12 @@ pub fn run() {
             verify_flow_profile_login,
             refresh_flow_profile_status,
             start_flow_generation,
+            cancel_flow_generation,
             get_flow_job_status,
             list_flow_jobs,
+            open_flow_output_artifact,
+            reveal_flow_output_in_folder,
+            use_flow_output_in_project,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

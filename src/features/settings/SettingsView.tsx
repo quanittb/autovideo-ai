@@ -271,7 +271,7 @@ export const SettingsView: React.FC = () => {
                         : geminiStatus?.source === 'ENVIRONMENT'
                         ? 'Environment Variable'
                         : geminiStatus?.source === 'APPLICATION_DEFAULT'
-                        ? 'Application Default'
+                        ? 'Application Default (Provided by app)'
                         : 'Not Configured (Optional)'}
                     </span>
                     {geminiStatus?.isConfigured && (
@@ -291,7 +291,7 @@ export const SettingsView: React.FC = () => {
                 </div>
 
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  Gemini API key is used exclusively for <strong>user-initiated prompt optimization</strong> in Google Flow ({geminiStatus?.model || 'gemini-3.5-flash-lite'}). Keys are securely stored in the <strong>OS Credential Manager / Keychain</strong> and are never written to disk or sent to logs.
+                  Gemini API key is used exclusively for <strong>user-initiated prompt optimization</strong> in Google Flow ({geminiStatus?.model || 'gemini-3.5-flash-lite'}). Custom keys are securely stored in the <strong>OS Credential Manager / Keychain</strong>. Application default and environment keys are managed automatically without disk persistence.
                 </p>
 
                 {geminiMessage && (

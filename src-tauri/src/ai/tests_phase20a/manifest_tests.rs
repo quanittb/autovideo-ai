@@ -163,6 +163,8 @@ fn test_phase20a_17_credit_estimation_separate_from_observed_balance() {
         estimated_credits: 5,
         observed_credit_balance: None,
         completed_generations: 2,
+        credit_budget_limit: None,
+        reserved_credits: 0,
     };
 
     assert_eq!(credit_rec.estimated_credits, 5);
@@ -263,4 +265,77 @@ fn test_phase20a_19_no_api_key_leakage_in_manifest_dtos_logs() {
 
     assert!(!content.contains("AIzaSy"));
     assert!(!content.contains("secret"));
+}
+
+#[test]
+fn test_phase20a_20_manifest_schema_v1_backward_compatibility() {
+    let schema_v1_json = r#"{
+        "schemaVersion": 1,
+        "parentId": "flow_v1_legacy",
+        "clientRequestId": "req_v1",
+        "projectId": "proj_legacy",
+        "profileId": "profile_1",
+        "configurationHash": "cfg_hash_v1",
+        "sourceContentHash": "hash_src_v1",
+        "promptHash": "p_hash_v1",
+        "submittedPrompt": "Legacy prompt",
+        "normalizedPromptHash": "norm_hash_v1",
+        "promptSource": "USER",
+        "capabilityPolicyVersion": 1,
+        "splitPolicyVersion": 1,
+        "state": "READY",
+        "stateRevision": 1,
+        "activeSegmentIndex": 0,
+        "sourceFacts": {
+            "durationSec": 5.0,
+            "fps": 30.0,
+            "width": 1280,
+            "height": 720,
+            "hasAudio": false
+        },
+        "segmentPlan": {
+            "segments": [
+                {
+                    "index": 0,
+                    "startFrame": 0,
+                    "endFrame": 150,
+                    "startPts": 0,
+                    "endPts": 150,
+                    "startMs": 0,
+                    "endMs": 5000,
+                    "expectedDurationSec": 5.0
+                }
+            ],
+            "totalFrames": 150,
+            "totalDurationSec": 5.0,
+            "targetFps": 30.0,
+            "capabilityLimitSec": 10.0
+        },
+        "childSegments": [],
+        "creditRecord": {
+            "estimatedCredits": 40,
+            "completedGenerations": 0
+        },
+        "finalAudioPolicy": {
+            "preserveOriginalAudio": true,
+            "codec": "aac"
+        },
+        "cancellationRequested": false,
+        "timestamps": {
+            "createdAt": "2026-08-20T00:00:00Z",
+            "updatedAt": "2026-08-20T00:00:00Z"
+        }
+    }"#;
+
+    let manifest: FlowGenerationManifest = serde_json::from_str(schema_v1_json).unwrap();
+    assert_eq!(manifest.schema_version, 1);
+    assert_eq!(manifest.credit_record.estimated_credits, 40);
+    assert_eq!(manifest.credit_record.credit_budget_limit, None);
+    assert_eq!(manifest.credit_record.reserved_credits, 0);
+
+    let snapshot = manifest.to_snapshot();
+    assert_eq!(snapshot.total_segments, 1);
+    assert_eq!(snapshot.credit_budget_limit, None);
+    assert_eq!(snapshot.final_output_path, None);
+    assert_eq!(snapshot.error_code, None);
 }

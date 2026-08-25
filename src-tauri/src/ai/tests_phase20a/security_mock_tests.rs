@@ -238,8 +238,12 @@ fn test_phase20a_34_restart_recovery_zero_additional_generate_clicks() {
     let test_video = temp_dir.path().join("dummy.mp4");
     std::fs::write(&test_video, b"fake_mp4_bytes").unwrap();
 
-    let res =
-        rt.block_on(orchestrator.run_flow_worker("proj_crash", "flow_crash_test", &test_video));
+    let res = rt.block_on(orchestrator.run_flow_worker(
+        "proj_crash",
+        "flow_crash_test",
+        &test_video,
+        None,
+    ));
     assert!(res.is_ok());
 
     let loaded = store

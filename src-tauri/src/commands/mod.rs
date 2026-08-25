@@ -2415,20 +2415,23 @@ pub async fn refresh_flow_profile_status(
 
 #[command]
 pub async fn start_flow_generation(
-    project_id: String,
-    profile_id: String,
-    prompt: String,
-    prompt_source: Option<crate::ai::flow::PromptSource>,
-    source_media_id: String,
+    request: crate::ai::flow::FlowGenerationRequest,
+    flow_service: tauri::State<'_, Arc<crate::ai::flow::FlowRuntimeService>>,
 ) -> Result<crate::ai::flow::FlowJobSnapshot, String> {
     let paths = crate::system::StoragePaths::default_paths();
-    let project_dir = paths.projects_dir.join(&project_id);
+    let project_dir = paths.projects_dir.join(&request.project_id);
     let media_root = project_dir.join("media");
 
-    let candidate = if std::path::Path::new(&source_media_id).is_absolute() {
-        PathBuf::from(&source_media_id)
+    let candidate = if request.source_media_id.trim().is_empty() {
+        let (canonical_file, _) = resolve_project_source_preview_path(&request.project_id, &paths)?;
+        canonical_file
     } else {
-        media_root.join(&source_media_id)
+        let raw = PathBuf::from(&request.source_media_id);
+        if raw.is_absolute() {
+            raw
+        } else {
+            media_root.join(&request.source_media_id)
+        }
     };
 
     let canonical_source =
@@ -2439,15 +2442,19 @@ pub async fn start_flow_generation(
         return Err(format!("SOURCE_MEDIA_NOT_FOUND: {:?}", canonical_source));
     }
 
-    let orchestrator = crate::ai::flow::FlowOrchestrator::new(paths);
-    orchestrator
-        .start_flow_generation(
-            project_id,
-            profile_id,
-            prompt,
-            prompt_source,
-            canonical_source,
-        )
+    flow_service
+        .start_flow_generation(request, canonical_source)
+        .await
+}
+
+#[command]
+pub async fn cancel_flow_generation(
+    project_id: String,
+    parent_id: String,
+    flow_service: tauri::State<'_, Arc<crate::ai::flow::FlowRuntimeService>>,
+) -> Result<crate::ai::flow::FlowJobSnapshot, String> {
+    flow_service
+        .cancel_flow_generation(&project_id, &parent_id)
         .await
 }
 
@@ -2455,17 +2462,151 @@ pub async fn start_flow_generation(
 pub fn get_flow_job_status(
     project_id: String,
     parent_id: String,
+    flow_service: tauri::State<'_, Arc<crate::ai::flow::FlowRuntimeService>>,
 ) -> Result<crate::ai::flow::FlowJobSnapshot, String> {
-    let paths = crate::system::StoragePaths::default_paths();
-    let store = crate::ai::flow::FlowJobStore::new(paths);
-    let manifest = store.load_manifest(&project_id, &parent_id)?;
-    Ok(manifest.to_snapshot())
+    flow_service.get_flow_job_status(&project_id, &parent_id)
 }
 
 #[command]
-pub fn list_flow_jobs(project_id: String) -> Result<Vec<crate::ai::flow::FlowJobSnapshot>, String> {
+pub fn list_flow_jobs(
+    project_id: String,
+    flow_service: tauri::State<'_, Arc<crate::ai::flow::FlowRuntimeService>>,
+) -> Result<Vec<crate::ai::flow::FlowJobSnapshot>, String> {
+    flow_service.list_flow_jobs(&project_id)
+}
+
+#[command]
+pub fn open_flow_output_artifact(
+    project_id: String,
+    parent_id: String,
+    flow_service: tauri::State<'_, Arc<crate::ai::flow::FlowRuntimeService>>,
+) -> Result<String, String> {
+    let manifest = flow_service
+        .orchestrator
+        .store()
+        .load_manifest(&project_id, &parent_id)?;
+    let final_record = manifest.final_output.ok_or_else(|| {
+        "ARTIFACT_NOT_READY: Flow generation output artifact has not been created".to_string()
+    })?;
+
+    let flow_job_dir = flow_service
+        .orchestrator
+        .store()
+        .parent_flow_job_dir(&project_id, &parent_id)?;
+    let canonical_job_dir = flow_job_dir
+        .canonicalize()
+        .map_err(|e| format!("CANONICALIZE_FAILED: {}", e))?;
+    let canonical_target = final_record
+        .final_path
+        .canonicalize()
+        .map_err(|e| format!("OUTPUT_NOT_FOUND: {}", e))?;
+
+    if !canonical_target.starts_with(&canonical_job_dir) {
+        return Err(
+            "SECURITY_VIOLATION: Output artifact is outside flow job directory".to_string(),
+        );
+    }
+
+    let target_str = canonical_target.to_string_lossy().to_string();
+    #[cfg(target_os = "windows")]
+    {
+        let _ = StdCommand::new("explorer").arg(&target_str).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = StdCommand::new("open").arg(&target_str).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = StdCommand::new("xdg-open").arg(&target_str).spawn();
+    }
+
+    Ok(target_str)
+}
+
+#[command]
+pub fn reveal_flow_output_in_folder(
+    project_id: String,
+    parent_id: String,
+    flow_service: tauri::State<'_, Arc<crate::ai::flow::FlowRuntimeService>>,
+) -> Result<String, String> {
+    let manifest = flow_service
+        .orchestrator
+        .store()
+        .load_manifest(&project_id, &parent_id)?;
+    let final_record = manifest.final_output.ok_or_else(|| {
+        "ARTIFACT_NOT_READY: Flow generation output artifact has not been created".to_string()
+    })?;
+
+    let flow_job_dir = flow_service
+        .orchestrator
+        .store()
+        .parent_flow_job_dir(&project_id, &parent_id)?;
+    let canonical_job_dir = flow_job_dir
+        .canonicalize()
+        .map_err(|e| format!("CANONICALIZE_FAILED: {}", e))?;
+    let canonical_target = final_record
+        .final_path
+        .canonicalize()
+        .map_err(|e| format!("OUTPUT_NOT_FOUND: {}", e))?;
+
+    if !canonical_target.starts_with(&canonical_job_dir) {
+        return Err(
+            "SECURITY_VIOLATION: Output artifact is outside flow job directory".to_string(),
+        );
+    }
+
+    let target_str = canonical_target.to_string_lossy().to_string();
+    #[cfg(target_os = "windows")]
+    {
+        let _ = StdCommand::new("explorer")
+            .arg(format!("/select,{}", target_str))
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = StdCommand::new("open").arg("-R").arg(&target_str).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = StdCommand::new("xdg-open")
+            .arg(
+                canonical_target
+                    .parent()
+                    .unwrap_or(&canonical_target)
+                    .to_string_lossy()
+                    .as_ref(),
+            )
+            .spawn();
+    }
+
+    Ok(target_str)
+}
+
+#[command]
+pub fn use_flow_output_in_project(
+    project_id: String,
+    parent_id: String,
+    flow_service: tauri::State<'_, Arc<crate::ai::flow::FlowRuntimeService>>,
+) -> Result<String, String> {
+    let manifest = flow_service
+        .orchestrator
+        .store()
+        .load_manifest(&project_id, &parent_id)?;
+    let final_record = manifest.final_output.ok_or_else(|| {
+        "ARTIFACT_NOT_READY: Flow generation output artifact has not been created".to_string()
+    })?;
+
     let paths = crate::system::StoragePaths::default_paths();
-    let store = crate::ai::flow::FlowJobStore::new(paths);
-    let manifests = store.list_all_flow_jobs(&project_id)?;
-    Ok(manifests.into_iter().map(|m| m.to_snapshot()).collect())
+    let project_dir = paths.projects_dir.join(&project_id);
+    let media_root = project_dir.join("media");
+    let _ = std::fs::create_dir_all(&media_root);
+
+    let derived_filename = format!("derived_flow_{}.mp4", parent_id);
+    let destination_path = media_root.join(&derived_filename);
+
+    std::fs::copy(&final_record.final_path, &destination_path)
+        .map_err(|e| format!("Failed to copy derived asset into project media: {}", e))?;
+
+    Ok(destination_path.to_string_lossy().to_string())
 }

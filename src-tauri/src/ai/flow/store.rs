@@ -154,4 +154,20 @@ impl FlowJobStore {
         out.sort_by(|a, b| b.timestamps.created_at.cmp(&a.timestamps.created_at));
         Ok(out)
     }
+
+    pub fn cancel_job(
+        &self,
+        project_id: &str,
+        parent_id: &str,
+    ) -> Result<super::manifest::FlowJobSnapshot, String> {
+        let mut manifest = self.load_manifest(project_id, parent_id)?;
+        if manifest.state.is_terminal() {
+            return Ok(manifest.to_snapshot());
+        }
+
+        manifest.cancellation_requested = true;
+        manifest.state = super::manifest::FlowJobState::Cancelled;
+        self.save_manifest_atomic(&mut manifest)?;
+        Ok(manifest.to_snapshot())
+    }
 }

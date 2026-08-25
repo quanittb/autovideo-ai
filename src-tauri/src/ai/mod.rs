@@ -19,6 +19,7 @@ pub mod resolver;
 pub mod resource;
 pub mod runtime;
 pub mod tensor;
+pub mod transformation;
 pub mod validation;
 
 pub use device::DeviceInfo;
@@ -63,6 +64,9 @@ pub use resolver::{ProductionModelResolver, ResolvedProductionModel};
 pub use resource::{probe_runtime_resources, AiResourceLimits, AiRuntimeResources};
 pub use runtime::{AiRuntime, DefaultAiRuntime, RuntimeState, RuntimeStatus};
 pub use tensor::{Dimension, TensorDataType, TensorSpec};
+pub use transformation::{
+    IdentityMode, TargetFaceCandidate, TargetFacePolicy, TargetFaceSelection, TransformationIntent,
+};
 pub use validation::{
     validate_model_package_deep, validate_profile_against_onnx, ModelValidationReport,
     ProviderCompatibility,

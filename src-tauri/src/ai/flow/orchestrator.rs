@@ -12,10 +12,143 @@ use super::stitcher::FlowStitcher;
 use super::store::FlowJobStore;
 use crate::ai::cloud::job::JobErrorRecord;
 use crate::ai::cloud::spec::SourceMediaProbe;
+use crate::ai::transformation::{IdentityMode, TargetFaceSelection, TransformationIntent};
 use crate::system::StoragePaths;
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+// -----------------------------------------------------------------------------
+// 1. Flow Cancellation Registry
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Default, Clone)]
+pub struct FlowCancellationRegistry {
+    cancelled_jobs: Arc<RwLock<HashSet<String>>>,
+}
+
+impl FlowCancellationRegistry {
+    pub fn new() -> Self {
+        Self {
+            cancelled_jobs: Arc::new(RwLock::new(HashSet::new())),
+        }
+    }
+
+    pub async fn request_cancellation(&self, job_id: &str) {
+        let mut guard = self.cancelled_jobs.write().await;
+        guard.insert(job_id.to_string());
+    }
+
+    pub async fn is_cancelled(&self, job_id: &str) -> bool {
+        let guard = self.cancelled_jobs.read().await;
+        guard.contains(job_id)
+    }
+
+    pub async fn remove_cancellation(&self, job_id: &str) {
+        let mut guard = self.cancelled_jobs.write().await;
+        guard.remove(job_id);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 2. Production Flow Generation Request
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowGenerationRequest {
+    pub project_id: String,
+    #[serde(alias = "sourceVideoPath")]
+    pub source_media_id: String,
+    pub profile_id: String,
+    #[serde(default)]
+    pub transformation_intent: Option<TransformationIntent>,
+    #[serde(default)]
+    pub identity_mode: Option<IdentityMode>,
+    pub prompt: String,
+    #[serde(default)]
+    pub prompt_source: Option<PromptSource>,
+    #[serde(default)]
+    pub target_face: Option<TargetFaceSelection>,
+    #[serde(default)]
+    pub max_credits: Option<u32>,
+    #[serde(default)]
+    pub preserve_original_audio: Option<bool>,
+}
+
+// -----------------------------------------------------------------------------
+// 3. Flow Runtime Service (Application-Level Manager)
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct FlowRuntimeService {
+    pub orchestrator: Arc<FlowOrchestrator>,
+    pub cancellations: Arc<FlowCancellationRegistry>,
+}
+
+impl FlowRuntimeService {
+    pub fn new(storage_paths: StoragePaths) -> Self {
+        Self {
+            orchestrator: Arc::new(FlowOrchestrator::new(storage_paths)),
+            cancellations: Arc::new(FlowCancellationRegistry::new()),
+        }
+    }
+
+    pub fn with_mock_bridge(storage_paths: StoragePaths, mock_url: String) -> Self {
+        Self {
+            orchestrator: Arc::new(FlowOrchestrator::with_mock_bridge(storage_paths, mock_url)),
+            cancellations: Arc::new(FlowCancellationRegistry::new()),
+        }
+    }
+
+    pub async fn start_flow_generation(
+        &self,
+        request: FlowGenerationRequest,
+        canonical_source: PathBuf,
+    ) -> Result<FlowJobSnapshot, String> {
+        self.orchestrator
+            .start_flow_generation_with_request(
+                request,
+                canonical_source,
+                Some(self.cancellations.clone()),
+            )
+            .await
+    }
+
+    pub async fn cancel_flow_generation(
+        &self,
+        project_id: &str,
+        parent_id: &str,
+    ) -> Result<FlowJobSnapshot, String> {
+        self.cancellations.request_cancellation(parent_id).await;
+        self.orchestrator.store().cancel_job(project_id, parent_id)
+    }
+
+    pub fn get_flow_job_status(
+        &self,
+        project_id: &str,
+        parent_id: &str,
+    ) -> Result<FlowJobSnapshot, String> {
+        let manifest = self
+            .orchestrator
+            .store()
+            .load_manifest(project_id, parent_id)?;
+        Ok(manifest.to_snapshot())
+    }
+
+    pub fn list_flow_jobs(&self, project_id: &str) -> Result<Vec<FlowJobSnapshot>, String> {
+        let manifests = self.orchestrator.store().list_all_flow_jobs(project_id)?;
+        Ok(manifests.into_iter().map(|m| m.to_snapshot()).collect())
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 4. Flow Orchestrator Core Implementation
+// -----------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct FlowOrchestrator {
@@ -81,29 +214,78 @@ impl FlowOrchestrator {
         prompt_source: Option<PromptSource>,
         source_video_path: PathBuf,
     ) -> Result<FlowJobSnapshot, String> {
-        let clean_prompt = prompt.trim();
-        if clean_prompt.is_empty() {
-            return Err("REQUEST_INVALID: Prompt cannot be empty".to_string());
+        let request = FlowGenerationRequest {
+            project_id,
+            source_media_id: source_video_path.to_string_lossy().to_string(),
+            profile_id,
+            transformation_intent: Some(TransformationIntent::FaceReplace),
+            identity_mode: Some(IdentityMode::Generated),
+            prompt,
+            prompt_source,
+            target_face: None,
+            max_credits: None,
+            preserve_original_audio: Some(true),
+        };
+
+        self.start_flow_generation_with_request(request, source_video_path, None)
+            .await
+    }
+
+    pub async fn start_flow_generation_with_request(
+        &self,
+        request: FlowGenerationRequest,
+        canonical_source_path: PathBuf,
+        cancellations: Option<Arc<FlowCancellationRegistry>>,
+    ) -> Result<FlowJobSnapshot, String> {
+        let intent = request
+            .transformation_intent
+            .unwrap_or(TransformationIntent::FaceReplace);
+        let identity_mode = request.identity_mode.unwrap_or(IdentityMode::Generated);
+
+        // Capability check
+        match intent {
+            TransformationIntent::BackgroundRemove => {
+                return Err(
+                    "FLOW_CAPABILITY_UNSUPPORTED: Background removal is not supported by Google Flow".to_string(),
+                );
+            }
+            TransformationIntent::FaceReplace => {
+                if identity_mode == IdentityMode::Reference {
+                    return Err(
+                        "FLOW_CAPABILITY_UNSUPPORTED: Face replacement with custom reference image is not supported by standard Flow generation".to_string(),
+                    );
+                }
+            }
+            _ => {}
         }
 
-        if !source_video_path.exists() {
+        let mut clean_prompt = request.prompt.trim().to_string();
+        if clean_prompt.is_empty() {
+            if intent == TransformationIntent::FaceReplace {
+                clean_prompt = "Replace only the selected target person's facial identity with a new, temporally consistent synthetic identity. Preserve: body, clothing, hair where practical, pose, expression dynamics, mouth movement, head movement, action, camera motion, background, lighting, composition, timing, and all non-target people.".to_string();
+            } else {
+                return Err("REQUEST_INVALID: Prompt cannot be empty".to_string());
+            }
+        }
+
+        if !canonical_source_path.exists() {
             return Err(format!(
                 "FILE_NOT_FOUND: Source video does not exist: {:?}",
-                source_video_path
+                canonical_source_path
             ));
         }
 
         // Verify profile exists
-        let profile_dir = self.profile_manager.get_profile_dir(&profile_id)?;
+        let profile_dir = self.profile_manager.get_profile_dir(&request.profile_id)?;
         if !profile_dir.exists() {
             return Err(format!(
                 "PROFILE_NOT_FOUND: Profile {} does not exist",
-                profile_id
+                request.profile_id
             ));
         }
 
         // Probe source video
-        let facts = SourceMediaProbe::probe_file(&source_video_path)
+        let facts = SourceMediaProbe::probe_file(&canonical_source_path)
             .map_err(|e| format!("PROBE_FAILED: {}", e))?;
 
         if facts.duration_sec <= 0.0 || facts.fps <= 0.0 {
@@ -115,39 +297,55 @@ impl FlowOrchestrator {
 
         let parent_id = format!("flow_{}", uuid::Uuid::new_v4());
         let client_request_id = format!("req_{}", Utc::now().timestamp_millis());
-        let submitted_prompt = clean_prompt.to_string();
+        let submitted_prompt = clean_prompt.clone();
         let prompt_hash = calculate_prompt_hash(&submitted_prompt);
-        let source_provenance = prompt_source.unwrap_or(PromptSource::User);
+        let source_provenance = request.prompt_source.unwrap_or(PromptSource::User);
 
         // Derive deterministic config hash
         let mut hasher = Sha256::new();
         hasher.update(parent_id.as_bytes());
         hasher.update(submitted_prompt.as_bytes());
-        hasher.update(source_video_path.to_string_lossy().as_bytes());
+        hasher.update(canonical_source_path.to_string_lossy().as_bytes());
         let config_hash = format!("{:x}", hasher.finalize());
 
         let mut credit_record = super::capability::FlowCreditRecord::default();
-        credit_record.estimated_credits =
-            self.capability_policy.estimate_credits(plan.segments.len());
+        let estimated = self.capability_policy.estimate_credits(plan.segments.len());
+        credit_record.estimated_credits = estimated;
+        credit_record.credit_budget_limit = request.max_credits;
+
+        // Pre-check estimated budget if set
+        if let Some(max_credits) = request.max_credits {
+            if estimated > max_credits {
+                return Err(format!(
+                    "PRE_CLICK_REJECTED: Estimated credits ({}) exceed max credit budget limit ({})",
+                    estimated, max_credits
+                ));
+            }
+        }
+
+        let audio_policy = FlowFinalAudioPolicy {
+            preserve_original_audio: request.preserve_original_audio.unwrap_or(true),
+            codec: "aac".to_string(),
+        };
 
         let mut manifest = FlowGenerationManifest::new(
             parent_id.clone(),
             client_request_id,
-            project_id.clone(),
-            profile_id,
+            request.project_id.clone(),
+            request.profile_id,
             config_hash,
             None,
             prompt_hash,
             None,
             submitted_prompt,
-            calculate_prompt_hash(clean_prompt),
+            calculate_prompt_hash(&clean_prompt),
             source_provenance,
             self.capability_policy.capability_policy_version,
             self.capability_policy.split_policy_version,
             facts.clone(),
             plan.clone(),
             credit_record,
-            FlowFinalAudioPolicy::default(),
+            audio_policy,
         );
 
         manifest.state = FlowJobState::Ready;
@@ -157,17 +355,41 @@ impl FlowOrchestrator {
 
         // Spawn sequential worker
         let orchestrator_clone = self.clone();
-        let project_id_clone = project_id;
+        let project_id_clone = request.project_id;
         let parent_id_clone = parent_id;
-        let source_video_clone = source_video_path;
+        let source_video_clone = canonical_source_path;
 
         tokio::spawn(async move {
             let _ = orchestrator_clone
-                .run_flow_worker(&project_id_clone, &parent_id_clone, &source_video_clone)
+                .run_flow_worker(
+                    &project_id_clone,
+                    &parent_id_clone,
+                    &source_video_clone,
+                    cancellations,
+                )
                 .await;
         });
 
         Ok(snapshot)
+    }
+
+    async fn check_cancelled(
+        &self,
+        project_id: &str,
+        parent_id: &str,
+        cancellations: Option<&Arc<FlowCancellationRegistry>>,
+    ) -> bool {
+        if let Some(reg) = cancellations {
+            if reg.is_cancelled(parent_id).await {
+                return true;
+            }
+        }
+        if let Ok(m) = self.store.load_manifest(project_id, parent_id) {
+            if m.cancellation_requested || m.state == FlowJobState::Cancelled {
+                return true;
+            }
+        }
+        false
     }
 
     pub async fn run_flow_worker(
@@ -175,8 +397,19 @@ impl FlowOrchestrator {
         project_id: &str,
         parent_id: &str,
         source_video_path: &Path,
+        cancellations: Option<Arc<FlowCancellationRegistry>>,
     ) -> Result<(), String> {
         let mut manifest = self.store.load_manifest(project_id, parent_id)?;
+
+        // CHECKPOINT 1: Before profile lock and split
+        if self
+            .check_cancelled(project_id, parent_id, cancellations.as_ref())
+            .await
+        {
+            manifest.state = FlowJobState::Cancelled;
+            self.store.save_manifest_atomic(&mut manifest)?;
+            return Ok(());
+        }
 
         let profile_dir = self.profile_manager.get_profile_dir(&manifest.profile_id)?;
         let _guard = match self
@@ -200,6 +433,16 @@ impl FlowOrchestrator {
         let outputs_dir = flow_dir.join("output_segments");
         let _ = std::fs::create_dir_all(&outputs_dir);
 
+        // CHECKPOINT 2: Before Splitting Phase
+        if self
+            .check_cancelled(project_id, parent_id, cancellations.as_ref())
+            .await
+        {
+            manifest.state = FlowJobState::Cancelled;
+            self.store.save_manifest_atomic(&mut manifest)?;
+            return Ok(());
+        }
+
         // 1. Splitting Phase
         if manifest.child_segments.is_empty() {
             manifest.state = FlowJobState::Splitting;
@@ -215,6 +458,16 @@ impl FlowOrchestrator {
             manifest.child_segments = children;
             manifest.state = FlowJobState::ReadyToSubmit;
             self.store.save_manifest_atomic(&mut manifest)?;
+        }
+
+        // CHECKPOINT 3: After split, before browser session launch
+        if self
+            .check_cancelled(project_id, parent_id, cancellations.as_ref())
+            .await
+        {
+            manifest.state = FlowJobState::Cancelled;
+            self.store.save_manifest_atomic(&mut manifest)?;
+            return Ok(());
         }
 
         // 2. Sequential Browser Generation Phase (Single Live Session)
@@ -234,8 +487,25 @@ impl FlowOrchestrator {
             }
         };
 
+        // CHECKPOINT 4: After browser launch
+        if self
+            .check_cancelled(project_id, parent_id, cancellations.as_ref())
+            .await
+        {
+            if let Some(s) = active_session.take() {
+                s.close().await;
+            }
+            manifest.state = FlowJobState::Cancelled;
+            self.store.save_manifest_atomic(&mut manifest)?;
+            return Ok(());
+        }
+
         for i in 0..total_segments {
-            if manifest.cancellation_requested {
+            // CHECKPOINT 5: Before each segment iteration
+            if self
+                .check_cancelled(project_id, parent_id, cancellations.as_ref())
+                .await
+            {
                 if let Some(s) = active_session.take() {
                     s.close().await;
                 }
@@ -280,10 +550,60 @@ impl FlowOrchestrator {
                 FlowChildSubmissionState::NeverAttempted => {
                     let seg_filename = manifest.child_segments[i].segment_file_name.clone();
                     let seg_duration = manifest.child_segments[i].duration_sec;
+                    let seg_input_path = segments_dir.join(&seg_filename);
+
+                    // CHECKPOINT 6: Before credit preflight and budget enforcement
+                    if self
+                        .check_cancelled(project_id, parent_id, cancellations.as_ref())
+                        .await
+                    {
+                        if let Some(s) = active_session.take() {
+                            s.close().await;
+                        }
+                        manifest.state = FlowJobState::Cancelled;
+                        self.store.save_manifest_atomic(&mut manifest)?;
+                        return Ok(());
+                    }
+
+                    // Pre-Click Credit Budget Sequence:
+                    let estimated_unit_cost = self.capability_policy.credits_per_generation;
+                    if let Some(budget_limit) = manifest.credit_record.credit_budget_limit {
+                        let projected =
+                            manifest.credit_record.reserved_credits + estimated_unit_cost;
+                        if projected > budget_limit {
+                            if let Some(s) = active_session.take() {
+                                s.close().await;
+                            }
+                            manifest.state = FlowJobState::Blocked;
+                            manifest.child_segments[i].state = FlowJobState::Blocked;
+                            manifest.error = Some(JobErrorRecord {
+                                code: "FLOW_CREDIT_BUDGET_EXCEEDED".to_string(),
+                                sanitized_message: format!(
+                                    "PRE_CLICK_REJECTED: Submitting segment #{} requires {} credits, which exceeds budget limit of {} credits (currently reserved: {})",
+                                    i, estimated_unit_cost, budget_limit, manifest.credit_record.reserved_credits
+                                ),
+                            });
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            return Ok(());
+                        }
+                    }
 
                     manifest.active_segment_index = i;
                     manifest.state = FlowJobState::Submitting;
                     manifest.child_segments[i].state = FlowJobState::Submitting;
+
+                    // CHECKPOINT 7: Immediately before attempt persistence & click
+                    if self
+                        .check_cancelled(project_id, parent_id, cancellations.as_ref())
+                        .await
+                    {
+                        if let Some(s) = active_session.take() {
+                            s.close().await;
+                        }
+                        manifest.state = FlowJobState::Cancelled;
+                        self.store.save_manifest_atomic(&mut manifest)?;
+                        return Ok(());
+                    }
 
                     // Before click: Persist local submission attempt state FIRST!
                     let attempt_id = format!("att_{}_{}", i, Utc::now().timestamp_millis());
@@ -291,9 +611,8 @@ impl FlowOrchestrator {
                         Some(attempt_id.clone());
                     manifest.child_segments[i].submission_state =
                         FlowChildSubmissionState::AttemptPersisted;
+                    manifest.credit_record.reserved_credits += estimated_unit_cost;
                     self.store.save_manifest_atomic(&mut manifest)?;
-
-                    let seg_input_path = segments_dir.join(&seg_filename);
 
                     // Execute ONE browser submission via active session
                     let session_ref = active_session.as_mut().ok_or_else(|| {
@@ -344,7 +663,11 @@ impl FlowOrchestrator {
             let mut is_completed = false;
 
             while !is_completed {
-                if manifest.cancellation_requested {
+                // CHECKPOINT 8: During polling loop
+                if self
+                    .check_cancelled(project_id, parent_id, cancellations.as_ref())
+                    .await
+                {
                     if let Some(s) = active_session.take() {
                         s.close().await;
                     }
@@ -418,6 +741,19 @@ impl FlowOrchestrator {
                         return Ok(());
                     }
                     "ready" => {
+                        // CHECKPOINT 9: Before downloading artifact
+                        if self
+                            .check_cancelled(project_id, parent_id, cancellations.as_ref())
+                            .await
+                        {
+                            if let Some(s) = active_session.take() {
+                                s.close().await;
+                            }
+                            manifest.state = FlowJobState::Cancelled;
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            return Ok(());
+                        }
+
                         let seg_out_name = format!("child_out_{:03}.mp4", i);
                         let seg_out_path = outputs_dir.join(&seg_out_name);
 
@@ -461,6 +797,16 @@ impl FlowOrchestrator {
             s.close().await;
         }
 
+        // CHECKPOINT 10: Before final stitching
+        if self
+            .check_cancelled(project_id, parent_id, cancellations.as_ref())
+            .await
+        {
+            manifest.state = FlowJobState::Cancelled;
+            self.store.save_manifest_atomic(&mut manifest)?;
+            return Ok(());
+        }
+
         // 4. Final Stitching Phase
         manifest.state = FlowJobState::Stitching;
         self.store.save_manifest_atomic(&mut manifest)?;
@@ -499,6 +845,11 @@ impl FlowOrchestrator {
 
         manifest.state = FlowJobState::Completed;
         self.store.save_manifest_atomic(&mut manifest)?;
+
+        // Cleanup cancellation flag if any
+        if let Some(reg) = cancellations {
+            reg.remove_cancellation(parent_id).await;
+        }
 
         Ok(())
     }

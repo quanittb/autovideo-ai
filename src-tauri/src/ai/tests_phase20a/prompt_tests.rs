@@ -1,4 +1,5 @@
 use crate::ai::flow::*;
+use crate::system::StoragePaths;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -719,4 +720,316 @@ fn test_phase20c_gemini_08_mock_optimization_success_preservation_semantics() {
     assert_eq!(res.prompt_source, PromptSource::GeminiOptimized);
     assert!(res.optimized_prompt.contains("synthetic identity"));
     assert!(res.optimized_prompt.contains("preserving"));
+}
+
+// -----------------------------------------------------------------------------
+// Phase FLOW-P1: Production Flow Function & Sentinel Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_phase_flow_p1_01_gemini_sentinel_exact_rejection_and_real_key_acceptance() {
+    assert_eq!(GEMINI_API_KEY_SENTINEL, "Axxxxxxxxxxx");
+    assert!(!is_valid_gemini_key(GEMINI_API_KEY_SENTINEL));
+    assert!(!is_valid_gemini_key(""));
+    assert!(!is_valid_gemini_key("   "));
+    assert!(!is_valid_gemini_key("your_api_key_here"));
+    assert!(!is_valid_gemini_key("PLACEHOLDER"));
+    assert!(!is_valid_gemini_key("YOUR_GEMINI_API_KEY"));
+
+    // Real-looking keys (including those that start with A) are valid
+    assert!(is_valid_gemini_key("AIzaSyValidRealKey123456789"));
+    assert!(is_valid_gemini_key("AxxxxRealKeyNonPlaceholder"));
+}
+
+#[test]
+fn test_phase_flow_p1_02_app_default_to_user_override_and_fallback_lifecycle() {
+    let temp_dir = tempdir().unwrap();
+    let store = SecretStore::new(temp_dir.path().to_path_buf());
+    let _ = store.clear_gemini_api_key();
+    let manager = GeminiCredentialManager::new(store.clone());
+
+    // 1. Initial state (with user override cleared)
+    let initial_status = manager.get_status();
+    assert!(!initial_status.stored);
+
+    // 2. Set user override
+    let user_key = "AIzaSyUserProvidedOverride123";
+    manager.set_key(user_key).unwrap();
+    let override_status = manager.get_status();
+    assert!(override_status.stored);
+    assert!(override_status.is_configured);
+    assert_eq!(override_status.source, GeminiCredentialSource::UserOverride);
+
+    // 3. Clear user override
+    manager.clear_key().unwrap();
+    let cleared_status = manager.get_status();
+    assert!(!cleared_status.stored);
+}
+
+#[test]
+fn test_phase_flow_p1_03_flow_production_request_e2e_acceptance() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let server = crate::ai::flow::MockFlowServer::start(crate::ai::flow::MockScenario::Ready)
+            .await
+            .unwrap();
+
+        let temp_dir = tempdir().unwrap();
+        let storage_paths = StoragePaths::resolve_from_base(temp_dir.path());
+
+        let project_id = "test_flow_p1_proj".to_string();
+        let profile_id = "profile_flow_p1".to_string();
+
+        let project_media_dir = storage_paths.projects_dir.join(&project_id).join("media");
+        std::fs::create_dir_all(&project_media_dir).unwrap();
+        let test_video_path = project_media_dir.join("input.mp4");
+
+        // Generate valid 1-second 30fps test video
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=1:size=320x240:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                test_video_path.to_str().unwrap(),
+            ])
+            .output();
+
+        if status.is_err() || !status.unwrap().status.success() {
+            return;
+        }
+
+        let profile_manager =
+            crate::ai::flow::FlowProfileManager::new(storage_paths.app_data_dir.clone());
+        profile_manager
+            .create_profile(&profile_id, "Flow P1 Profile")
+            .unwrap();
+
+        let flow_service = crate::ai::flow::FlowRuntimeService::with_mock_bridge(
+            storage_paths.clone(),
+            server.base_url.clone(),
+        );
+
+        let req = crate::ai::flow::FlowGenerationRequest {
+            project_id: project_id.clone(),
+            source_media_id: "input.mp4".to_string(),
+            profile_id: profile_id.clone(),
+            transformation_intent: Some(
+                crate::ai::transformation::TransformationIntent::FaceReplace,
+            ),
+            identity_mode: Some(crate::ai::transformation::IdentityMode::Generated),
+            prompt: "Replace face".to_string(),
+            prompt_source: Some(PromptSource::User),
+            target_face: None,
+            max_credits: Some(40),
+            preserve_original_audio: Some(true),
+        };
+
+        let start_snapshot = flow_service
+            .start_flow_generation(req, test_video_path.clone())
+            .await
+            .unwrap();
+        assert_eq!(start_snapshot.total_segments, 1);
+        assert_eq!(start_snapshot.estimated_credits, 40);
+
+        // Poll until terminal or timeout (up to 30s)
+        let parent_id = start_snapshot.parent_id.clone();
+        let start_time = std::time::Instant::now();
+        let mut final_snap = start_snapshot;
+
+        while start_time.elapsed() < std::time::Duration::from_secs(30) {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let snap = flow_service
+                .get_flow_job_status(&project_id, &parent_id)
+                .unwrap();
+            final_snap = snap.clone();
+            if snap.state.is_terminal() {
+                break;
+            }
+        }
+
+        assert_eq!(final_snap.state, crate::ai::flow::FlowJobState::Completed);
+        assert!(final_snap.final_output_ready);
+        assert!(final_snap.final_output_path.is_some());
+    });
+}
+
+#[test]
+fn test_phase_flow_p1_04_pre_click_budget_exceeded_rejects_before_click() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server = rt
+        .block_on(crate::ai::flow::MockFlowServer::start(
+            crate::ai::flow::MockScenario::Ready,
+        ))
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let storage_paths = StoragePaths::resolve_from_base(temp_dir.path());
+
+    let project_id = "test_budget_proj".to_string();
+    let profile_id = "profile_budget".to_string();
+
+    let project_media_dir = storage_paths.projects_dir.join(&project_id).join("media");
+    std::fs::create_dir_all(&project_media_dir).unwrap();
+    let test_video_path = project_media_dir.join("input.mp4");
+
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=1:size=320x240:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            test_video_path.to_str().unwrap(),
+        ])
+        .output();
+
+    if status.is_err() || !status.unwrap().status.success() {
+        return;
+    }
+
+    let profile_manager =
+        crate::ai::flow::FlowProfileManager::new(storage_paths.app_data_dir.clone());
+    profile_manager
+        .create_profile(&profile_id, "Budget Profile")
+        .unwrap();
+
+    let flow_service = crate::ai::flow::FlowRuntimeService::with_mock_bridge(
+        storage_paths.clone(),
+        server.base_url.clone(),
+    );
+
+    // Request with max_credits = 10 (less than 40)
+    let req = crate::ai::flow::FlowGenerationRequest {
+        project_id: project_id.clone(),
+        source_media_id: "input.mp4".to_string(),
+        profile_id: profile_id.clone(),
+        transformation_intent: Some(crate::ai::transformation::TransformationIntent::FaceReplace),
+        identity_mode: Some(crate::ai::transformation::IdentityMode::Generated),
+        prompt: "Replace face".to_string(),
+        prompt_source: Some(PromptSource::User),
+        target_face: None,
+        max_credits: Some(10), // Insufficient budget!
+        preserve_original_audio: Some(true),
+    };
+
+    let start_result =
+        rt.block_on(flow_service.start_flow_generation(req, test_video_path.clone()));
+    assert!(start_result.is_err());
+    let err = start_result.unwrap_err();
+    assert!(err.contains("PRE_CLICK_REJECTED") || err.contains("exceed"));
+}
+
+#[test]
+fn test_phase_flow_p1_05_flow_cancellation_stops_worker() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let server = crate::ai::flow::MockFlowServer::start(
+            crate::ai::flow::MockScenario::GenerationPending, // Simulates ongoing generation
+        )
+        .await
+        .unwrap();
+
+        let temp_dir = tempdir().unwrap();
+        let storage_paths = StoragePaths::resolve_from_base(temp_dir.path());
+
+        let project_id = "test_cancel_proj".to_string();
+        let profile_id = "profile_cancel".to_string();
+
+        let project_media_dir = storage_paths.projects_dir.join(&project_id).join("media");
+        std::fs::create_dir_all(&project_media_dir).unwrap();
+        let test_video_path = project_media_dir.join("input.mp4");
+
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=1:size=320x240:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                test_video_path.to_str().unwrap(),
+            ])
+            .output();
+
+        if status.is_err() || !status.unwrap().status.success() {
+            return;
+        }
+
+        let profile_manager =
+            crate::ai::flow::FlowProfileManager::new(storage_paths.app_data_dir.clone());
+        profile_manager
+            .create_profile(&profile_id, "Cancel Profile")
+            .unwrap();
+
+        let flow_service = crate::ai::flow::FlowRuntimeService::with_mock_bridge(
+            storage_paths.clone(),
+            server.base_url.clone(),
+        );
+
+        let req = crate::ai::flow::FlowGenerationRequest {
+            project_id: project_id.clone(),
+            source_media_id: "input.mp4".to_string(),
+            profile_id: profile_id.clone(),
+            transformation_intent: Some(
+                crate::ai::transformation::TransformationIntent::FaceReplace,
+            ),
+            identity_mode: Some(crate::ai::transformation::IdentityMode::Generated),
+            prompt: "Replace face".to_string(),
+            prompt_source: Some(PromptSource::User),
+            target_face: None,
+            max_credits: Some(40),
+            preserve_original_audio: Some(true),
+        };
+
+        let start_snapshot = flow_service
+            .start_flow_generation(req, test_video_path.clone())
+            .await
+            .unwrap();
+        let parent_id = start_snapshot.parent_id.clone();
+
+        // Immediately request cancellation
+        let cancel_snap = flow_service
+            .cancel_flow_generation(&project_id, &parent_id)
+            .await
+            .unwrap();
+        assert_eq!(cancel_snap.state, crate::ai::flow::FlowJobState::Cancelled);
+
+        // Wait a moment and ensure status remains Cancelled
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let snap = flow_service
+            .get_flow_job_status(&project_id, &parent_id)
+            .unwrap();
+        assert_eq!(snap.state, crate::ai::flow::FlowJobState::Cancelled);
+    });
 }

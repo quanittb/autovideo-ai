@@ -53,6 +53,10 @@ pub struct FlowCreditRecord {
     #[serde(default)]
     pub observed_credit_balance: Option<u32>,
     pub completed_generations: u32,
+    #[serde(default)]
+    pub credit_budget_limit: Option<u32>,
+    #[serde(default)]
+    pub reserved_credits: u32,
 }
 
 impl Default for FlowCreditRecord {
@@ -61,6 +65,8 @@ impl Default for FlowCreditRecord {
             estimated_credits: 0,
             observed_credit_balance: None,
             completed_generations: 0,
+            credit_budget_limit: None,
+            reserved_credits: 0,
         }
     }
 }
