@@ -32,6 +32,33 @@ pub struct FlowGenerationSettings {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VideoEditModeVerification {
+    pub uploaded_video_attached: bool,
+    pub video_visible_in_active_edit: bool,
+    pub uploaded_video_edit_active: bool,
+    pub active_composer_mode: String,
+    #[serde(default)]
+    pub source_title: Option<String>,
+    pub input_trim_start: f64,
+    pub input_trim_end: f64,
+    pub input_selected_duration: f64,
+    pub model: String,
+    pub generation_length_sec: u32,
+    pub orientation: String,
+    pub output_count: u32,
+    pub resolution: String,
+    #[serde(default)]
+    pub credit_readback1: Option<String>,
+    #[serde(default)]
+    pub credit_readback2: Option<String>,
+    #[serde(default)]
+    pub credit_estimate_number: Option<u32>,
+    pub credit_stable: bool,
+    pub cost_classification: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FlowSettingsReadback {
     pub model: Option<String>,
     pub generation_length_sec: Option<u32>,
@@ -544,6 +571,30 @@ pub struct FlowActiveBrowserSession {
 }
 
 impl FlowActiveBrowserSession {
+    pub async fn ensure_uploaded_video_edit_active(
+        &mut self,
+        video_path: Option<&Path>,
+        expected_duration_sec: f64,
+        expected_orientation: &str,
+    ) -> Result<VideoEditModeVerification, String> {
+        let video_path_str = video_path.map(|p| p.to_string_lossy().to_string());
+        let val = self
+            .sidecar
+            .call_rpc(
+                "ensure_uploaded_video_edit_active",
+                serde_json::json!({
+                    "videoPath": video_path_str,
+                    "expectedDurationSec": expected_duration_sec,
+                    "expectedOrientation": expected_orientation
+                }),
+                Duration::from_secs(60),
+            )
+            .await?;
+
+        serde_json::from_value(val)
+            .map_err(|e| format!("Failed to parse edit mode verification: {}", e))
+    }
+
     pub async fn dry_run_preflight(
         &mut self,
         prompt: &str,

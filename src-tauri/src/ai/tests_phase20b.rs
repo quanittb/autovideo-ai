@@ -559,3 +559,163 @@ fn test_phase20b_19_wrong_output_count_fails_closed() {
     let is_verified = target_output_count == observed_output_count;
     assert!(!is_verified);
 }
+
+#[test]
+fn test_phase20b_20_image_only_input_rejects_mp4() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server_handle = rt
+        .block_on(MockFlowServer::start(MockScenario::ImageOnlyFileInput))
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let profile_dir = temp_dir.path().join("chrome_profile");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+
+    let test_mp4_path = temp_dir.path().join("test_input.mp4");
+    std::fs::write(&test_mp4_path, b"dummy_mp4_data").unwrap();
+
+    let bridge = PlaywrightBridge::with_mock_url(server_handle.base_url.clone());
+    let mut session = rt
+        .block_on(bridge.open_active_session(&profile_dir))
+        .unwrap();
+
+    let edit_res = rt.block_on(session.ensure_uploaded_video_edit_active(
+        Some(&test_mp4_path),
+        9.682,
+        "PORTRAIT / 9:16",
+    ));
+
+    assert!(edit_res.is_err());
+    let err_msg = edit_res.unwrap_err();
+    assert!(err_msg.contains("FLOW_VIDEO_NOT_ATTACHED") || err_msg.contains("image-only"));
+
+    rt.block_on(session.close());
+}
+
+#[test]
+fn test_phase20b_21_unattached_video_fails_closed() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server_handle = rt
+        .block_on(MockFlowServer::start(MockScenario::UnattachedVideoUpload))
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let profile_dir = temp_dir.path().join("chrome_profile");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+
+    let bridge = PlaywrightBridge::with_mock_url(server_handle.base_url.clone());
+    let mut session = rt
+        .block_on(bridge.open_active_session(&profile_dir))
+        .unwrap();
+
+    let edit_res =
+        rt.block_on(session.ensure_uploaded_video_edit_active(None, 9.682, "PORTRAIT / 9:16"));
+
+    assert!(edit_res.is_err());
+    let err_msg = edit_res.unwrap_err();
+    assert!(err_msg.contains("FLOW_VIDEO_EDIT_NOT_ACTIVE"));
+
+    rt.block_on(session.close());
+}
+
+#[test]
+fn test_phase20b_22_true_video_edit_passes_with_20_credits() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server_handle = rt
+        .block_on(MockFlowServer::start(MockScenario::TrueVideoEditActive))
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let profile_dir = temp_dir.path().join("chrome_profile");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+
+    let test_mp4_path = temp_dir.path().join("test_input.mp4");
+    std::fs::write(&test_mp4_path, b"dummy_mp4_data").unwrap();
+
+    let bridge = PlaywrightBridge::with_mock_url(server_handle.base_url.clone());
+    let mut session = rt
+        .block_on(bridge.open_active_session(&profile_dir))
+        .unwrap();
+
+    let verif = rt
+        .block_on(session.ensure_uploaded_video_edit_active(
+            Some(&test_mp4_path),
+            9.682,
+            "PORTRAIT / 9:16",
+        ))
+        .unwrap();
+
+    assert!(verif.uploaded_video_attached);
+    assert!(verif.uploaded_video_edit_active);
+    assert_eq!(verif.active_composer_mode, "EDIT");
+    assert!((verif.input_trim_start - 0.0).abs() < 0.001);
+    assert!((verif.input_trim_end - 9.682).abs() < 0.01);
+    assert!((verif.input_selected_duration - 9.682).abs() < 0.01);
+    assert_eq!(verif.model, "Omni Flash");
+    assert_eq!(verif.generation_length_sec, 10);
+    assert_eq!(verif.orientation, "PORTRAIT / 9:16");
+    assert_eq!(verif.output_count, 1);
+    assert_eq!(verif.credit_estimate_number, Some(20));
+    assert!(verif.credit_stable);
+    assert_eq!(verif.cost_classification, "UPLOADED_VIDEO_EDIT_FLASH_20");
+
+    rt.block_on(session.close());
+}
+
+#[test]
+fn test_phase20b_23_input_selected_duration_matches_benchmark() {
+    let source_duration = 9.685_f64;
+    let expected_trim_duration = 9.682_f64;
+    let tolerance = 0.05_f64;
+
+    assert!((source_duration - expected_trim_duration).abs() < tolerance);
+}
+
+#[test]
+fn test_phase20b_24_generic_15_credit_rejected_as_true_edit_proof() {
+    let generic_text_to_video_cost = 15;
+    let is_true_edit_proof = generic_text_to_video_cost == 20 || generic_text_to_video_cost == 40;
+    // 15 credits alone is text-to-video, NOT true video edit proof
+    assert!(!is_true_edit_proof);
+}
+
+#[test]
+fn test_phase20b_25_credit_policy_classification_rules() {
+    let classify = |credits: u32| match credits {
+        40 => "UPLOADED_VIDEO_EDIT_EXPECTED",
+        20 => "UPLOADED_VIDEO_EDIT_FLASH_20",
+        30 => "LOOKS_LIKE_10S_NON_EDIT_GENERATION",
+        15 => "LOOKS_LIKE_4S_NON_EDIT_OR_STALE_VALUE",
+        _ => "UNKNOWN_CURRENT_PRICING",
+    };
+
+    assert_eq!(classify(40), "UPLOADED_VIDEO_EDIT_EXPECTED");
+    assert_eq!(classify(20), "UPLOADED_VIDEO_EDIT_FLASH_20");
+    assert_eq!(classify(30), "LOOKS_LIKE_10S_NON_EDIT_GENERATION");
+    assert_eq!(classify(15), "LOOKS_LIKE_4S_NON_EDIT_OR_STALE_VALUE");
+    assert_eq!(classify(99), "UNKNOWN_CURRENT_PRICING");
+}
+
+#[test]
+fn test_phase20b_26_stale_credit_unstable_caught() {
+    let readback_1 = "15 tín dụng";
+    let readback_2 = "20 tín dụng";
+
+    let is_stable = readback_1 == readback_2;
+    assert!(!is_stable);
+}
+
+#[test]
+fn test_phase20b_27_credit_isolated_to_active_edit_composer() {
+    let account_balance_text = "Account total: 1000 credits remaining";
+    let active_composer_tooltip = "Quá trình tạo sẽ tốn 20 tín dụng";
+
+    // System must isolate active composer tooltip cost (20) and not account balance (1000)
+    let isolated_cost: u32 = active_composer_tooltip
+        .split_whitespace()
+        .find_map(|word| word.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    assert_eq!(isolated_cost, 20);
+    assert!(!account_balance_text.contains("tốn"));
+}

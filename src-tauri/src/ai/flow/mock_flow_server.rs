@@ -28,6 +28,12 @@ pub enum MockScenario {
     MissingOrientationSelector,
     ReadbackMismatch,
     WrongOutputCount,
+    ImageOnlyFileInput,
+    UnattachedVideoUpload,
+    TrueVideoEditActive,
+    StaleCreditEstimate,
+    CreditPolicyConflict,
+    EditModeReset,
 }
 
 pub struct MockFlowServerHandle {
@@ -330,6 +336,72 @@ impl MockFlowServer {
     pop.setAttribute('data-state', 'open');
   });
 </script>
+</body>
+</html>"#;
+                ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+            }
+            MockScenario::ImageOnlyFileInput => {
+                let html = r#"<!DOCTYPE html>
+<html>
+<head><title>Google Flow Mock - Image Only</title></head>
+<body>
+<div id="flow-app" data-authenticated="true">
+  <textarea id="prompt-input" placeholder="Enter prompt"></textarea>
+  <input type="file" id="image-upload" accept="image/*" />
+  <button id="generate-button">Generate</button>
+</div>
+</body>
+</html>"#;
+                ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+            }
+            MockScenario::UnattachedVideoUpload => {
+                let html = r#"<!DOCTYPE html>
+<html>
+<head><title>Google Flow Mock - Unattached Video</title></head>
+<body>
+<div id="flow-app" data-authenticated="true">
+  <textarea id="prompt-input" placeholder="Enter prompt"></textarea>
+  <button id="generate-button">Generate</button>
+</div>
+</body>
+</html>"#;
+                ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+            }
+            MockScenario::TrueVideoEditActive => {
+                let html = r#"<!DOCTYPE html>
+<html>
+<head><title>Google Flow Mock - True Video Edit</title></head>
+<body>
+<div id="flow-app" data-authenticated="true" data-edit-active="true">
+  <div id="source-video-chip" data-testid="source-chip">flow_acceptance_01.mp4</div>
+  <div class="lf-player-container">00:09:16</div>
+  <textarea id="prompt-input" placeholder="Mô tả nội dung bạn muốn chỉnh sửa"></textarea>
+  <div id="credit-info">Quá trình tạo sẽ tốn 20 tín dụng</div>
+  <button id="generate-button">Generate</button>
+  <div id="progress-indicator" data-progress="100" data-status="ready">Ready</div>
+  <a id="download-link" href="/download">Download Generated Video</a>
+</div>
+<script>
+  document.getElementById('generate-button').addEventListener('click', function() {
+    fetch('/api/click', { method: 'POST' });
+    document.getElementById('download-link').style.display = 'block';
+  });
+</script>
+</body>
+</html>"#;
+                ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+            }
+            MockScenario::CreditPolicyConflict => {
+                let html = r#"<!DOCTYPE html>
+<html>
+<head><title>Google Flow Mock - Credit Conflict</title></head>
+<body>
+<div id="flow-app" data-authenticated="true" data-edit-active="true">
+  <div id="source-video-chip" data-testid="source-chip">flow_acceptance_01.mp4</div>
+  <textarea id="prompt-input" placeholder="Mô tả nội dung bạn muốn chỉnh sửa"></textarea>
+  <div id="credit-info">Quá trình tạo sẽ tốn 15 tín dụng</div>
+  <button id="generate-button">Generate</button>
+</div>
 </body>
 </html>"#;
                 ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())

@@ -49,6 +49,10 @@ export class FlowRpcBridge {
           const dryRunRes = await this.adapter.dryRunPreflight(msg.params);
           return { id: msg.id, result: dryRunRes };
 
+        case 'ensure_uploaded_video_edit_active':
+          const editVerif = await this.adapter.ensureUploadedVideoEditActive(msg.params);
+          return { id: msg.id, result: editVerif };
+
         case 'close_browser':
           await this.adapter.closeBrowser();
           return { id: msg.id, result: { success: true } };
@@ -76,6 +80,14 @@ export class FlowRpcBridge {
         code = 'DOWNLOAD_CONTROL_NOT_OBSERVED';
       } else if (errMsg.startsWith('FLOW_CONFIGURATION_UNVERIFIED')) {
         code = 'FLOW_CONFIGURATION_UNVERIFIED';
+      } else if (errMsg.startsWith('FLOW_VIDEO_NOT_ATTACHED')) {
+        code = 'FLOW_VIDEO_NOT_ATTACHED';
+      } else if (errMsg.startsWith('FLOW_VIDEO_EDIT_NOT_ACTIVE')) {
+        code = 'FLOW_VIDEO_EDIT_NOT_ACTIVE';
+      } else if (errMsg.startsWith('FLOW_CREDIT_UI_POLICY_CONFLICT')) {
+        code = 'FLOW_CREDIT_UI_POLICY_CONFLICT';
+      } else if (errMsg.startsWith('FLOW_STALE_CREDIT_DETECTED')) {
+        code = 'FLOW_STALE_CREDIT_DETECTED';
       } else if (errMsg.startsWith('SECURITY_VIOLATION')) {
         code = 'SECURITY_VIOLATION';
       }
