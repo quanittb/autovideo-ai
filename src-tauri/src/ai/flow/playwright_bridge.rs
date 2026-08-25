@@ -17,6 +17,34 @@ pub struct FlowPollResult {
     pub error_message: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowGenerationSettings {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub generation_length_sec: Option<u32>,
+    #[serde(default)]
+    pub orientation: Option<String>,
+    #[serde(default)]
+    pub output_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowSettingsReadback {
+    pub model: Option<String>,
+    pub generation_length_sec: Option<u32>,
+    pub orientation: Option<String>,
+    pub output_count: Option<u32>,
+    #[serde(default)]
+    pub credit_estimate_text: Option<String>,
+    #[serde(default)]
+    pub credit_estimate_number: Option<u32>,
+    #[serde(default)]
+    pub summary_button_text: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JsonRpcRequest {
     id: String,

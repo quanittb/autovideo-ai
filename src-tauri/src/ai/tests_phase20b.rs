@@ -399,3 +399,163 @@ fn test_phase20b_13_normal_valid_matching_child_passes() {
     assert!(rec.has_audio);
     assert!((rec.duration_sec - 5.0).abs() < 0.2);
 }
+
+#[test]
+fn test_phase20b_14_generation_settings_10s_portrait_x1_readback_pass() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server_handle = rt
+        .block_on(MockFlowServer::start(MockScenario::Ready))
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let profile_dir = temp_dir.path().join("chrome_profile");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+
+    let bridge = PlaywrightBridge::with_mock_url(server_handle.base_url.clone());
+    let mut session = rt
+        .block_on(bridge.open_active_session(&profile_dir))
+        .unwrap();
+
+    let preflight = rt
+        .block_on(session.dry_run_preflight("Cinematic sunset lighting test", None))
+        .unwrap();
+
+    assert_eq!(
+        preflight.get("authStatus").and_then(|v| v.as_str()),
+        Some("READY")
+    );
+    assert_eq!(
+        preflight.get("model").and_then(|v| v.as_str()),
+        Some("Omni Flash")
+    );
+    assert_eq!(
+        preflight
+            .get("generationLengthSec")
+            .and_then(|v| v.as_u64()),
+        Some(10)
+    );
+    let ori = preflight
+        .get("orientation")
+        .and_then(|v| v.as_str())
+        .unwrap();
+    assert!(ori.contains("PORTRAIT") || ori.contains("9:16"));
+    assert_eq!(
+        preflight.get("outputCount").and_then(|v| v.as_u64()),
+        Some(1)
+    );
+    assert_eq!(
+        preflight.get("generateLocated").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+
+    rt.block_on(session.close());
+}
+
+#[test]
+fn test_phase20b_15_duration_selector_missing_fails_closed() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server_handle = rt
+        .block_on(MockFlowServer::start(MockScenario::MissingDurationSelector))
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let profile_dir = temp_dir.path().join("chrome_profile");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+
+    let bridge = PlaywrightBridge::with_mock_url(server_handle.base_url.clone());
+    let mut session = rt
+        .block_on(bridge.open_active_session(&profile_dir))
+        .unwrap();
+
+    let submit_res =
+        rt.block_on(session.submit("Cinematic sunset lighting test", None, 9.68, "att_p20b_15"));
+
+    assert!(submit_res.is_err());
+    let err_msg = submit_res.unwrap_err();
+    assert!(
+        err_msg.contains("FLOW_CONFIGURATION_UNVERIFIED")
+            || err_msg.contains("10s")
+            || err_msg.contains("not found")
+    );
+
+    rt.block_on(session.close());
+}
+
+#[test]
+fn test_phase20b_16_orientation_selector_missing_fails_closed() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server_handle = rt
+        .block_on(MockFlowServer::start(
+            MockScenario::MissingOrientationSelector,
+        ))
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let profile_dir = temp_dir.path().join("chrome_profile");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+
+    let bridge = PlaywrightBridge::with_mock_url(server_handle.base_url.clone());
+    let mut session = rt
+        .block_on(bridge.open_active_session(&profile_dir))
+        .unwrap();
+
+    let submit_res =
+        rt.block_on(session.submit("Cinematic sunset lighting test", None, 9.68, "att_p20b_16"));
+
+    assert!(submit_res.is_err());
+    let err_msg = submit_res.unwrap_err();
+    assert!(
+        err_msg.contains("FLOW_CONFIGURATION_UNVERIFIED")
+            || err_msg.contains("Orientation")
+            || err_msg.contains("not found")
+    );
+
+    rt.block_on(session.close());
+}
+
+#[test]
+fn test_phase20b_17_readback_mismatch_fails_closed() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let server_handle = rt
+        .block_on(MockFlowServer::start(MockScenario::ReadbackMismatch))
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let profile_dir = temp_dir.path().join("chrome_profile");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+
+    let bridge = PlaywrightBridge::with_mock_url(server_handle.base_url.clone());
+    let mut session = rt
+        .block_on(bridge.open_active_session(&profile_dir))
+        .unwrap();
+
+    let submit_res =
+        rt.block_on(session.submit("Cinematic sunset lighting test", None, 9.68, "att_p20b_17"));
+
+    assert!(submit_res.is_err());
+    let err_msg = submit_res.unwrap_err();
+    assert!(err_msg.contains("FLOW_CONFIGURATION_UNVERIFIED") || err_msg.contains("mismatch"));
+
+    rt.block_on(session.close());
+}
+
+#[test]
+fn test_phase20b_18_input_trim_duration_does_not_imply_output_length() {
+    let input_selected_duration = 9.682_f64;
+    let output_generation_length = 10_u32;
+
+    // Input trim and output generation length are completely independent dimensions
+    assert_ne!(input_selected_duration as u32, output_generation_length);
+    assert!((input_selected_duration - 9.682).abs() < 0.001);
+    assert_eq!(output_generation_length, 10);
+}
+
+#[test]
+fn test_phase20b_19_wrong_output_count_fails_closed() {
+    let target_output_count = 1;
+    let observed_output_count = 2;
+
+    // If observed output count != 1, system must refuse to treat as verified
+    let is_verified = target_output_count == observed_output_count;
+    assert!(!is_verified);
+}

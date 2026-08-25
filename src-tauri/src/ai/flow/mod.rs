@@ -26,7 +26,8 @@ pub use mock_flow_server::{MockFlowServer, MockFlowServerHandle, MockScenario};
 pub use orchestrator::FlowOrchestrator;
 pub use output_validator::FlowOutputValidator;
 pub use playwright_bridge::{
-    FlowAuthStatus, FlowPollResult, PlaywrightBridge, PlaywrightSidecarProcess,
+    FlowAuthStatus, FlowGenerationSettings, FlowPollResult, FlowSettingsReadback, PlaywrightBridge,
+    PlaywrightSidecarProcess,
 };
 pub use profile::{FlowProfileGuard, FlowProfileInfo, FlowProfileManager, FlowProfileSnapshot};
 pub use prompt_optimizer::{

@@ -74,6 +74,8 @@ export class FlowRpcBridge {
         code = 'GENERATION_AMBIGUOUS';
       } else if (errMsg.startsWith('DOWNLOAD_CONTROL_NOT_OBSERVED')) {
         code = 'DOWNLOAD_CONTROL_NOT_OBSERVED';
+      } else if (errMsg.startsWith('FLOW_CONFIGURATION_UNVERIFIED')) {
+        code = 'FLOW_CONFIGURATION_UNVERIFIED';
       } else if (errMsg.startsWith('SECURITY_VIOLATION')) {
         code = 'SECURITY_VIOLATION';
       }

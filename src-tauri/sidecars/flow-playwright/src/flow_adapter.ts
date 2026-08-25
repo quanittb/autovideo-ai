@@ -188,6 +188,336 @@ export async function locateGenerateControl(page: Page) {
   return null;
 }
 
+export interface FlowGenerationSettings {
+  model?: 'Gemini Omni Flash' | 'Omni Flash' | 'Veo 2' | string;
+  generationLengthSec?: 4 | 6 | 8 | 10 | number;
+  orientation?: 'PORTRAIT' | 'LANDSCAPE' | '9:16' | '16:9' | string;
+  outputCount?: 1 | 2 | 3 | 4 | number;
+}
+
+export interface FlowGenerationSettingsReadback {
+  model: string;
+  generationLengthSec: number;
+  orientation: string;
+  outputCount: number;
+  creditEstimateText?: string;
+  creditEstimateNumber?: number;
+  summaryButtonText: string;
+}
+
+/**
+ * Shared Helper: Locates the settings summary/trigger button in the active composer.
+ */
+export async function locateSettingsControl(page: Page) {
+  const settingsSelectors = [
+    'button:has-text("Video ·")',
+    'button:has-text("crop_16_9")',
+    'button:has-text("crop_9_16")',
+    'button:has-text("720p")',
+    'button:has-text("1080p")',
+    'button:has-text("8s")',
+    'button:has-text("10s")',
+    'button:has-text("4s")',
+    'button:has-text("6s")',
+    '[data-testid="generation-settings-button"]',
+    'button#settings-button',
+  ];
+
+  for (const selector of settingsSelectors) {
+    const loc = page.locator(selector);
+    const count = await loc.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const btn = loc.nth(i);
+      const isVisible = await btn.isVisible().catch(() => false);
+      if (!isVisible) continue;
+
+      const text = (await btn.innerText().catch(() => '')).trim().toLowerCase();
+      if (
+        text.includes('video') ||
+        text.includes('720p') ||
+        text.includes('1080p') ||
+        text.includes('crop_') ||
+        text.includes('8s') ||
+        text.includes('10s') ||
+        text.includes('4s') ||
+        text.includes('6s') ||
+        selector === 'button#settings-button'
+      ) {
+        return btn;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Shared Helper: Opens the generation settings popover/menu if not already open.
+ */
+export async function openGenerationSettings(page: Page) {
+  const openMenu = page
+    .locator('[role="menu"][data-state="open"], div[data-radix-menu-content][data-state="open"], #settings-popover[data-state="open"]')
+    .first();
+  if ((await openMenu.count().catch(() => 0)) > 0 && (await openMenu.isVisible().catch(() => false))) {
+    return openMenu;
+  }
+
+  const settingsBtn = await locateSettingsControl(page);
+  if (!settingsBtn) {
+    throw new Error('FLOW_CONFIGURATION_UNVERIFIED: Settings trigger button not found in composer');
+  }
+
+  await settingsBtn.click();
+  await page.waitForTimeout(500);
+
+  const menu = page.locator('[role="menu"], div[data-radix-menu-content], #settings-popover').first();
+  const count = await menu.count().catch(() => 0);
+  if (count === 0 || !(await menu.isVisible().catch(() => false))) {
+    throw new Error('FLOW_CONFIGURATION_UNVERIFIED: Settings menu did not open after click');
+  }
+  return menu;
+}
+
+/**
+ * Shared Helper: Closes the generation settings popover/menu.
+ */
+export async function closeGenerationSettings(page: Page) {
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+}
+
+/**
+ * Shared Helper: Selects model in the open settings menu.
+ */
+export async function selectVideoModel(page: Page, modelName: string) {
+  const menu = await openGenerationSettings(page);
+  const modelDropdownBtn = menu
+    .locator('button:has-text("Omni Flash"), button:has-text("Veo"), button:has-text("Flash"), [data-testid="model-select"]')
+    .first();
+  const count = await modelDropdownBtn.count().catch(() => 0);
+  if (count === 0) {
+    throw new Error('FLOW_CONFIGURATION_UNVERIFIED: Model selector dropdown button not found');
+  }
+
+  const currentModelText = (await modelDropdownBtn.innerText().catch(() => '')).trim();
+  if (!currentModelText.toLowerCase().includes(modelName.toLowerCase().replace('gemini ', ''))) {
+    await modelDropdownBtn.click();
+    await page.waitForTimeout(300);
+    const modelOption = page
+      .locator(
+        `[role="menuitem"]:has-text("${modelName}"), [role="option"]:has-text("${modelName}"), button:has-text("${modelName}")`
+      )
+      .first();
+    if ((await modelOption.count().catch(() => 0)) > 0) {
+      await modelOption.click();
+      await page.waitForTimeout(300);
+    } else {
+      throw new Error(`FLOW_CONFIGURATION_UNVERIFIED: Model option "${modelName}" not found in dropdown`);
+    }
+  }
+}
+
+/**
+ * Shared Helper: Selects generation length in seconds (4, 6, 8, 10).
+ */
+export async function selectGenerationLength(page: Page, lengthSec: number) {
+  const menu = await openGenerationSettings(page);
+  const lengthTab = menu
+    .locator(`button[role="tab"]:has-text("${lengthSec}s"), button:has-text("${lengthSec}s"), [data-testid="length-${lengthSec}s"]`)
+    .first();
+  const count = await lengthTab.count().catch(() => 0);
+  if (count === 0) {
+    throw new Error(`FLOW_CONFIGURATION_UNVERIFIED: Generation length tab "${lengthSec}s" not found`);
+  }
+  await lengthTab.click();
+  await page.waitForTimeout(300);
+}
+
+/**
+ * Shared Helper: Selects orientation / aspect ratio ("PORTRAIT" / "9:16" or "LANDSCAPE" / "16:9").
+ */
+export async function selectOrientation(page: Page, orientation: string) {
+  const menu = await openGenerationSettings(page);
+  const isPortrait =
+    orientation.toUpperCase().includes('PORTRAIT') ||
+    orientation.includes('9:16') ||
+    orientation.toLowerCase().includes('dọc');
+  const selector = isPortrait
+    ? 'button[role="tab"]:has-text("9:16"), button[role="tab"]:has-text("crop_9_16"), button:has-text("crop_9_16"), button:has-text("9:16"), [data-testid="ori-portrait"]'
+    : 'button[role="tab"]:has-text("16:9"), button[role="tab"]:has-text("crop_16_9"), button:has-text("crop_16_9"), button:has-text("16:9"), [data-testid="ori-landscape"]';
+
+  const tab = menu.locator(selector).first();
+  const count = await tab.count().catch(() => 0);
+  if (count === 0) {
+    throw new Error(`FLOW_CONFIGURATION_UNVERIFIED: Orientation tab for "${orientation}" not found`);
+  }
+  await tab.click();
+  await page.waitForTimeout(300);
+}
+
+/**
+ * Shared Helper: Selects output count (1, 2, 3, 4).
+ */
+export async function selectOutputCount(page: Page, outputCount: number) {
+  const menu = await openGenerationSettings(page);
+  const countTab = menu
+    .locator(`button[role="tab"]:has-text("x${outputCount}"), button:has-text("x${outputCount}"), [data-testid="count-x${outputCount}"]`)
+    .first();
+  const count = await countTab.count().catch(() => 0);
+  if (count === 0) {
+    throw new Error(`FLOW_CONFIGURATION_UNVERIFIED: Output count tab "x${outputCount}" not found`);
+  }
+  await countTab.click();
+  await page.waitForTimeout(300);
+}
+
+/**
+ * Shared Helper: Reads back the current settings from the UI.
+ */
+export async function readGenerationSettings(page: Page): Promise<FlowGenerationSettingsReadback> {
+  const menu = await openGenerationSettings(page);
+
+  // 1. Model readback
+  const modelBtn = menu
+    .locator('button:has-text("Omni Flash"), button:has-text("Veo"), button:has-text("Flash"), [data-testid="model-select"]')
+    .first();
+  let model = 'UNKNOWN';
+  if ((await modelBtn.count().catch(() => 0)) > 0) {
+    const raw = (await modelBtn.innerText().catch(() => '')).trim();
+    model = raw.replace('arrow_drop_down', '').trim();
+  }
+
+  // 2. Generation length readback
+  let generationLengthSec = 0;
+  const activeLengthTabs = menu.locator(
+    'button[role="tab"][data-state="active"]:has-text("s"), button[role="tab"][aria-selected="true"]:has-text("s"), button.active:has-text("s"), [data-testid^="length-"][data-state="active"]'
+  );
+  const lengthCount = await activeLengthTabs.count().catch(() => 0);
+  for (let i = 0; i < lengthCount; i++) {
+    const text = (await activeLengthTabs.nth(i).innerText().catch(() => '')).trim();
+    const match = text.match(/(\d+)s/);
+    if (match) {
+      generationLengthSec = parseInt(match[1], 10);
+      break;
+    }
+  }
+
+  // 3. Orientation readback
+  let orientation = 'UNKNOWN';
+  const activeOrientationTabs = menu.locator(
+    'button[role="tab"][data-state="active"]:has-text("9:16"), button[role="tab"][data-state="active"]:has-text("16:9"), button[role="tab"][aria-selected="true"]:has-text("9:16"), button[role="tab"][aria-selected="true"]:has-text("16:9"), button[role="tab"][data-state="active"]:has-text("crop_9_16"), button[role="tab"][data-state="active"]:has-text("crop_16_9"), button.active:has-text("9:16"), button.active:has-text("16:9"), [data-testid^="ori-"][data-state="active"]'
+  );
+  const oriCount = await activeOrientationTabs.count().catch(() => 0);
+  if (oriCount > 0) {
+    const oriText = (await activeOrientationTabs.first().innerText().catch(() => '')).trim();
+    if (oriText.includes('9:16') || oriText.includes('crop_9_16')) {
+      orientation = 'PORTRAIT / 9:16';
+    } else if (oriText.includes('16:9') || oriText.includes('crop_16_9')) {
+      orientation = 'LANDSCAPE / 16:9';
+    }
+  }
+
+  // 4. Output count readback
+  let outputCount = 0;
+  const activeCountTabs = menu.locator(
+    'button[role="tab"][data-state="active"]:has-text("x"), button[role="tab"][aria-selected="true"]:has-text("x"), button.active:has-text("x"), [data-testid^="count-"][data-state="active"]'
+  );
+  const cntCount = await activeCountTabs.count().catch(() => 0);
+  for (let i = 0; i < cntCount; i++) {
+    const text = (await activeCountTabs.nth(i).innerText().catch(() => '')).trim();
+    const match = text.match(/x(\d+)/i);
+    if (match) {
+      outputCount = parseInt(match[1], 10);
+      break;
+    }
+  }
+
+  // 5. Credit estimate text readback
+  const menuText = (await menu.innerText().catch(() => '')).trim();
+  let creditEstimateText = '';
+  let creditEstimateNumber: number | undefined;
+  const creditMatch =
+    menuText.match(/(\d+)\s*(tín dụng|credits)/i) ||
+    menuText.match(/(tốn|cost|costs|requires)\s*(\d+)/i);
+  if (creditMatch) {
+    creditEstimateText = creditMatch[0];
+    const num = parseInt(creditMatch[1] || creditMatch[2], 10);
+    if (!isNaN(num)) creditEstimateNumber = num;
+  }
+
+  // Close menu to verify summary button
+  await closeGenerationSettings(page);
+
+  const summaryBtn = await locateSettingsControl(page);
+  const summaryButtonText = summaryBtn ? (await summaryBtn.innerText().catch(() => '')).trim() : '';
+
+  return {
+    model,
+    generationLengthSec,
+    orientation,
+    outputCount,
+    creditEstimateText,
+    creditEstimateNumber,
+    summaryButtonText,
+  };
+}
+
+/**
+ * Shared Helper: Configures settings and validates readback strictly (Fail Closed).
+ */
+export async function configureGenerationSettings(
+  page: Page,
+  target: FlowGenerationSettings
+): Promise<FlowGenerationSettingsReadback> {
+  // 1. Open and apply each target setting
+  await openGenerationSettings(page);
+
+  if (target.model) {
+    await selectVideoModel(page, target.model);
+  }
+  if (target.orientation) {
+    await selectOrientation(page, target.orientation);
+  }
+  if (target.generationLengthSec) {
+    await selectGenerationLength(page, target.generationLengthSec);
+  }
+  if (target.outputCount) {
+    await selectOutputCount(page, target.outputCount);
+  }
+
+  // 2. Read back state
+  const readback = await readGenerationSettings(page);
+
+  // 3. Strict Fail-Closed Verification
+  if (target.model && !readback.model.toLowerCase().includes(target.model.toLowerCase().replace('gemini ', ''))) {
+    throw new Error(
+      `FLOW_CONFIGURATION_UNVERIFIED: Model readback mismatch (expected ${target.model}, got ${readback.model})`
+    );
+  }
+  if (target.generationLengthSec && readback.generationLengthSec !== target.generationLengthSec) {
+    throw new Error(
+      `FLOW_CONFIGURATION_UNVERIFIED: Generation length readback mismatch (expected ${target.generationLengthSec}s, got ${readback.generationLengthSec}s)`
+    );
+  }
+  if (target.orientation) {
+    const isTargetPortrait =
+      target.orientation.toUpperCase().includes('PORTRAIT') || target.orientation.includes('9:16');
+    const isReadbackPortrait =
+      readback.orientation.includes('9:16') || readback.orientation.includes('PORTRAIT');
+    if (isTargetPortrait !== isReadbackPortrait) {
+      throw new Error(
+        `FLOW_CONFIGURATION_UNVERIFIED: Orientation readback mismatch (expected ${target.orientation}, got ${readback.orientation})`
+      );
+    }
+  }
+  if (target.outputCount && readback.outputCount !== target.outputCount) {
+    throw new Error(
+      `FLOW_CONFIGURATION_UNVERIFIED: Output count readback mismatch (expected ${target.outputCount}, got ${readback.outputCount})`
+    );
+  }
+
+  return readback;
+}
+
 /**
  * Shared Helper: Authoritative semantic state detection. Fails closed on unrecognized DOM.
  * NEVER fabricates arbitrary 50% progress.
@@ -576,6 +906,13 @@ export class FlowUiAdapterV1 {
     uploadLocated: boolean;
     generateLocated: boolean;
     generateEnabled: boolean;
+    model?: string;
+    generationLengthSec?: number;
+    orientation?: string;
+    outputCount?: number;
+    creditEstimateText?: string;
+    creditEstimateNumber?: number;
+    summaryButtonText?: string;
   }> {
     if (!this.page) throw new Error('Browser not launched');
 
@@ -633,6 +970,25 @@ export class FlowUiAdapterV1 {
     if (params.videoPath) {
       const uploadEl = await locateUploadControl(this.page);
       uploadLocated = uploadEl !== null;
+      if (uploadEl && fs.existsSync(params.videoPath)) {
+        try {
+          await uploadEl.setInputFiles(params.videoPath);
+          await this.page.waitForTimeout(3000);
+        } catch (_) {}
+      }
+    }
+
+    let settingsReadback: FlowGenerationSettingsReadback | null = null;
+    try {
+      // Configure target settings explicitly: Omni Flash, 10s, 9:16 portrait, x1 output
+      settingsReadback = await configureGenerationSettings(this.page, {
+        model: 'Omni Flash',
+        generationLengthSec: 10,
+        orientation: 'PORTRAIT',
+        outputCount: 1,
+      });
+    } catch (e: any) {
+      console.error(`[dryRunPreflight] Failed to configure settings: ${e?.message || String(e)}`);
     }
 
     const generateEl = await locateGenerateControl(this.page);
@@ -651,6 +1007,13 @@ export class FlowUiAdapterV1 {
       uploadLocated,
       generateLocated,
       generateEnabled,
+      model: settingsReadback?.model,
+      generationLengthSec: settingsReadback?.generationLengthSec,
+      orientation: settingsReadback?.orientation,
+      outputCount: settingsReadback?.outputCount,
+      creditEstimateText: settingsReadback?.creditEstimateText,
+      creditEstimateNumber: settingsReadback?.creditEstimateNumber,
+      summaryButtonText: settingsReadback?.summaryButtonText,
     };
   }
 
@@ -744,7 +1107,25 @@ export class FlowUiAdapterV1 {
       }
     }
 
-    // 3. Locate Generate Button via shared helper (bounded wait for enabled state)
+    // 3. Configure explicit generation settings (10s, 9:16 portrait, x1 output, Omni Flash)
+    console.error('[submitPromptGeneration] Configuring generation settings (10s, 9:16 portrait, x1 output, Omni Flash)...');
+    try {
+      const settings = await configureGenerationSettings(page, {
+        model: 'Omni Flash',
+        generationLengthSec: 10,
+        orientation: 'PORTRAIT',
+        outputCount: 1,
+      });
+      console.error(
+        `[submitPromptGeneration] Settings configured: length=${settings.generationLengthSec}s, ori=${settings.orientation}, count=${settings.outputCount}, model=${settings.model}, cost=${settings.creditEstimateText || 'N/A'}`
+      );
+    } catch (err: any) {
+      console.error(`[submitPromptGeneration] Failed to configure generation settings: ${err?.message || String(err)}`);
+      // Fail closed if settings cannot be configured
+      throw err;
+    }
+
+    // 4. Locate Generate Button via shared helper (bounded wait for enabled state)
     console.error('[submitPromptGeneration] Locating Generate button...');
     let generateBtn = null;
     let btnEnabled = false;

@@ -24,6 +24,10 @@ pub enum MockScenario {
     NoTransitionAfterClick,
     UnknownPollDom,
     ResultMissingDownload,
+    MissingDurationSelector,
+    MissingOrientationSelector,
+    ReadbackMismatch,
+    WrongOutputCount,
 }
 
 pub struct MockFlowServerHandle {
@@ -214,46 +218,19 @@ impl MockFlowServer {
                 ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
             }
             MockScenario::DelayAfterGenerateClick => {
-                let html = r#"<!DOCTYPE html>
-<html>
-<head><title>Google Flow Mock - Delay Window</title></head>
-<body>
-<div id="flow-app" data-authenticated="true">
-  <textarea id="prompt-input" placeholder="Enter prompt"></textarea>
-  <input type="file" id="video-upload" />
-  <button id="generate-button">Generate</button>
-  <div id="progress-indicator" data-progress="0">Waiting</div>
-  <a id="download-link" href="/download" style="display:none;">Download Generated Video</a>
-</div>
-<script>
-  document.getElementById('generate-button').addEventListener('click', function() {
-    fetch('/api/click', { method: 'POST' });
-    document.getElementById('progress-indicator').innerText = 'Generating (delayed)...';
-    document.getElementById('progress-indicator').setAttribute('data-progress', '10');
-  });
-</script>
-</body>
-</html>"#;
+                let html = Self::render_interactive_workspace(
+                    r#"<div id="progress-indicator" data-progress="0">Waiting</div>
+  <a id="download-link" href="/download" style="display:none;">Download Generated Video</a>"#,
+                    r#"document.getElementById('progress-indicator').innerText = 'Generating (delayed)...';
+    document.getElementById('progress-indicator').setAttribute('data-progress', '10');"#,
+                );
                 ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
             }
             MockScenario::NoTransitionAfterClick => {
-                let html = r#"<!DOCTYPE html>
-<html>
-<head><title>Google Flow Mock - No Transition</title></head>
-<body>
-<div id="flow-app" data-authenticated="true">
-  <textarea id="prompt-input" placeholder="Enter prompt"></textarea>
-  <input type="file" id="video-upload" />
-  <button id="generate-button">Generate</button>
-</div>
-<script>
-  document.getElementById('generate-button').addEventListener('click', function() {
-    fetch('/api/click', { method: 'POST' });
-    // Does NOT transition DOM -> stays ambiguous
-  });
-</script>
-</body>
-</html>"#;
+                let html = Self::render_interactive_workspace(
+                    "",
+                    "// No DOM transition -> stays ambiguous",
+                );
                 ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
             }
             MockScenario::UnknownPollDom => {
@@ -274,29 +251,192 @@ impl MockFlowServer {
 </html>"#;
                 ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
             }
-            _ => {
+            MockScenario::MissingDurationSelector => {
                 let html = r#"<!DOCTYPE html>
 <html>
-<head><title>Google Flow Mock</title></head>
+<head><title>Google Flow Mock - Missing Duration</title></head>
 <body>
 <div id="flow-app" data-authenticated="true">
   <textarea id="prompt-input" placeholder="Enter prompt"></textarea>
-  <input type="file" id="video-upload" />
+  <button id="settings-button">Video · 720p · 8s crop_16_9 x2</button>
+  <div id="settings-popover" role="menu" data-state="closed" style="display:none;">
+    <button data-testid="model-select">Omni Flash</button>
+    <button role="tab" data-testid="ori-portrait">crop_9_16 9:16</button>
+    <button role="tab" data-testid="ori-landscape" data-state="active">crop_16_9 16:9</button>
+    <button role="tab" data-testid="count-x1">x1</button>
+  </div>
   <button id="generate-button">Generate</button>
-  <div id="progress-indicator" data-progress="100" data-status="ready">Ready</div>
-  <a id="download-link" href="/download">Download Generated Video</a>
 </div>
 <script>
-  document.getElementById('generate-button').addEventListener('click', function() {
-    fetch('/api/click', { method: 'POST' });
-    document.getElementById('download-link').style.display = 'block';
+  document.getElementById('settings-button').addEventListener('click', function() {
+    const pop = document.getElementById('settings-popover');
+    pop.style.display = 'block';
+    pop.setAttribute('data-state', 'open');
   });
 </script>
 </body>
 </html>"#;
                 ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
             }
+            MockScenario::MissingOrientationSelector => {
+                let html = r#"<!DOCTYPE html>
+<html>
+<head><title>Google Flow Mock - Missing Orientation</title></head>
+<body>
+<div id="flow-app" data-authenticated="true">
+  <textarea id="prompt-input" placeholder="Enter prompt"></textarea>
+  <button id="settings-button">Video · 720p · 8s crop_16_9 x2</button>
+  <div id="settings-popover" role="menu" data-state="closed" style="display:none;">
+    <button data-testid="model-select">Omni Flash</button>
+    <button role="tab" data-testid="length-10s">10s</button>
+    <button role="tab" data-testid="count-x1">x1</button>
+  </div>
+  <button id="generate-button">Generate</button>
+</div>
+<script>
+  document.getElementById('settings-button').addEventListener('click', function() {
+    const pop = document.getElementById('settings-popover');
+    pop.style.display = 'block';
+    pop.setAttribute('data-state', 'open');
+  });
+</script>
+</body>
+</html>"#;
+                ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+            }
+            MockScenario::ReadbackMismatch => {
+                let html = r#"<!DOCTYPE html>
+<html>
+<head><title>Google Flow Mock - Readback Mismatch</title></head>
+<body>
+<div id="flow-app" data-authenticated="true">
+  <textarea id="prompt-input" placeholder="Enter prompt"></textarea>
+  <button id="settings-button">Video · 720p · 8s crop_16_9 x2</button>
+  <div id="settings-popover" role="menu" data-state="closed" style="display:none;">
+    <button data-testid="model-select">Omni Flash</button>
+    <button role="tab" data-testid="ori-portrait" data-state="inactive">crop_9_16 9:16</button>
+    <button role="tab" data-testid="ori-landscape" data-state="active">crop_16_9 16:9</button>
+    <button role="tab" data-testid="length-10s" data-state="inactive">10s</button>
+    <button role="tab" data-testid="length-8s" data-state="active">8s</button>
+    <button role="tab" data-testid="count-x1" data-state="inactive">x1</button>
+    <button role="tab" data-testid="count-x2" data-state="active">x2</button>
+  </div>
+  <button id="generate-button">Generate</button>
+</div>
+<script>
+  document.getElementById('settings-button').addEventListener('click', function() {
+    const pop = document.getElementById('settings-popover');
+    pop.style.display = 'block';
+    pop.setAttribute('data-state', 'open');
+  });
+</script>
+</body>
+</html>"#;
+                ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+            }
+            _ => {
+                let html = Self::render_interactive_workspace(
+                    r#"<div id="progress-indicator" data-progress="100" data-status="ready">Ready</div>
+  <a id="download-link" href="/download">Download Generated Video</a>"#,
+                    "document.getElementById('download-link').style.display = 'block';",
+                );
+                ("HTTP/1.1 200 OK", "text/html", html.as_bytes().to_vec())
+            }
         }
+    }
+
+    fn render_interactive_workspace(extra_html: &str, extra_click_js: &str) -> String {
+        format!(
+            r#"<!DOCTYPE html>
+<html>
+<head><title>Google Flow Mock</title></head>
+<body>
+<div id="flow-app" data-authenticated="true">
+  <textarea id="prompt-input" placeholder="Enter prompt"></textarea>
+  <input type="file" id="video-upload" />
+  <button id="settings-button">Video · 720p · 8s crop_16_9 x2</button>
+  <div id="settings-popover" role="menu" data-state="closed" style="display:none;">
+    <button data-testid="model-select">Omni Flash</button>
+    <button role="tab" data-testid="ori-portrait" data-state="inactive">crop_9_16 9:16</button>
+    <button role="tab" data-testid="ori-landscape" data-state="active">crop_16_9 16:9</button>
+    <button role="tab" data-testid="length-4s" data-state="inactive">4s</button>
+    <button role="tab" data-testid="length-6s" data-state="inactive">6s</button>
+    <button role="tab" data-testid="length-8s" data-state="active">8s</button>
+    <button role="tab" data-testid="length-10s" data-state="inactive">10s</button>
+    <button role="tab" data-testid="count-x1" data-state="inactive">x1</button>
+    <button role="tab" data-testid="count-x2" data-state="active">x2</button>
+    <button role="tab" data-testid="count-x3" data-state="inactive">x3</button>
+    <button role="tab" data-testid="count-x4" data-state="inactive">x4</button>
+    <div id="credit-info">Quá trình tạo sẽ tốn 15 tín dụng</div>
+  </div>
+  <button id="generate-button">Generate</button>
+  {}
+</div>
+<script>
+  let curLength = '8s';
+  let curOri = '16:9';
+  let curCount = 'x2';
+
+  function updateSummary() {{
+    document.getElementById('settings-button').innerText = 'Video · 720p · ' + curLength + ' ' + (curOri === '9:16' ? 'crop_9_16' : 'crop_16_9') + ' ' + curCount;
+  }}
+
+  document.getElementById('settings-button').addEventListener('click', function() {{
+    const pop = document.getElementById('settings-popover');
+    pop.style.display = 'block';
+    pop.setAttribute('data-state', 'open');
+  }});
+
+  document.addEventListener('keydown', function(e) {{
+    if (e.key === 'Escape') {{
+      const pop = document.getElementById('settings-popover');
+      pop.style.display = 'none';
+      pop.setAttribute('data-state', 'closed');
+    }}
+  }});
+
+  const tabs = document.querySelectorAll('#settings-popover button[role="tab"]');
+  tabs.forEach(t => {{
+    t.addEventListener('click', function() {{
+      const testid = t.getAttribute('data-testid');
+      if (testid.startsWith('length-')) {{
+        document.querySelectorAll('[data-testid^="length-"]').forEach(x => {{
+          x.setAttribute('data-state', 'inactive');
+          x.classList.remove('active');
+        }});
+        t.setAttribute('data-state', 'active');
+        t.classList.add('active');
+        curLength = t.innerText.trim();
+      }} else if (testid.startsWith('ori-')) {{
+        document.querySelectorAll('[data-testid^="ori-"]').forEach(x => {{
+          x.setAttribute('data-state', 'inactive');
+          x.classList.remove('active');
+        }});
+        t.setAttribute('data-state', 'active');
+        t.classList.add('active');
+        curOri = t.innerText.includes('9:16') ? '9:16' : '16:9';
+      }} else if (testid.startsWith('count-')) {{
+        document.querySelectorAll('[data-testid^="count-"]').forEach(x => {{
+          x.setAttribute('data-state', 'inactive');
+          x.classList.remove('active');
+        }});
+        t.setAttribute('data-state', 'active');
+        t.classList.add('active');
+        curCount = t.innerText.trim();
+      }}
+      updateSummary();
+    }});
+  }});
+
+  document.getElementById('generate-button').addEventListener('click', function() {{
+    fetch('/api/click', {{ method: 'POST' }});
+    {}
+  }});
+</script>
+</body>
+</html>"#,
+            extra_html, extra_click_js
+        )
     }
 }
 

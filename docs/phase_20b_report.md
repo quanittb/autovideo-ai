@@ -52,12 +52,10 @@ Phase 20B executed exactly ONE authorized live production generation against Goo
 
 ---
 
-## 4. Root Cause Analysis: Why Flow Returned 4 Seconds
-- **FLOW_CHILD_DURATION_CAUSE**: `DURATION_CONTROL_NOT_SET` / `PROVIDER_BEHAVIOR`
-- **Evidence**:
-  1. The Flow UI automation dispatched the video upload and prompt without interacting with a duration picker control.
-  2. Google Flow's underlying video generation model (Veo) intrinsically defaults to 4.0-second (96-frame at 24fps) or 8.0-second discrete clips for prompt-driven generation.
-  3. Single-clip requests for arbitrary durations (e.g. 9.682s) are truncated by Google Flow to its standard model output length unless structured multi-segment chaining is applied.
+## 4. Root Cause Analysis: First Generation Settings State
+- **DURATION_CONTROL_NOT_SET**: `YES` (First generation automation submitted the prompt and video without opening or configuring the Flow composer settings popover).
+- **PROVIDER_4S_LIMIT**: `NOT PROVEN` (Live DOM inspection in Phase 20B-3 proved that Flow supports 4s, 6s, 8s, and 10s generation lengths for Omni Flash video edit).
+- **ORIENTATION_CONTROL_NOT_SET**: `YES` (Composer default was 16:9 landscape; benchmark source is 9:16 portrait).
 
 ---
 
@@ -98,7 +96,43 @@ Phase 20B executed exactly ONE authorized live production generation against Goo
 
 ---
 
-## 8. Verification & Acceptance Summary Flags
+## 8. Phase 20B-3 Explicit Settings Configuration & Zero-Credit Live Preflight Audit
+
+### 8.1. Target Configuration Policy
+- **Model**: `Gemini Omni Flash` (`Omni Flash`)
+- **Mode**: `uploaded-video edit`
+- **Input Selected Duration**: Full source segment (`9.682s`)
+- **Output Generation Length**: `10 seconds` (matches `9.682s` within tolerance `10.0 - 9.682 = 0.318s < max(0.5s, 5%)`)
+- **Orientation**: `PORTRAIT / 9:16`
+- **Output Count**: `1` (`x1`)
+- **Estimated Credit Cost**: `15 credits` (observed in live UI: `Quá trình tạo sẽ tốn 15 tín dụng`, well below 40-credit budget ceiling)
+
+### 8.2. Live Preflight Readback Evidence (`profile_2`)
+Production helper `FlowUiAdapterV1.dryRunPreflight` executed on `profile_2` with the frozen prompt and benchmark video without clicking Generate:
+```json
+{
+  "authStatus": "READY",
+  "workspaceAccessible": true,
+  "promptLocated": true,
+  "uploadLocated": true,
+  "generateLocated": true,
+  "generateEnabled": true,
+  "model": "Omni Flash",
+  "generationLengthSec": 10,
+  "orientation": "PORTRAIT / 9:16",
+  "outputCount": 1,
+  "creditEstimateText": "15 tín dụng",
+  "creditEstimateNumber": 15,
+  "summaryButtonText": "Video · 720p · 10s\ncrop_9_16\nx1"
+}
+```
+
+- **NEW_GENERATE_CLICKS**: `0`
+- **NEW_FLOW_CREDITS**: `0`
+
+---
+
+## 9. Verification & Acceptance Summary Flags
 
 ```
 FLOW_REAL_BROWSER_VERIFIED = YES
@@ -109,8 +143,17 @@ PREVIEW_RUNTIME_VERIFIED = YES
 FLOW_SEGMENT_BOUNDARY_VISUAL_QUALITY = NOT LIVE VERIFIED
 FLOW_FULL_DURATION_PRESERVED = NO
 FLOW_OUTPUT_DURATION_MISMATCH = expected 9.682s, actual 4.000s
+DURATION_CONTROL_NOT_SET = YES
+PROVIDER_4S_LIMIT = NOT PROVEN
+ORIENTATION_CONTROL_NOT_SET = YES
+TARGET_MODEL = Omni Flash
+TARGET_GENERATION_LENGTH = 10s
+TARGET_ORIENTATION = PORTRAIT / 9:16
+TARGET_OUTPUT_COUNT = 1
+TARGET_CREDIT_REQUIREMENT = 15 credits
 FLOW_GENERATIONS = 1
 GENERATE_CLICKS = 1
-FLOW_CREDITS <= 40
+NEW_GENERATE_CLICKS = 0
+NEW_FLOW_CREDITS = 0
 PHASE20B_FREEZE_STATUS = BLOCKED_BY_DURATION_MISMATCH
 ```
