@@ -7,6 +7,13 @@ export interface UsePromptOptimizationOptions {
   videoDurationSec?: number;
   fps?: number;
   resolution?: [number, number];
+  transformationIntent?: string;
+  identityMode?: string;
+  targetDescriptor?: string;
+  preserveBackground?: boolean;
+  preserveBody?: boolean;
+  preserveClothing?: boolean;
+  preserveNonTargetFaces?: boolean;
 }
 
 export interface PromptHistoryEntry {
@@ -21,6 +28,13 @@ export function usePromptOptimization(options: UsePromptOptimizationOptions = {}
     videoDurationSec,
     fps,
     resolution,
+    transformationIntent,
+    identityMode,
+    targetDescriptor,
+    preserveBackground,
+    preserveBody,
+    preserveClothing,
+    preserveNonTargetFaces,
   } = options;
 
   const [prompt, setPrompt] = useState<string>(initialPrompt);
@@ -62,6 +76,13 @@ export function usePromptOptimization(options: UsePromptOptimizationOptions = {}
         videoDurationSec,
         fps,
         resolution,
+        transformationIntent,
+        identityMode,
+        targetDescriptor,
+        preserveBackground,
+        preserveBody,
+        preserveClothing,
+        preserveNonTargetFaces,
       });
 
       // Stale response check: Only apply if user hasn't modified text while in-flight
@@ -86,7 +107,22 @@ export function usePromptOptimization(options: UsePromptOptimizationOptions = {}
         inFlightSnapshotRef.current = null;
       }
     }
-  }, [prompt, promptSource, isOptimizing, taskType, videoDurationSec, fps, resolution]);
+  }, [
+    prompt,
+    promptSource,
+    isOptimizing,
+    taskType,
+    videoDurationSec,
+    fps,
+    resolution,
+    transformationIntent,
+    identityMode,
+    targetDescriptor,
+    preserveBackground,
+    preserveBody,
+    preserveClothing,
+    preserveNonTargetFaces,
+  ]);
 
   const handleUndo = useCallback(() => {
     if (history.length === 0) return;

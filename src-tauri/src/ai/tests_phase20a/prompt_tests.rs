@@ -88,6 +88,13 @@ fn test_phase20a_01_empty_and_whitespace_prompt_no_gemini_call() {
         video_duration_sec: None,
         fps: None,
         resolution: None,
+        transformation_intent: None,
+        identity_mode: None,
+        target_descriptor: None,
+        preserve_background: None,
+        preserve_body: None,
+        preserve_clothing: None,
+        preserve_non_target_faces: None,
     };
     let res_empty = rt.block_on(optimizer.optimize_prompt(req_empty));
     assert!(res_empty.is_err());
@@ -100,6 +107,13 @@ fn test_phase20a_01_empty_and_whitespace_prompt_no_gemini_call() {
         video_duration_sec: None,
         fps: None,
         resolution: None,
+        transformation_intent: None,
+        identity_mode: None,
+        target_descriptor: None,
+        preserve_background: None,
+        preserve_body: None,
+        preserve_clothing: None,
+        preserve_non_target_faces: None,
     };
     let res_ws = rt.block_on(optimizer.optimize_prompt(req_ws));
     assert!(res_ws.is_err());
@@ -188,6 +202,13 @@ fn test_phase20a_06_gen_again_optimizes_current_editor_text() {
         video_duration_sec: Some(10.0),
         fps: Some(30.0),
         resolution: Some((1920, 1080)),
+        transformation_intent: None,
+        identity_mode: None,
+        target_descriptor: None,
+        preserve_background: None,
+        preserve_body: None,
+        preserve_clothing: None,
+        preserve_non_target_faces: None,
     };
     assert_eq!(req.prompt, prompt);
 }
@@ -215,6 +236,13 @@ fn test_phase20a_08_gemini_failure_leaves_prompt_untouched() {
         video_duration_sec: None,
         fps: None,
         resolution: None,
+        transformation_intent: None,
+        identity_mode: None,
+        target_descriptor: None,
+        preserve_background: None,
+        preserve_body: None,
+        preserve_clothing: None,
+        preserve_non_target_faces: None,
     };
     let res = rt.block_on(optimizer.optimize_prompt(req));
     assert!(res.is_err());
@@ -524,4 +552,171 @@ fn test_phase20a_57_zero_credential_leakage_in_diagnostics() {
     assert_eq!(code, "GEMINI_API_KEY_INVALID");
     assert!(!sanitized.contains(secret));
     assert!(sanitized.contains("[REDACTED_API_KEY]"));
+}
+
+// -----------------------------------------------------------------------------
+// Phase 20C-A1: Canonical Gemini Key Resolution & Runtime Wiring Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_phase20c_gemini_01_sentinel_default_returns_not_configured() {
+    assert_eq!(DEFAULT_GEMINI_API_KEY, "Axxxxxxxxxxx");
+    let is_valid = is_valid_gemini_key(DEFAULT_GEMINI_API_KEY);
+    assert!(!is_valid, "Sentinel key must not be considered valid");
+
+    let temp_dir = tempdir().unwrap();
+    let store = SecretStore::new(temp_dir.path().to_path_buf());
+    let _ = store.clear_gemini_api_key();
+
+    if std::env::var("GEMINI_API_KEY").is_err() {
+        let cred = store.resolve_gemini_credential();
+        assert_eq!(cred, None);
+        assert!(!store.is_gemini_configured());
+    }
+}
+
+#[test]
+fn test_phase20c_gemini_02_real_app_default_returns_application_default() {
+    let valid_format = "AIzaSyCustomApplicationKey12345";
+    assert!(is_valid_gemini_key(valid_format));
+}
+
+#[test]
+fn test_phase20c_gemini_03_stored_custom_key_returns_user_override() {
+    let temp_dir = tempdir().unwrap();
+    let store = SecretStore::new(temp_dir.path().to_path_buf());
+    let custom_key = "AIzaSyUserProvidedCustomKey999";
+    store.set_gemini_api_key(custom_key).unwrap();
+
+    let cred = store.resolve_gemini_credential().unwrap();
+    assert_eq!(cred.key, custom_key);
+    assert_eq!(cred.source, GeminiCredentialSource::UserOverride);
+    assert!(store.has_user_override());
+    assert!(store.is_gemini_configured());
+}
+
+#[test]
+fn test_phase20c_gemini_04_custom_key_wins_over_default() {
+    let temp_dir = tempdir().unwrap();
+    let store = SecretStore::new(temp_dir.path().to_path_buf());
+    let custom_key = "AIzaSyOverrideWinsKey888";
+    store.set_gemini_api_key(custom_key).unwrap();
+
+    let manager = GeminiCredentialManager::new(store.clone());
+    let status = manager.get_status();
+    assert!(status.stored);
+    assert!(status.is_configured);
+    assert_eq!(status.source, GeminiCredentialSource::UserOverride);
+}
+
+#[test]
+fn test_phase20c_gemini_05_remove_custom_key_falls_back() {
+    let temp_dir = tempdir().unwrap();
+    let store = SecretStore::new(temp_dir.path().to_path_buf());
+    store.set_gemini_api_key("AIzaSyTempCustomKey777").unwrap();
+    assert!(store.has_user_override());
+
+    store.clear_gemini_api_key().unwrap();
+    assert!(!store.has_user_override());
+
+    let manager = GeminiCredentialManager::new(store.clone());
+    let status = manager.get_status();
+    assert!(!status.stored);
+    if std::env::var("GEMINI_API_KEY").is_err() {
+        assert!(!status.is_configured);
+        assert_eq!(status.source, GeminiCredentialSource::NotConfigured);
+    }
+}
+
+#[test]
+fn test_phase20c_gemini_06_manager_and_optimizer_resolve_same_source() {
+    let temp_dir = tempdir().unwrap();
+    let store = SecretStore::new(temp_dir.path().to_path_buf());
+    let custom_key = "AIzaSySharedKey666";
+    store.set_gemini_api_key(custom_key).unwrap();
+
+    let manager = GeminiCredentialManager::new(store.clone());
+    let optimizer = GeminiPromptOptimizer::new(store.clone());
+
+    assert_eq!(
+        manager.get_status().source,
+        GeminiCredentialSource::UserOverride
+    );
+    assert_eq!(optimizer.is_configured(), true);
+    assert_eq!(store.get_gemini_api_key(), Some(custom_key.to_string()));
+}
+
+#[test]
+fn test_phase20c_gemini_07_request_contains_no_media_binary_or_base64() {
+    let req = OptimizePromptRequest {
+        prompt: "Replace face".to_string(),
+        source_prompt_hash: None,
+        task_type: Some("FACE_REPLACE".to_string()),
+        video_duration_sec: Some(9.9),
+        fps: Some(30.0),
+        resolution: Some((1080, 1920)),
+        transformation_intent: Some("FACE_REPLACE".to_string()),
+        identity_mode: Some("GENERATED".to_string()),
+        target_descriptor: Some("PASSENGER_RIGHT".to_string()),
+        preserve_background: Some(true),
+        preserve_body: Some(true),
+        preserve_clothing: Some(true),
+        preserve_non_target_faces: Some(true),
+    };
+
+    let json_str = serde_json::to_string(&req).unwrap();
+    assert!(!json_str.contains("base64"));
+    assert!(!json_str.contains("imageBytes"));
+    assert!(!json_str.contains("videoBytes"));
+    assert!(!json_str.contains("frameBytes"));
+    assert!(json_str.contains("transformationIntent"));
+    assert!(json_str.contains("identityMode"));
+}
+
+#[test]
+fn test_phase20c_gemini_08_mock_optimization_success_preservation_semantics() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mock_response = r#"{
+        "candidates": [{
+            "content": {
+                "parts": [{
+                    "text": "Replace only the target passenger's face with a new synthetic identity while strictly preserving hair, clothing, body posture, lighting, and driver identity."
+                }]
+            }
+        }]
+    }"#;
+    let server = rt
+        .block_on(MockGeminiServer::start(200, mock_response))
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let store = SecretStore::new(temp_dir.path().to_path_buf());
+    store.set_gemini_api_key("valid_mock_key").unwrap();
+
+    let optimizer = GeminiPromptOptimizer::with_endpoint_and_model(
+        store,
+        Some(server.base_url.clone()),
+        DEFAULT_PROMPT_OPTIMIZATION_MODEL.to_string(),
+    );
+
+    let req = OptimizePromptRequest {
+        prompt: "Change the face".to_string(),
+        source_prompt_hash: None,
+        task_type: Some("FACE_REPLACE".to_string()),
+        video_duration_sec: Some(9.9),
+        fps: Some(30.0),
+        resolution: Some((1080, 1920)),
+        transformation_intent: Some("FACE_REPLACE".to_string()),
+        identity_mode: Some("GENERATED".to_string()),
+        target_descriptor: Some("PASSENGER_RIGHT".to_string()),
+        preserve_background: Some(true),
+        preserve_body: Some(true),
+        preserve_clothing: Some(true),
+        preserve_non_target_faces: Some(true),
+    };
+
+    let res = rt.block_on(optimizer.optimize_prompt(req)).unwrap();
+    assert_eq!(res.prompt_source, PromptSource::GeminiOptimized);
+    assert!(res.optimized_prompt.contains("synthetic identity"));
+    assert!(res.optimized_prompt.contains("preserving"));
 }

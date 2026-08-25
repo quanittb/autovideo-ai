@@ -259,15 +259,22 @@ export const SettingsView: React.FC = () => {
                   <div className="flex items-center gap-2 flex-wrap">
                     <span
                       className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border flex items-center gap-1 ${
-                        geminiStatus?.stored
+                        geminiStatus?.isConfigured
                           ? 'bg-emerald-950/80 border-emerald-500/30 text-emerald-400'
                           : 'bg-slate-900 border-slate-700 text-slate-400'
                       }`}
                     >
-                      {geminiStatus?.stored ? <ShieldCheck className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
-                      Storage: {geminiStatus?.stored ? 'Stored in OS Keychain' : 'Not Stored'}
+                      {geminiStatus?.isConfigured ? <ShieldCheck className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
+                      Source:{' '}
+                      {geminiStatus?.source === 'USER_OVERRIDE'
+                        ? 'Custom Key (OS Keychain)'
+                        : geminiStatus?.source === 'ENVIRONMENT'
+                        ? 'Environment Variable'
+                        : geminiStatus?.source === 'APPLICATION_DEFAULT'
+                        ? 'Application Default'
+                        : 'Not Configured (Optional)'}
                     </span>
-                    {geminiStatus?.stored && (
+                    {geminiStatus?.isConfigured && (
                       <span
                         className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border flex items-center gap-1 ${
                           geminiStatus.verificationStatus === 'VALID'

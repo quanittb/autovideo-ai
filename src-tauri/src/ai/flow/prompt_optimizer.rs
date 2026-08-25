@@ -43,6 +43,20 @@ pub struct OptimizePromptRequest {
     pub fps: Option<f64>,
     #[serde(default)]
     pub resolution: Option<(u32, u32)>,
+    #[serde(default)]
+    pub transformation_intent: Option<String>,
+    #[serde(default)]
+    pub identity_mode: Option<String>,
+    #[serde(default)]
+    pub target_descriptor: Option<String>,
+    #[serde(default)]
+    pub preserve_background: Option<bool>,
+    #[serde(default)]
+    pub preserve_body: Option<bool>,
+    #[serde(default)]
+    pub preserve_clothing: Option<bool>,
+    #[serde(default)]
+    pub preserve_non_target_faces: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -70,10 +84,29 @@ pub enum GeminiVerificationStatus {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum GeminiCredentialSource {
+    UserOverride,
+    Environment,
+    ApplicationDefault,
+    NotConfigured,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedGeminiCredential {
+    pub key: String,
+    pub source: GeminiCredentialSource,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeminiCredentialStatus {
     pub stored: bool,
+    #[serde(default)]
+    pub is_configured: bool,
+    #[serde(default = "default_gemini_source")]
+    pub source: GeminiCredentialSource,
     pub verification_status: GeminiVerificationStatus,
     pub model: String,
     #[serde(default)]
@@ -82,7 +115,33 @@ pub struct GeminiCredentialStatus {
     pub sanitized_message: Option<String>,
 }
 
+fn default_gemini_source() -> GeminiCredentialSource {
+    GeminiCredentialSource::NotConfigured
+}
+
 pub const DEFAULT_PROMPT_OPTIMIZATION_MODEL: &'static str = "gemini-3.5-flash-lite";
+
+/// Authoritative single application default key placeholder for Gemini Gen Prompt.
+/// Sentinel value "Axxxxxxxxxxx" is treated as NOT_CONFIGURED.
+pub const DEFAULT_GEMINI_API_KEY: &'static str = "Axxxxxxxxxxx";
+
+pub fn is_valid_gemini_key(key: &str) -> bool {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed == DEFAULT_GEMINI_API_KEY
+        || trimmed.starts_with("Axxxx")
+        || trimmed == "your_api_key_here"
+        || trimmed == "PLACEHOLDER"
+        || trimmed
+            .chars()
+            .all(|c| c == 'x' || c == 'X' || c == '0' || c == '*')
+    {
+        return false;
+    }
+    true
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,7 +165,6 @@ impl Default for PromptOptimizationCapabilityPolicy {
     }
 }
 
-// Backward-compatible DTO alias for existing consumers
 pub type GeminiStatusResponse = GeminiCredentialStatus;
 
 pub fn calculate_prompt_hash(prompt: &str) -> String {
@@ -137,37 +195,88 @@ impl SecretStore {
         }
     }
 
-    pub fn get_gemini_api_key(&self) -> Option<String> {
-        // 1. Try OS Credential Manager (Windows Credential Manager / macOS Keychain / Linux Secret Service)
+    /// Checks if an explicit custom user override key is stored in OS keychain or memory.
+    pub fn has_user_override(&self) -> bool {
+        if let Ok(entry) = keyring::Entry::new(Self::SERVICE_NAME, Self::GEMINI_KEY_NAME) {
+            if let Ok(password) = entry.get_password() {
+                if is_valid_gemini_key(&password) {
+                    return true;
+                }
+            }
+        }
+
+        if let Ok(guard) = MEMORY_KEY_STORE.read() {
+            if let Some(ref k) = *guard {
+                if is_valid_gemini_key(k) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Resolves the effective Gemini API key following strict canonical precedence:
+    /// 1. User Override (OS keyring or in-memory runtime mirror)
+    /// 2. Environment variable (`GEMINI_API_KEY`)
+    /// 3. Application Default (`DEFAULT_GEMINI_API_KEY`)
+    /// 4. None (NotConfigured)
+    pub fn resolve_gemini_credential(&self) -> Option<ResolvedGeminiCredential> {
+        // 1. User override in OS Credential Manager
         if let Ok(entry) = keyring::Entry::new(Self::SERVICE_NAME, Self::GEMINI_KEY_NAME) {
             if let Ok(password) = entry.get_password() {
                 let trimmed = password.trim().to_string();
-                if !trimmed.is_empty() {
-                    return Some(trimmed);
+                if is_valid_gemini_key(&trimmed) {
+                    return Some(ResolvedGeminiCredential {
+                        key: trimmed,
+                        source: GeminiCredentialSource::UserOverride,
+                    });
                 }
             }
         }
 
-        // 2. In-memory runtime mirror (for dev/test)
+        // 2. In-memory runtime mirror (for dev/test or process-lifetime session)
         if let Ok(guard) = MEMORY_KEY_STORE.read() {
             if let Some(ref k) = *guard {
                 let trimmed = k.trim().to_string();
-                if !trimmed.is_empty() {
-                    return Some(trimmed);
+                if is_valid_gemini_key(&trimmed) {
+                    return Some(ResolvedGeminiCredential {
+                        key: trimmed,
+                        source: GeminiCredentialSource::UserOverride,
+                    });
                 }
             }
         }
 
-        // 3. DEV fallback only (debug builds or explicit dev environment variable)
-        #[cfg(debug_assertions)]
-        if let Ok(k) = std::env::var("GEMINI_API_KEY") {
-            let trimmed = k.trim().to_string();
-            if !trimmed.is_empty() {
-                return Some(trimmed);
+        // 3. Deployment / Environment variable
+        if let Ok(env_k) = std::env::var("GEMINI_API_KEY") {
+            let trimmed = env_k.trim().to_string();
+            if is_valid_gemini_key(&trimmed) {
+                return Some(ResolvedGeminiCredential {
+                    key: trimmed,
+                    source: GeminiCredentialSource::Environment,
+                });
             }
         }
 
+        // 4. Application Default (if replaced with real key)
+        let app_default = DEFAULT_GEMINI_API_KEY.trim().to_string();
+        if is_valid_gemini_key(&app_default) {
+            return Some(ResolvedGeminiCredential {
+                key: app_default,
+                source: GeminiCredentialSource::ApplicationDefault,
+            });
+        }
+
         None
+    }
+
+    pub fn get_gemini_api_key(&self) -> Option<String> {
+        self.resolve_gemini_credential().map(|r| r.key)
+    }
+
+    pub fn is_gemini_configured(&self) -> bool {
+        self.resolve_gemini_credential().is_some()
     }
 
     pub fn set_gemini_api_key(&self, key: &str) -> Result<(), String> {
@@ -184,7 +293,6 @@ impl SecretStore {
         };
 
         if let Err(e) = os_result {
-            // Check if in test environment, allow in-memory store for sandboxed CI/tests
             #[cfg(test)]
             {
                 let _ = e;
@@ -244,10 +352,6 @@ impl SecretStore {
             *guard = None;
         }
         Ok(())
-    }
-
-    pub fn is_gemini_configured(&self) -> bool {
-        self.get_gemini_api_key().is_some()
     }
 }
 
@@ -357,9 +461,18 @@ impl GeminiCredentialManager {
     pub const DEFAULT_MODEL: &'static str = DEFAULT_PROMPT_OPTIMIZATION_MODEL;
 
     pub fn new(secret_store: SecretStore) -> Self {
-        let is_cfg = secret_store.is_gemini_configured();
+        let cred = secret_store.resolve_gemini_credential();
+        let is_cfg = cred.is_some();
+        let src = cred
+            .as_ref()
+            .map(|c| c.source)
+            .unwrap_or(GeminiCredentialSource::NotConfigured);
+        let stored = secret_store.has_user_override();
+
         let initial_status = GeminiCredentialStatus {
-            stored: is_cfg,
+            stored,
+            is_configured: is_cfg,
+            source: src,
             verification_status: GeminiVerificationStatus::Unverified,
             model: Self::DEFAULT_MODEL.to_string(),
             last_verified_at: None,
@@ -385,9 +498,18 @@ impl GeminiCredentialManager {
         endpoint_base: Option<String>,
         model: String,
     ) -> Self {
-        let is_cfg = secret_store.is_gemini_configured();
+        let cred = secret_store.resolve_gemini_credential();
+        let is_cfg = cred.is_some();
+        let src = cred
+            .as_ref()
+            .map(|c| c.source)
+            .unwrap_or(GeminiCredentialSource::NotConfigured);
+        let stored = secret_store.has_user_override();
+
         let initial_status = GeminiCredentialStatus {
-            stored: is_cfg,
+            stored,
+            is_configured: is_cfg,
+            source: src,
             verification_status: GeminiVerificationStatus::Unverified,
             model: model.clone(),
             last_verified_at: None,
@@ -414,55 +536,78 @@ impl GeminiCredentialManager {
 
     pub fn set_key(&self, key: &str) -> Result<(), String> {
         self.secret_store.set_gemini_api_key(key)?;
+        let cred = self.secret_store.resolve_gemini_credential();
+        let is_cfg = cred.is_some();
+        let src = cred
+            .as_ref()
+            .map(|c| c.source)
+            .unwrap_or(GeminiCredentialSource::NotConfigured);
+
         if let Ok(mut guard) = self.status.write() {
             guard.stored = true;
+            guard.is_configured = is_cfg;
+            guard.source = src;
             guard.verification_status = GeminiVerificationStatus::Unverified;
             guard.sanitized_message = None;
-            guard.last_verified_at = None;
         }
         Ok(())
     }
 
     pub fn clear_key(&self) -> Result<(), String> {
         self.secret_store.clear_gemini_api_key()?;
+        let cred = self.secret_store.resolve_gemini_credential();
+        let is_cfg = cred.is_some();
+        let src = cred
+            .as_ref()
+            .map(|c| c.source)
+            .unwrap_or(GeminiCredentialSource::NotConfigured);
+
         if let Ok(mut guard) = self.status.write() {
             guard.stored = false;
+            guard.is_configured = is_cfg;
+            guard.source = src;
             guard.verification_status = GeminiVerificationStatus::Unverified;
-            guard.sanitized_message = None;
             guard.last_verified_at = None;
+            guard.sanitized_message = None;
         }
         Ok(())
     }
 
     pub fn get_status(&self) -> GeminiCredentialStatus {
-        let is_cfg = self.secret_store.is_gemini_configured();
-        if let Ok(guard) = self.status.read() {
-            let mut st = guard.clone();
-            st.stored = is_cfg;
-            st
-        } else {
-            GeminiCredentialStatus {
-                stored: is_cfg,
-                verification_status: GeminiVerificationStatus::Unverified,
-                model: self.model.clone(),
-                last_verified_at: None,
-                sanitized_message: None,
-            }
+        let cred = self.secret_store.resolve_gemini_credential();
+        let is_cfg = cred.is_some();
+        let src = cred
+            .as_ref()
+            .map(|c| c.source)
+            .unwrap_or(GeminiCredentialSource::NotConfigured);
+        let stored = self.secret_store.has_user_override();
+
+        let guard = self.status.read().unwrap();
+        GeminiCredentialStatus {
+            stored,
+            is_configured: is_cfg,
+            source: src,
+            verification_status: guard.verification_status,
+            model: self.model.clone(),
+            last_verified_at: guard.last_verified_at.clone(),
+            sanitized_message: guard.sanitized_message.clone(),
         }
     }
 
     pub async fn test_api_key(&self) -> Result<GeminiCredentialStatus, String> {
-        let key_opt = self.secret_store.get_gemini_api_key();
-        let key = match key_opt {
-            Some(k) if !k.trim().is_empty() => k,
-            _ => {
+        let resolved = match self.secret_store.resolve_gemini_credential() {
+            Some(r) => r,
+            None => {
                 let st = GeminiCredentialStatus {
                     stored: false,
-                    verification_status: GeminiVerificationStatus::Unverified,
+                    is_configured: false,
+                    source: GeminiCredentialSource::NotConfigured,
+                    verification_status: GeminiVerificationStatus::InvalidKey,
                     model: self.model.clone(),
-                    last_verified_at: None,
+                    last_verified_at: Some(Utc::now().to_rfc3339()),
                     sanitized_message: Some(
-                        "No Gemini API key stored in credential manager".to_string(),
+                        "GEMINI_API_KEY_NOT_CONFIGURED: No valid Gemini API key configured"
+                            .to_string(),
                     ),
                 };
                 if let Ok(mut guard) = self.status.write() {
@@ -481,7 +626,7 @@ impl GeminiCredentialManager {
         let send_res = self
             .client
             .get(&endpoint)
-            .header("x-goog-api-key", &key)
+            .header("x-goog-api-key", &resolved.key)
             .send()
             .await;
 
@@ -490,7 +635,9 @@ impl GeminiCredentialManager {
                 let status_code = resp.status();
                 if status_code.is_success() {
                     let st = GeminiCredentialStatus {
-                        stored: true,
+                        stored: self.secret_store.has_user_override(),
+                        is_configured: true,
+                        source: resolved.source,
                         verification_status: GeminiVerificationStatus::Valid,
                         model: self.model.clone(),
                         last_verified_at: Some(Utc::now().to_rfc3339()),
@@ -503,9 +650,11 @@ impl GeminiCredentialManager {
                 } else {
                     let body = resp.text().await.unwrap_or_default();
                     let (ver_status, _code, sanitized_msg) =
-                        parse_google_error(status_code, &body, Some(&key));
+                        parse_google_error(status_code, &body, Some(&resolved.key));
                     let st = GeminiCredentialStatus {
-                        stored: true,
+                        stored: self.secret_store.has_user_override(),
+                        is_configured: true,
+                        source: resolved.source,
                         verification_status: ver_status,
                         model: self.model.clone(),
                         last_verified_at: Some(Utc::now().to_rfc3339()),
@@ -523,9 +672,11 @@ impl GeminiCredentialManager {
                 } else {
                     GeminiVerificationStatus::NetworkError
                 };
-                let sanitized_msg = sanitize_error_message(&e.to_string(), Some(&key));
+                let sanitized_msg = sanitize_error_message(&e.to_string(), Some(&resolved.key));
                 let st = GeminiCredentialStatus {
-                    stored: true,
+                    stored: self.secret_store.has_user_override(),
+                    is_configured: true,
+                    source: resolved.source,
                     verification_status: ver_status,
                     model: self.model.clone(),
                     last_verified_at: Some(Utc::now().to_rfc3339()),
@@ -611,25 +762,68 @@ impl GeminiPromptOptimizer {
             return Err("REQUEST_INVALID: Prompt cannot be empty or whitespace".to_string());
         }
 
-        let api_key = self.secret_store.get_gemini_api_key().ok_or_else(|| {
-            "GEMINI_API_KEY_NOT_CONFIGURED: Gemini API key is not configured".to_string()
-        })?;
+        let resolved = self
+            .secret_store
+            .resolve_gemini_credential()
+            .ok_or_else(|| {
+                "GEMINI_API_KEY_NOT_CONFIGURED: Gemini API key is not configured".to_string()
+            })?;
 
-        let system_instruction = "You are an expert AI video generation prompt engineer. \
-Your task is to take a raw, user-provided video transformation or generation prompt and optimize it into a clear, visually vivid, cinematic, and descriptive prompt for video AI generation. \
-Maintain the user's core intent, characters, and subject actions. \
-Avoid commentary or conversational filler. Output ONLY the optimized prompt text directly without quotes or formatting tags.";
+        let system_instruction = "You are an expert AI video transformation and editing prompt engineer. \
+Your task is to take a user's raw video edit request and optimize it into a clear, precise, preservation-first, visually vivid prompt for video AI editing and transformation. \
+CRITICAL PRESERVATION & TRANSFORMATION RULES: \
+1. When Transformation Intent is FACE_REPLACE and Identity Mode is GENERATED: \
+   Explicitly describe replacing ONLY the target person's facial identity with a new, consistent synthetic facial identity. Strictly instruct preserving the person's body, clothing, hairstyle as much as practical, expressions, mouth movement, head pose, actions, camera motion, background scene, lighting, composition, timing, and all non-target people in the video. \
+2. When Transformation Intent is FACE_REPLACE and Identity Mode is REFERENCE: \
+   Instruct applying the specified reference facial identity while strictly preserving the person's body, clothing, motion, background, and non-target people. \
+3. DO NOT expand face replacement into a full character redesign, body change, background replacement, or style change unless explicitly requested by the user prompt. \
+4. Output ONLY the raw optimized prompt text directly without quotes, markdown formatting, explanations, or conversational filler.";
 
-        let user_content = format!(
-            "User Prompt: \"{}\"\nTask Type: {}\nVideo Duration: {}s\nTarget Resolution: {:?}",
-            raw_prompt,
-            request
-                .task_type
-                .as_deref()
-                .unwrap_or("VIDEO_TRANSFORMATION"),
-            request.video_duration_sec.unwrap_or(5.0),
-            request.resolution.unwrap_or((1920, 1080))
-        );
+        let mut context_parts = vec![
+            format!("User Prompt: \"{}\"", raw_prompt),
+            format!(
+                "Task Type: {}",
+                request
+                    .task_type
+                    .as_deref()
+                    .unwrap_or("VIDEO_TRANSFORMATION")
+            ),
+            format!(
+                "Transformation Intent: {}",
+                request
+                    .transformation_intent
+                    .as_deref()
+                    .unwrap_or("FACE_REPLACE")
+            ),
+            format!(
+                "Identity Mode: {}",
+                request.identity_mode.as_deref().unwrap_or("GENERATED")
+            ),
+        ];
+
+        if let Some(target) = &request.target_descriptor {
+            context_parts.push(format!("Target Person: {}", target));
+        }
+        if let Some(bg) = request.preserve_background {
+            context_parts.push(format!("Preserve Background: {}", bg));
+        }
+        if let Some(body) = request.preserve_body {
+            context_parts.push(format!("Preserve Body: {}", body));
+        }
+        if let Some(clothing) = request.preserve_clothing {
+            context_parts.push(format!("Preserve Clothing: {}", clothing));
+        }
+        if let Some(ntf) = request.preserve_non_target_faces {
+            context_parts.push(format!("Preserve Non-Target Faces: {}", ntf));
+        }
+        if let Some(dur) = request.video_duration_sec {
+            context_parts.push(format!("Video Duration: {:.1}s", dur));
+        }
+        if let Some(res) = request.resolution {
+            context_parts.push(format!("Target Resolution: {}x{}", res.0, res.1));
+        }
+
+        let user_content = context_parts.join("\n");
 
         let payload = serde_json::json!({
             "systemInstruction": {
@@ -657,7 +851,7 @@ Avoid commentary or conversational filler. Output ONLY the optimized prompt text
             .client
             .post(&endpoint)
             .header("Content-Type", "application/json")
-            .header("x-goog-api-key", &api_key)
+            .header("x-goog-api-key", &resolved.key)
             .json(&payload)
             .send()
             .await
@@ -669,7 +863,7 @@ Avoid commentary or conversational filler. Output ONLY the optimized prompt text
                 } else {
                     "GEMINI_NETWORK_ERROR"
                 };
-                let sanitized = sanitize_error_message(&e.to_string(), Some(&api_key));
+                let sanitized = sanitize_error_message(&e.to_string(), Some(&resolved.key));
                 return Err(format!("{}: {}", code_str, sanitized));
             }
         };
@@ -678,7 +872,7 @@ Avoid commentary or conversational filler. Output ONLY the optimized prompt text
             let status = response.status();
             let body_text = response.text().await.unwrap_or_default();
             let (_ver_status, code_str, sanitized_msg) =
-                parse_google_error(status, &body_text, Some(&api_key));
+                parse_google_error(status, &body_text, Some(&resolved.key));
             return Err(format!("{}: {}", code_str, sanitized_msg));
         }
 

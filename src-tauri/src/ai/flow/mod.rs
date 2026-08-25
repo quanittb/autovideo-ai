@@ -31,10 +31,11 @@ pub use playwright_bridge::{
 };
 pub use profile::{FlowProfileGuard, FlowProfileInfo, FlowProfileManager, FlowProfileSnapshot};
 pub use prompt_optimizer::{
-    calculate_prompt_hash, parse_google_error, GeminiCredentialManager, GeminiCredentialStatus,
-    GeminiPromptOptimizer, GeminiStatusResponse, GeminiVerificationStatus, OptimizePromptRequest,
-    OptimizePromptResponse, PromptOptimizationCapabilityPolicy, PromptSource, SecretStore,
-    DEFAULT_PROMPT_OPTIMIZATION_MODEL,
+    calculate_prompt_hash, is_valid_gemini_key, parse_google_error, GeminiCredentialManager,
+    GeminiCredentialSource, GeminiCredentialStatus, GeminiPromptOptimizer, GeminiStatusResponse,
+    GeminiVerificationStatus, OptimizePromptRequest, OptimizePromptResponse,
+    PromptOptimizationCapabilityPolicy, PromptSource, ResolvedGeminiCredential, SecretStore,
+    DEFAULT_GEMINI_API_KEY, DEFAULT_PROMPT_OPTIMIZATION_MODEL,
 };
 pub use segment::FlowVideoSegmenter;
 pub use stitcher::FlowStitcher;

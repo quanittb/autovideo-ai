@@ -1017,6 +1017,13 @@ export interface OptimizePromptRequest {
   videoDurationSec?: number;
   fps?: number;
   resolution?: [number, number];
+  transformationIntent?: string;
+  identityMode?: string;
+  targetDescriptor?: string;
+  preserveBackground?: boolean;
+  preserveBody?: boolean;
+  preserveClothing?: boolean;
+  preserveNonTargetFaces?: boolean;
 }
 
 export interface OptimizePromptResponse {
@@ -1039,8 +1046,16 @@ export type GeminiVerificationStatus =
   | 'TIMEOUT'
   | 'UNKNOWN';
 
+export type GeminiCredentialSource =
+  | 'USER_OVERRIDE'
+  | 'ENVIRONMENT'
+  | 'APPLICATION_DEFAULT'
+  | 'NOT_CONFIGURED';
+
 export interface GeminiCredentialStatus {
   stored: boolean;
+  isConfigured?: boolean;
+  source?: GeminiCredentialSource;
   verificationStatus: GeminiVerificationStatus;
   model: string;
   lastVerifiedAt?: string | null;

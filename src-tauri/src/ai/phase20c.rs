@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub use crate::ai::flow::prompt_optimizer::{is_valid_gemini_key, DEFAULT_GEMINI_API_KEY};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TransformationIntent {
@@ -125,12 +127,8 @@ impl IdentityResolver {
 }
 
 // -----------------------------------------------------------------------------
-// Authoritative Credential Resolution Layer
+// Provider Credential Resolution Layer
 // -----------------------------------------------------------------------------
-
-/// Authoritative isolated default key placeholder for Gemini Gen Prompt.
-/// When left as "Axxxxxxxxxxx", it is treated as GEMINI_API_KEY_NOT_CONFIGURED.
-pub const DEFAULT_GEMINI_API_KEY: &'static str = "Axxxxxxxxxxx";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -163,15 +161,15 @@ pub enum ResolvedCredential {
 pub struct ProviderCredentialResolver;
 
 impl ProviderCredentialResolver {
-    /// Resolves Gemini Gen Prompt key:
-    /// 1. User override in Settings
+    /// Resolves Gemini Gen Prompt key using canonical validation rules:
+    /// 1. User override in Settings / input
     /// 2. GEMINI_API_KEY environment variable (if non-empty and not sentinel)
     /// 3. DEFAULT_GEMINI_API_KEY (if non-empty and not sentinel)
     /// 4. NotConfigured
     pub fn resolve_gemini(user_override: Option<&str>) -> ResolvedCredential {
         if let Some(key) = user_override {
             let trimmed = key.trim();
-            if Self::is_valid_key(trimmed) {
+            if is_valid_gemini_key(trimmed) {
                 return ResolvedCredential::Configured {
                     key: trimmed.to_string(),
                     source: CredentialSource::UserOverride,
@@ -181,7 +179,7 @@ impl ProviderCredentialResolver {
 
         if let Ok(env_val) = std::env::var("GEMINI_API_KEY") {
             let trimmed = env_val.trim();
-            if Self::is_valid_key(trimmed) {
+            if is_valid_gemini_key(trimmed) {
                 return ResolvedCredential::Configured {
                     key: trimmed.to_string(),
                     source: CredentialSource::SecureDeployment,
@@ -190,7 +188,7 @@ impl ProviderCredentialResolver {
         }
 
         let app_default = DEFAULT_GEMINI_API_KEY.trim();
-        if Self::is_valid_key(app_default) {
+        if is_valid_gemini_key(app_default) {
             return ResolvedCredential::Configured {
                 key: app_default.to_string(),
                 source: CredentialSource::ApplicationDefault,
@@ -207,7 +205,7 @@ impl ProviderCredentialResolver {
     pub fn resolve_pruna(user_override: Option<&str>) -> ResolvedCredential {
         if let Some(key) = user_override {
             let trimmed = key.trim();
-            if Self::is_valid_key(trimmed) {
+            if is_valid_gemini_key(trimmed) {
                 return ResolvedCredential::Configured {
                     key: trimmed.to_string(),
                     source: CredentialSource::UserOverride,
@@ -217,7 +215,7 @@ impl ProviderCredentialResolver {
 
         if let Ok(env_val) = std::env::var("REPLICATE_API_TOKEN") {
             let trimmed = env_val.trim();
-            if Self::is_valid_key(trimmed) {
+            if is_valid_gemini_key(trimmed) {
                 return ResolvedCredential::Configured {
                     key: trimmed.to_string(),
                     source: CredentialSource::SecureDeployment,
@@ -235,7 +233,7 @@ impl ProviderCredentialResolver {
     pub fn resolve_bria(user_override: Option<&str>) -> ResolvedCredential {
         if let Some(key) = user_override {
             let trimmed = key.trim();
-            if Self::is_valid_key(trimmed) {
+            if is_valid_gemini_key(trimmed) {
                 return ResolvedCredential::Configured {
                     key: trimmed.to_string(),
                     source: CredentialSource::UserOverride,
@@ -245,7 +243,7 @@ impl ProviderCredentialResolver {
 
         if let Ok(env_val) = std::env::var("BRIA_API_TOKEN") {
             let trimmed = env_val.trim();
-            if Self::is_valid_key(trimmed) {
+            if is_valid_gemini_key(trimmed) {
                 return ResolvedCredential::Configured {
                     key: trimmed.to_string(),
                     source: CredentialSource::SecureDeployment,
@@ -312,21 +310,7 @@ impl ProviderCredentialResolver {
     }
 
     pub fn is_valid_key(key: &str) -> bool {
-        if key.is_empty() {
-            return false;
-        }
-        // Reject common template placeholders and sentinels
-        if key == DEFAULT_GEMINI_API_KEY
-            || key.starts_with("Axxxx")
-            || key == "your_api_key_here"
-            || key == "PLACEHOLDER"
-            || key
-                .chars()
-                .all(|c| c == 'x' || c == 'X' || c == '0' || c == '*')
-        {
-            return false;
-        }
-        true
+        is_valid_gemini_key(key)
     }
 
     /// Masks any secret key for safe logging or reporting (prevents credential leakage).
