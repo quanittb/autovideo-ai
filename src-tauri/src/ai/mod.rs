@@ -8,6 +8,7 @@ pub mod hybrid;
 pub mod manifest;
 pub mod onnx;
 pub mod package;
+pub mod phase20c;
 pub mod pipeline;
 pub mod preflight;
 pub mod profile;
@@ -683,3 +684,6 @@ mod tests_phase20a;
 
 #[cfg(test)]
 mod tests_phase20b;
+
+#[cfg(test)]
+mod tests_phase20c;
