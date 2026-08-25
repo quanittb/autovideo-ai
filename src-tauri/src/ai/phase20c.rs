@@ -3,20 +3,45 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TransformationIntent {
+    FaceReplace,
+    BackgroundReplace,
+    BackgroundRemove,
+    LightingEdit,
+    StyleEdit,
+    GenericPromptEdit,
+}
+
+impl Default for TransformationIntent {
+    fn default() -> Self {
+        Self::FaceReplace
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum IdentityMode {
     Generated,
     Reference,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TargetFaceSelection {
+    pub index: usize,
+    pub confirmed: bool,
+    pub descriptor: Option<String>,
+    pub anchor_frame_timestamp_sec: Option<f64>,
+    pub normalized_bounding_box: Option<[f64; 4]>, // [x, y, w, h]
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FaceReplaceContract {
     pub case_id: String,
     pub video_file: String,
-    pub transformation_intent: String,
+    pub transformation_intent: TransformationIntent,
     pub identity_mode: IdentityMode,
     pub reference_face_file: Option<String>,
-    pub target_face_index: Option<usize>,
-    pub target_face_confirmed: bool,
+    pub target_face: TargetFaceSelection,
     pub replace_count: usize,
     pub preserve_non_target_faces: bool,
 }
@@ -50,8 +75,7 @@ impl TargetFacePolicy {
     /// and all non-target faces must be preserved.
     pub fn validate_target(
         visible_face_count: usize,
-        target_index: Option<usize>,
-        is_confirmed: bool,
+        target: &TargetFaceSelection,
         replace_count: usize,
     ) -> Result<usize, TargetFaceError> {
         if replace_count != 1 {
@@ -62,23 +86,22 @@ impl TargetFacePolicy {
         }
 
         if visible_face_count == 1 {
-            return Ok(target_index.unwrap_or(0));
+            return Ok(target.index);
         }
 
         // Multi-face scenario (visible_face_count > 1)
-        if !is_confirmed || target_index.is_none() {
+        if !target.confirmed {
             return Err(TargetFaceError::TargetFaceAmbiguous(
                 "Multiple visible faces detected but target face has not been positively confirmed"
                     .to_string(),
             ));
         }
 
-        let idx = target_index.unwrap();
-        if idx >= visible_face_count {
-            return Err(TargetFaceError::InvalidTargetIndex(idx));
+        if target.index >= visible_face_count {
+            return Err(TargetFaceError::InvalidTargetIndex(target.index));
         }
 
-        Ok(idx)
+        Ok(target.index)
     }
 }
 
@@ -101,44 +124,143 @@ impl IdentityResolver {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApiKeyResolution {
-    Configured(String),
+// -----------------------------------------------------------------------------
+// Backend Credential Management & Application Default Credential Layer
+// -----------------------------------------------------------------------------
+
+/// Backend-isolated development placeholder for Pruna.
+/// If left as sentinel "Axxxxxxxxxxx", it is treated as NOT_CONFIGURED.
+pub const DEFAULT_PRUNA_API_KEY: &str = "Axxxxxxxxxxx";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialSource {
+    UserOverride,
+    DeploymentDefault,
+    ApplicationDefault,
     NotConfigured,
 }
 
-pub struct ApiKeyResolver;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialStatusDto {
+    pub provider_id: String,
+    pub is_configured: bool,
+    pub source: CredentialSource,
+}
 
-impl ApiKeyResolver {
-    /// Resolves API key following strict precedence:
-    /// 1. User explicit override
-    /// 2. Application default credential / environment
-    /// 3. NOT_CONFIGURED
-    ///
-    /// Placeholders like "Axxxxxxxxxxx" are treated as NOT_CONFIGURED.
-    pub fn resolve(user_override: Option<&str>, env_var_name: &str) -> ApiKeyResolution {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedCredential {
+    Configured {
+        key: String,
+        source: CredentialSource,
+    },
+    NotConfigured,
+}
+
+pub struct ProviderCredentialResolver;
+
+impl ProviderCredentialResolver {
+    /// Resolves Pruna credential with strict precedence:
+    /// 1. Valid user override
+    /// 2. Deployment / Environment variable (`REPLICATE_API_TOKEN`)
+    /// 3. Application Default Development Credential (`DEFAULT_PRUNA_API_KEY`)
+    /// 4. NotConfigured (if sentinel "Axxxxxxxxxxx" or unconfigured)
+    pub fn resolve_pruna(user_override: Option<&str>) -> ResolvedCredential {
+        // 1. User override
         if let Some(key) = user_override {
             let trimmed = key.trim();
             if Self::is_valid_key(trimmed) {
-                return ApiKeyResolution::Configured(trimmed.to_string());
+                return ResolvedCredential::Configured {
+                    key: trimmed.to_string(),
+                    source: CredentialSource::UserOverride,
+                };
+            }
+        }
+
+        // 2. Deployment / Environment variable
+        if let Ok(env_val) = std::env::var("REPLICATE_API_TOKEN") {
+            let trimmed = env_val.trim();
+            if Self::is_valid_key(trimmed) {
+                return ResolvedCredential::Configured {
+                    key: trimmed.to_string(),
+                    source: CredentialSource::DeploymentDefault,
+                };
+            }
+        }
+
+        // 3. Application Default
+        let app_default = DEFAULT_PRUNA_API_KEY.trim();
+        if Self::is_valid_key(app_default) {
+            return ResolvedCredential::Configured {
+                key: app_default.to_string(),
+                source: CredentialSource::ApplicationDefault,
+            };
+        }
+
+        ResolvedCredential::NotConfigured
+    }
+
+    /// Resolves generic API key given custom app default and env variable name (for testing/custom providers).
+    pub fn resolve_custom(
+        user_override: Option<&str>,
+        env_var_name: &str,
+        app_default_key: Option<&str>,
+    ) -> ResolvedCredential {
+        if let Some(key) = user_override {
+            let trimmed = key.trim();
+            if Self::is_valid_key(trimmed) {
+                return ResolvedCredential::Configured {
+                    key: trimmed.to_string(),
+                    source: CredentialSource::UserOverride,
+                };
             }
         }
 
         if let Ok(env_val) = std::env::var(env_var_name) {
             let trimmed = env_val.trim();
             if Self::is_valid_key(trimmed) {
-                return ApiKeyResolution::Configured(trimmed.to_string());
+                return ResolvedCredential::Configured {
+                    key: trimmed.to_string(),
+                    source: CredentialSource::DeploymentDefault,
+                };
             }
         }
 
-        ApiKeyResolution::NotConfigured
+        if let Some(app_default) = app_default_key {
+            let trimmed = app_default.trim();
+            if Self::is_valid_key(trimmed) {
+                return ResolvedCredential::Configured {
+                    key: trimmed.to_string(),
+                    source: CredentialSource::ApplicationDefault,
+                };
+            }
+        }
+
+        ResolvedCredential::NotConfigured
     }
 
-    fn is_valid_key(key: &str) -> bool {
+    /// Returns a frontend-safe status DTO with zero credential leakage.
+    pub fn get_pruna_status(user_override: Option<&str>) -> CredentialStatusDto {
+        match Self::resolve_pruna(user_override) {
+            ResolvedCredential::Configured { source, .. } => CredentialStatusDto {
+                provider_id: "pruna".to_string(),
+                is_configured: true,
+                source,
+            },
+            ResolvedCredential::NotConfigured => CredentialStatusDto {
+                provider_id: "pruna".to_string(),
+                is_configured: false,
+                source: CredentialSource::NotConfigured,
+            },
+        }
+    }
+
+    pub fn is_valid_key(key: &str) -> bool {
         if key.is_empty() {
             return false;
         }
-        // Reject common template placeholders
+        // Reject common template placeholders and sentinels
         if key.starts_with("Axxxx")
             || key == "your_api_key_here"
             || key == "PLACEHOLDER"
