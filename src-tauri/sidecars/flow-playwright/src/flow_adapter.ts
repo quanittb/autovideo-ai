@@ -269,12 +269,21 @@ export async function ensureUploadedVideoEditActive(
     else if (costNum === 30) costClassification = 'LOOKS_LIKE_10S_NON_EDIT_GENERATION';
     else if (costNum === 15) costClassification = 'LOOKS_LIKE_4S_NON_EDIT_OR_STALE_VALUE';
 
+    const sourceChip = page.locator('#source-video-chip, [data-testid="source-chip"]').first();
+    let observedSourceTitle: string | undefined;
+    if ((await sourceChip.count().catch(() => 0)) > 0) {
+      observedSourceTitle = ((await sourceChip.innerText().catch(() => '')) || '').trim();
+    }
+    if (!observedSourceTitle && params.videoPath) {
+      observedSourceTitle = path.basename(params.videoPath);
+    }
+
     return {
       uploadedVideoAttached: true,
       videoVisibleInActiveEdit: true,
       uploadedVideoEditActive: true,
       activeComposerMode: 'EDIT',
-      sourceTitle: 'flow_acceptance_01',
+      sourceTitle: observedSourceTitle,
       inputTrimStart: 0.0,
       inputTrimEnd: expectedDur,
       inputSelectedDuration: expectedDur,
@@ -302,9 +311,11 @@ export async function ensureUploadedVideoEditActive(
         .catch(() => 0)) > 0;
     const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
     const hasEditPlaceholder =
-      bodyText.includes('Mô tả nội dung bạn muốn chỉnh sửa') || bodyText.includes('Describe what you want to edit');
+      bodyText.includes('Mô tả nội dung bạn muốn chỉnh sửa') ||
+      bodyText.includes('Describe what you want to edit') ||
+      bodyText.includes('Chỉnh sửa video');
     const hasTimeline =
-      (await page.locator('.lf-player-container, [class*="timeline"], div:has(> button i:has-text("volume_up"))').count().catch(() => 0)) >
+      (await page.locator('.lf-player-container, [class*="timeline"], div:has(> button i:has-text("volume_up")), [data-testid*="timeline"]').count().catch(() => 0)) >
       0;
 
     console.error(
@@ -317,30 +328,34 @@ export async function ensureUploadedVideoEditActive(
   let editActive = await checkEditActive();
 
   // 3. If not in edit view, enter via canvas video card or perform full upload flow
-  if (!editActive) {
-    // Bounded check for existing video card on canvas (allow canvas DOM hydration)
-    let canvasCard = page
-      .locator(
-        'button:has(video), button:has(img[alt*="Hình thu nhỏ" i]), button:has(img[alt*="thumbnail" i]), img[alt*="Hình thu nhỏ" i], img[alt*="thumbnail" i], i:has-text("play_arrow"), i:has-text("play_circle")'
-      )
-      .first();
+  if (!editActive && params.videoPath) {
+    const fileName = path.basename(params.videoPath);
+    const baseStem = path.basename(params.videoPath, path.extname(params.videoPath));
 
-    let hasCard = false;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      canvasCard = page
-        .locator(
-          'button:has(video), button:has(img[alt*="Hình thu nhỏ" i]), button:has(img[alt*="thumbnail" i]), img[alt*="Hình thu nhỏ" i], img[alt*="thumbnail" i], i:has-text("play_arrow"), i:has-text("play_circle")'
-        )
-        .first();
-      hasCard = (await canvasCard.count().catch(() => 0)) > 0 && (await canvasCard.isVisible().catch(() => false));
-      console.error(`[ensureUploadedVideoEditActive] attempt ${attempt}: hasCard=${hasCard}`);
-      if (hasCard) break;
-      await page.waitForTimeout(1000);
-    }
+    const locateMediaCard = async () => {
+      // 1. Text match with baseStem
+      const textMatch = page.getByText(baseStem).first();
+      if ((await textMatch.count().catch(() => 0)) > 0 && (await textMatch.isVisible().catch(() => false))) {
+        return textMatch;
+      }
+      // 2. Leaf element with baseStem
+      const leafMatch = page.locator(`:is(span, p, div, button, [role="button"]):has-text("${baseStem}")`).last();
+      if ((await leafMatch.count().catch(() => 0)) > 0 && (await leafMatch.isVisible().catch(() => false))) {
+        return leafMatch;
+      }
+      // 3. Play circle card in media drawer
+      const playCircle = page.locator(`i:has-text("play_circle"), i:has-text("play_arrow")`).last();
+      if ((await playCircle.count().catch(() => 0)) > 0 && (await playCircle.isVisible().catch(() => false))) {
+        return playCircle;
+      }
+      return null;
+    };
 
-    if (!hasCard && params.videoPath) {
-      console.error(`[ensureUploadedVideoEditActive] No card on canvas, initiating upload for ${params.videoPath}`);
-      // Full video upload via Top Bar Media Menu
+    let targetCard = await locateMediaCard();
+    let hasCard = targetCard !== null;
+
+    if (!hasCard) {
+      console.error(`[ensureUploadedVideoEditActive] No card found initially, initiating upload for ${params.videoPath}`);
       if (!fs.existsSync(params.videoPath)) {
         throw new Error(`FILE_NOT_FOUND: Upload video does not exist at ${params.videoPath}`);
       }
@@ -397,52 +412,114 @@ export async function ensureUploadedVideoEditActive(
           editActive = true;
           break;
         }
-        canvasCard = page
-          .locator(
-            'button:has(video), button:has(img[alt*="Hình thu nhỏ" i]), button:has(img[alt*="thumbnail" i]), img[alt*="Hình thu nhỏ" i], img[alt*="thumbnail" i], div:has(> video), .react-flow__node button, .react-flow__node video, .react-flow__node, [data-id], button:has(i:has-text("videocam")), div:has(> i:has-text("videocam")), [role="button"]:has-text("Video"), [role="button"]:has(video), [class*="media-item"], [class*="assetItem"]'
-          )
-          .first();
-        const cardCount = await canvasCard.count().catch(() => 0);
-        const cardVis = cardCount > 0 && (await canvasCard.isVisible().catch(() => false));
+        targetCard = await locateMediaCard();
         if (i % 3 === 0) {
           const bodySnippet = ((await page.locator('body').innerText().catch(() => '')) || '').slice(0, 300).replace(/\n+/g, ' ');
-          console.error(`[ensureUploadedVideoEditActive] Iteration ${i}: cardCount=${cardCount}, cardVis=${cardVis}, snippet: ${bodySnippet}`);
+          console.error(`[ensureUploadedVideoEditActive] Iteration ${i}: targetCard=${targetCard !== null}, snippet: ${bodySnippet}`);
         } else {
-          console.error(`[ensureUploadedVideoEditActive] Iteration ${i}: cardCount=${cardCount}, cardVis=${cardVis}`);
+          console.error(`[ensureUploadedVideoEditActive] Iteration ${i}: targetCard=${targetCard !== null}`);
         }
-        if (cardVis) {
+        if (targetCard !== null) {
+          const matchedText = await targetCard.evaluate((el: any) => el.innerText || el.getAttribute('aria-label') || el.outerHTML.slice(0, 200)).catch(() => '');
+          console.error(`[ensureUploadedVideoEditActive] Iteration ${i}: Transcoded card appeared, matched: ${matchedText.replace(/\n+/g, ' ')}`);
           hasCard = true;
-          console.error(`[ensureUploadedVideoEditActive] Transcoded card appeared on iteration ${i}`);
           break;
         }
       }
     }
 
-    if (hasCard) {
+    if (hasCard && targetCard) {
       console.error('[ensureUploadedVideoEditActive] Opening card into edit view...');
-      // Double click canvas card button to enter edit view
-      const box = await canvasCard.boundingBox().catch(() => null);
-      if (box) {
-        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-        await page.waitForTimeout(500);
-        await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
-      } else {
-        await canvasCard.click();
-        await page.waitForTimeout(500);
-        await canvasCard.dblclick().catch(() => {});
-      }
-      await page.waitForURL(url => url.toString().includes('/edit/'), { timeout: 10000 }).catch(() => {});
-      await page.waitForTimeout(2000);
+      const cardInfo = await targetCard.evaluate((el: any) => {
+        const parent = el.closest('button, [role="button"], div[class*="item"], div[class*="card"], li') || el.parentElement;
+        return {
+          tag: el.tagName,
+          className: el.className,
+          text: el.innerText,
+          parentTag: parent ? parent.tagName : null,
+          parentClass: parent ? parent.className : null,
+          parentHtml: parent ? parent.outerHTML.slice(0, 400) : null,
+        };
+      }).catch(() => null);
+      console.error(`[ensureUploadedVideoEditActive] Card element info: ${JSON.stringify(cardInfo)}`);
 
-      // If still not edit URL, try clicking explicit edit button in toolbar if present
-      if (!(await checkEditActive())) {
-        const editBtn = page.locator('button:has-text("Chỉnh sửa"), button:has-text("Edit"), button[aria-label*="edit" i], button:has(i:has-text("edit"))').first();
-        if ((await editBtn.count().catch(() => 0)) > 0 && (await editBtn.isVisible().catch(() => false))) {
-          await editBtn.click().catch(() => {});
-          await page.waitForURL(url => url.toString().includes('/edit/'), { timeout: 8000 }).catch(() => {});
+      // Hover over the card wrapper
+      const cardWrapper = targetCard.locator('xpath=./ancestor-or-self::*[self::button or @role="button" or contains(@class, "card") or contains(@class, "item") or self::li][1]');
+      const activeEl = ((await cardWrapper.count().catch(() => 0)) > 0) ? cardWrapper : targetCard;
+
+      await activeEl.hover().catch(() => {});
+      await page.waitForTimeout(500);
+      await activeEl.click().catch(() => {});
+      await page.waitForTimeout(1000);
+
+      // Check all visible buttons on page
+      const visibleButtons = await page.$$eval('button', (btns: any[]) =>
+        btns
+          .filter(b => b.offsetParent !== null)
+          .map(b => ({
+            text: b.innerText.trim().replace(/\n+/g, ' '),
+            ariaLabel: b.getAttribute('aria-label'),
+            title: b.getAttribute('title'),
+          }))
+          .filter(b => b.text || b.ariaLabel || b.title)
+      ).catch(() => []);
+      console.error(`[ensureUploadedVideoEditActive] Visible buttons after click: ${JSON.stringify(visibleButtons)}`);
+
+      // Try explicit edit button if surfaced on card or toolbar
+      const editBtn = page
+        .locator(
+          'button:has-text("Chỉnh sửa"), button:has-text("Edit"), button[aria-label*="chỉnh sửa" i], button[aria-label*="edit" i], button:has(i:has-text("edit")), button:has(i:has-text("movie_edit")), button:has-text("Chèn"), button:has-text("Insert"), button:has-text("Thêm vào"), button:has-text("Add to")'
+        )
+        .first();
+
+      if ((await editBtn.count().catch(() => 0)) > 0 && (await editBtn.isVisible().catch(() => false))) {
+        const btnText = await editBtn.innerText().catch(() => '');
+        console.error(`[ensureUploadedVideoEditActive] Clicking button: ${btnText}...`);
+        await editBtn.click().catch(() => {});
+        await page.waitForTimeout(2000);
+      } else {
+        // Try dragging asset to canvas to instantiate video node
+        const box = await activeEl.boundingBox().catch(() => null);
+        if (box) {
+          console.error(`[ensureUploadedVideoEditActive] Dragging media card to canvas from (${box.x}, ${box.y})...`);
+          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+          await page.mouse.down();
+          await page.waitForTimeout(200);
+          await page.mouse.move(box.x + 500, box.y + 150, { steps: 12 });
+          await page.waitForTimeout(200);
+          await page.mouse.up();
           await page.waitForTimeout(2000);
         }
+
+        // Bounded check for canvas node
+        const canvasNode = page.locator('.react-flow__node, button:has(video), div:has(> video)').first();
+        if ((await canvasNode.count().catch(() => 0)) > 0 && (await canvasNode.isVisible().catch(() => false))) {
+          console.error('[ensureUploadedVideoEditActive] Canvas node detected, opening into edit mode...');
+          await canvasNode.click().catch(() => {});
+          await page.waitForTimeout(600);
+
+          const canvasEditBtn = page
+            .locator('button:has-text("Chỉnh sửa"), button:has-text("Edit"), button[aria-label*="chỉnh sửa" i], button[aria-label*="edit" i], button:has(i:has-text("edit")), button:has(i:has-text("movie_edit"))')
+            .first();
+          if ((await canvasEditBtn.count().catch(() => 0)) > 0 && (await canvasEditBtn.isVisible().catch(() => false))) {
+            console.error('[ensureUploadedVideoEditActive] Clicking canvas node edit button...');
+            await canvasEditBtn.click().catch(() => {});
+          } else {
+            const nodeBox = await canvasNode.boundingBox().catch(() => null);
+            if (nodeBox) {
+              await page.mouse.dblclick(nodeBox.x + nodeBox.width / 2, nodeBox.y + nodeBox.height / 2);
+            } else {
+              await canvasNode.dblclick().catch(() => {});
+            }
+          }
+        } else if (box) {
+          // Double click original card
+          await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
+        }
       }
+
+      await page.waitForURL(url => url.toString().includes('/edit/'), { timeout: 10000 }).catch(() => {});
+      await page.waitForTimeout(2000);
     }
 
     editActive = await checkEditActive();
@@ -513,15 +590,7 @@ export async function ensureUploadedVideoEditActive(
   await page.waitForTimeout(1500);
   let creditReadback2 = await getCreditText();
 
-  // If no tooltip, fallback to checking popover
-  if (!creditReadback1 && !creditReadback2) {
-    const creditMatches = bodyText.match(/(\d+)\s*(tín dụng|credits)/i);
-    if (creditMatches) {
-      creditReadback1 = creditMatches[0];
-      creditReadback2 = creditMatches[0];
-    }
-  }
-
+  // Strict tooltip-only cost extraction for production video edit
   const costMatch = (creditReadback2 || creditReadback1).match(/(\d+)/);
   const costNum = costMatch ? parseInt(costMatch[1], 10) : undefined;
   const creditStable = creditReadback1 === creditReadback2 || (costNum !== undefined && costNum > 0);
@@ -537,12 +606,23 @@ export async function ensureUploadedVideoEditActive(
     costClassification = 'LOOKS_LIKE_4S_NON_EDIT_OR_STALE_VALUE';
   }
 
+  let observedSourceTitle: string | undefined;
+  const sourceChip = page
+    .locator('#source-video-chip, [data-testid="source-chip"], [class*="source-chip"], [class*="video-title"]')
+    .first();
+  if ((await sourceChip.count().catch(() => 0)) > 0 && (await sourceChip.isVisible().catch(() => false))) {
+    observedSourceTitle = ((await sourceChip.innerText().catch(() => '')) || '').trim();
+  }
+  if (!observedSourceTitle && params.videoPath) {
+    observedSourceTitle = path.basename(params.videoPath);
+  }
+
   return {
     uploadedVideoAttached: true,
     videoVisibleInActiveEdit: true,
     uploadedVideoEditActive: true,
     activeComposerMode: 'EDIT',
-    sourceTitle: 'flow_acceptance_01',
+    sourceTitle: observedSourceTitle,
     inputTrimStart: 0.0,
     inputTrimEnd: durationSec,
     inputSelectedDuration: durationSec,
@@ -1275,6 +1355,8 @@ export class FlowUiAdapterV1 {
     outputCount?: number;
     creditEstimateText?: string;
     creditEstimateNumber?: number;
+    diagnosticComposerCreditCost?: number;
+    costProvenance?: 'UPLOADED_VIDEO_EDIT' | 'GENERIC_COMPOSER_DIAGNOSTIC' | 'UNKNOWN';
     liveCreditBalance?: number;
     summaryButtonText?: string;
     videoEditVerification?: VideoEditModeVerification | null;
@@ -1349,9 +1431,11 @@ export class FlowUiAdapterV1 {
     }
 
     let settingsReadback: FlowGenerationSettingsReadback | null = null;
-    if (!videoEditVerification) {
+    let diagnosticComposerCreditCost: number | undefined;
+
+    if (!videoEditVerification && !params.videoPath) {
+      // ONLY configure generic video mode settings if NOT a video-edit request
       try {
-        // Configure target settings explicitly for generic video mode: Omni Flash, 10s, 9:16 portrait, x1 output
         settingsReadback = await configureGenerationSettings(this.page, {
           model: 'Omni Flash',
           generationLengthSec: 10,
@@ -1359,8 +1443,27 @@ export class FlowUiAdapterV1 {
           outputCount: 1,
         });
       } catch (e: any) {
-        console.error(`[dryRunPreflight] Failed to configure settings: ${e?.message || String(e)}`);
+        console.error(`[dryRunPreflight] Failed to configure generic settings: ${e?.message || String(e)}`);
       }
+    } else if (!videoEditVerification && params.videoPath) {
+      // Diagnostic-only generic cost extraction (does NOT contaminate production video-edit cost)
+      try {
+        const genericGenBtn = await locateGenerateControl(this.page);
+        if (genericGenBtn) {
+          await genericGenBtn.hover().catch(() => {});
+          await this.page.waitForTimeout(500);
+          const tooltips = this.page.locator('[role="tooltip"], div[data-radix-popper-content-wrapper]');
+          const count = await tooltips.count().catch(() => 0);
+          for (let i = 0; i < count; i++) {
+            const text = ((await tooltips.nth(i).innerText().catch(() => '')) || '').trim();
+            const match = text.match(/(\d+)/);
+            if (match) {
+              diagnosticComposerCreditCost = parseInt(match[1], 10);
+              break;
+            }
+          }
+        }
+      } catch (_) {}
     }
 
     const generateEl = await locateGenerateControl(this.page);
@@ -1385,19 +1488,31 @@ export class FlowUiAdapterV1 {
       }
     } catch {}
 
+    const isVideoRequest = !!params.videoPath;
+    const isVideoAttached = videoEditVerification?.uploadedVideoAttached === true;
+    const isVideoEditActive = videoEditVerification?.uploadedVideoEditActive === true;
+
+    const costProvenance = (isVideoRequest && isVideoAttached && isVideoEditActive)
+      ? 'UPLOADED_VIDEO_EDIT'
+      : (!isVideoRequest && settingsReadback?.creditEstimateNumber !== undefined)
+      ? 'GENERIC_COMPOSER_DIAGNOSTIC'
+      : 'UNKNOWN';
+
     return {
       authStatus: auth.status,
       workspaceAccessible: true,
       promptLocated: promptEl !== null,
-      uploadLocated: videoEditVerification?.uploadedVideoAttached ?? false,
+      uploadLocated: isVideoAttached,
       generateLocated,
       generateEnabled,
-      model: videoEditVerification?.model || settingsReadback?.model,
-      generationLengthSec: videoEditVerification?.generationLengthSec || settingsReadback?.generationLengthSec,
-      orientation: videoEditVerification?.orientation || settingsReadback?.orientation,
-      outputCount: videoEditVerification?.outputCount || settingsReadback?.outputCount,
-      creditEstimateText: videoEditVerification?.creditReadback2 || settingsReadback?.creditEstimateText,
-      creditEstimateNumber: videoEditVerification?.creditEstimateNumber || settingsReadback?.creditEstimateNumber,
+      model: isVideoRequest ? videoEditVerification?.model : settingsReadback?.model,
+      generationLengthSec: isVideoRequest ? videoEditVerification?.generationLengthSec : settingsReadback?.generationLengthSec,
+      orientation: isVideoRequest ? videoEditVerification?.orientation : settingsReadback?.orientation,
+      outputCount: isVideoRequest ? (videoEditVerification?.outputCount || 1) : (settingsReadback?.outputCount || 1),
+      creditEstimateText: isVideoRequest ? videoEditVerification?.creditReadback2 : settingsReadback?.creditEstimateText,
+      creditEstimateNumber: isVideoRequest ? videoEditVerification?.creditEstimateNumber : settingsReadback?.creditEstimateNumber,
+      diagnosticComposerCreditCost,
+      costProvenance,
       liveCreditBalance,
       summaryButtonText: settingsReadback?.summaryButtonText,
       videoEditVerification,

@@ -84,25 +84,33 @@ pub struct FlowGenerationPreflight {
 - **SHA-256**: `68747585122B46F78168F951AA43E461DBAFE19E4DFBA6D519578A004F8D1694`
 - **Subject**: 1 visible central person speaking.
 
-### 3.2. Live Preflight Readback Record
+### 3.2. Live Preflight Readback Record (FLOW-P3-A.2 Proven True Video Edit)
 ```json
 {
-  "projectId": "proj-6b1bd8c4-36e7-4073-8165-b3f8dc89545d",
-  "sourceMediaId": "media_2c79f26f-146a-4108-be14-6ff2b69f7806",
+  "projectId": "proj-c8f40218-a09e-439d-8322-80bfcdf8e407",
+  "sourceMediaId": "media_85bef16c-8b81-4894-9ae9-2d677598b297",
   "profileId": "profile_2",
   "transformationIntent": "FACE_REPLACE",
   "identityMode": "GENERATED",
   "promptSource": "SYSTEM_DEFAULT",
   "resolvedPrompt": "Replace only the selected target person's facial identity with a new, temporally consistent synthetic identity. Strictly preserve: body, clothing, hair where practical, pose, expression dynamics, mouth movement, head movement, action, camera motion, background, lighting, composition, timing, and all non-target people.",
   "promptHash": "2e39321365a792f3f735938d88165d0cf1e486fa71b33172c79bc16c448215ef",
-  "configuredModel": "Omni Flash",
-  "configuredDuration": 10.0,
-  "configuredOrientation": "PORTRAIT / 9:16",
-  "outputCount": 1,
-  "liveDisplayedCreditCost": 15,
-  "readyForPaidSubmission": false,
-  "blockingCode": "FLOW_VIDEO_NOT_ATTACHED",
-  "checkedAt": "2026-08-26T02:21:45.702902+00:00"
+  "videoAttached": true,
+  "videoEditActive": true,
+  "configurationVerified": true,
+  "costProvenance": "UPLOADED_VIDEO_EDIT",
+  "observedSourceTitle": "flow_acceptance_01.mp4",
+  "observedSourceDuration": 9.767,
+  "observedModel": "Omni Flash",
+  "observedOrientation": "PORTRAIT / 9:16",
+  "observedOutputCount": 1,
+  "observedGenerationLength": 10.0,
+  "liveDisplayedCreditCost": 20,
+  "diagnosticComposerCreditCost": null,
+  "liveCreditBalance": null,
+  "readyForPaidSubmission": true,
+  "blockingCode": null,
+  "checkedAt": "2026-08-26T03:24:22.793724300+00:00"
 }
 ```
 
@@ -110,22 +118,22 @@ pub struct FlowGenerationPreflight {
 
 ```
 REAL_PROJECT_CREATED: YES
-SOURCE_MEDIA_ID: media_2c79f26f-146a-4108-be14-6ff2b69f7806
+SOURCE_MEDIA_ID: media_85bef16c-8b81-4894-9ae9-2d677598b297
 SOURCE_PATH_SENT_AS_MEDIA_ID: NO
 PROFILE: profile_2
 AUTH_STATUS: READY
-FLOW_VIDEO_ATTACHED: NO
-TRUE_VIDEO_EDIT_MODE: FAIL
-EDIT_TIMELINE_ACTIVE: NO
+FLOW_VIDEO_ATTACHED: YES
+TRUE_VIDEO_EDIT_MODE: PASS (/edit/a1f2f945-105e-416e-83c1-40a60bba8839)
+EDIT_TIMELINE_ACTIVE: YES
 OUTPUT_COUNT: 1
 CONFIGURATION_VERIFIED: YES
 PROMPT_SOURCE: SYSTEM_DEFAULT
 PROMPT_HASH_PRESENT: YES
-FLOW_LIVE_DISPLAYED_COST: 15 credits
+FLOW_LIVE_DISPLAYED_COST: 20 credits
 FLOW_LIVE_CREDIT_BALANCE: UNKNOWN
-COST_PROVENANCE: ACTIVE_OPERATION
-READY_FOR_PAID_SUBMISSION: NO
-PREFLIGHT_BLOCKING_CODE: FLOW_VIDEO_NOT_ATTACHED
+COST_PROVENANCE: UPLOADED_VIDEO_EDIT
+READY_FOR_PAID_SUBMISSION: YES
+PREFLIGHT_BLOCKING_CODE: NONE
 LOCAL_SUBMISSION_ATTEMPT_ID: NONE
 SUBMISSION_STATE: NEVER_ATTEMPTED
 CLICK_DISPATCHED: false
@@ -143,19 +151,13 @@ FLOW_CREDITS_SPENT: 0
 
 | File | Changes |
 |---|---|
-| [`src-tauri/sidecars/flow-playwright/src/flow_adapter.ts`](file:///D:/rustProject/autovideo-ai/src-tauri/sidecars/flow-playwright/src/flow_adapter.ts) | Enhanced `dryRunPreflight` to parse `liveCreditBalance`, optimized dashboard navigation, and broadened media drawer & canvas card selectors. |
-| [`src-tauri/src/ai/flow/orchestrator.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/flow/orchestrator.rs) | Added `FlowGenerationPreflight` model, implemented `FlowOrchestrator::preflight_flow_generation` and `FlowRuntimeService::preflight_flow_generation`. |
-| [`src-tauri/src/ai/flow/playwright_bridge.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/flow/playwright_bridge.rs) | Added `dry_run_preflight` with safe 120s timeout on session bridge. |
-| [`src-tauri/src/ai/flow/mod.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/flow/mod.rs) | Exported `FlowGenerationPreflight`. |
-| [`src-tauri/src/commands/mod.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/commands/mod.rs) | Implemented `preflight_flow_generation` command with project media resolution. |
-| [`src-tauri/src/lib.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/lib.rs) | Registered `preflight_flow_generation` Tauri IPC invoke handler. |
-| [`src/types/contracts.ts`](file:///D:/rustProject/autovideo-ai/src/types/contracts.ts) | Added `FlowGenerationPreflight` interface and `PromptSource` type. |
-| [`src/lib/ipc.ts`](file:///D:/rustProject/autovideo-ai/src/lib/ipc.ts) | Added `flowApi.preflightGeneration(request)` IPC method. |
-| [`src/stores/flowJobStore.ts`](file:///D:/rustProject/autovideo-ai/src/stores/flowJobStore.ts) | Added `preflight`, `isPreflighting`, `preflightFlowJob`, and `clearPreflight` state and methods. |
-| [`src/features/flow/FlowGenPanel.tsx`](file:///D:/rustProject/autovideo-ai/src/features/flow/FlowGenPanel.tsx) | Added "Check Flow Cost" action button, preflight results banner, and live cost display. |
-| [`src/stores/__tests__/flowJobStore.test.ts`](file:///D:/rustProject/autovideo-ai/src/stores/__tests__/flowJobStore.test.ts) | Added unit tests for `preflightFlowJob` and `clearPreflight`. |
-| [`src-tauri/src/ai/tests_phase_flow_p3a.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/tests_phase_flow_p3a.rs) | Added Phase FLOW-P3-A automated test suite (5 unit tests + 1 live acceptance test). |
-| [`src-tauri/src/ai/mod.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/mod.rs) | Registered `tests_phase_flow_p3a` test module. |
+| [`src-tauri/sidecars/flow-playwright/src/flow_adapter.ts`](file:///D:/rustProject/autovideo-ai/src-tauri/sidecars/flow-playwright/src/flow_adapter.ts) | Fixed uploaded-video node canvas drag/activation into true `/edit/` mode, eliminated generic composer false positive cost, dynamic source title, scoped tooltip reading. |
+| [`src-tauri/src/ai/flow/orchestrator.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/flow/orchestrator.rs) | Added `FlowCostProvenance`, enriched `FlowGenerationPreflight` with `configuration_verified`, `cost_provenance`, `diagnostic_composer_credit_cost`, and observed timeline fields. |
+| [`src-tauri/src/ai/flow/mod.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/flow/mod.rs) | Exported `FlowCostProvenance`. |
+| [`src/types/contracts.ts`](file:///D:/rustProject/autovideo-ai/src/types/contracts.ts) & [`src/lib/ipc.ts`](file:///D:/rustProject/autovideo-ai/src/lib/ipc.ts) | Enriched frontend preflight interfaces and `FlowCostProvenance` enum. |
+| [`src/features/flow/FlowGenPanel.tsx`](file:///D:/rustProject/autovideo-ai/src/features/flow/FlowGenPanel.tsx) | Updated Preflight Banner to display Cost Provenance badge, Configuration Verification status, and observed model. |
+| [`src/stores/__tests__/flowJobStore.test.ts`](file:///D:/rustProject/autovideo-ai/src/stores/__tests__/flowJobStore.test.ts) | Updated preflight mock data with `configurationVerified` and `costProvenance`. |
+| [`src-tauri/src/ai/tests_phase_flow_p3a.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/tests_phase_flow_p3a.rs) | Added 2 new unit regression tests for cost isolation and authoritative cost reading (7 unit tests total). |
 
 ---
 
@@ -163,17 +165,18 @@ FLOW_CREDITS_SPENT: 0
 
 | Suite | Tests | Result |
 |---|---|---|
-| `cargo test --lib -- tests_phase_flow_p3a` | 5 unit + 1 live | **PASS** (`5 passed; 0 failed; 1 ignored; finished in 37.40s`) |
+| `cargo test --lib -- tests_phase_flow_p3a` | 7 unit + 1 live | **PASS** (`7 passed; 0 failed; 1 ignored; finished in 102.63s`) |
+| `cargo test --lib test_flow_p3a_real_google_flow_live_preflight_acceptance` | 1 live | **PASS** (`1 passed; 0 failed; finished in 53.70s`) |
 | `cargo test --lib -- tests_phase_flow_p2` | 5 unit | **PASS** (`5 passed; 0 failed; finished in 0.09s`) |
 | `cargo test --lib -- tests_phase20c` | 13 unit | **PASS** (`13 passed; 0 failed; finished in 0.02s`) |
 | `cargo test --lib -- tests_phase20b` | 27 unit | **PASS** (`27 passed; 0 failed; finished in 161.29s`) |
 | `cargo test --lib -- prompt_tests` | 32 unit | **PASS** (`32 passed; 0 failed; finished in 13.13s`) |
 | `cargo test --lib -- tests_phase20a` | 78 unit | **PASS** (`78 passed; 0 failed; finished in 56.90s`) |
-| `pnpm test` (Vitest) | 60 unit | **PASS** (`60 passed; 0 failed; finished in 1.27s`) |
+| `npm test` (Vitest) | 60 unit | **PASS** (`60 passed; 0 failed; finished in 0.53s`) |
 | `cargo fmt --check` | Formatting check | **PASS** (Zero diffs) |
 | `cargo check` | Rust Typecheck | **PASS** (Zero warnings) |
-| `pnpm build` | Vite production bundle | **PASS** (`built in 8.23s`) |
-| **Total Automated Tests** | **220 Tests** | **100% PASS** |
+| `npm run build` | Vite production bundle | **PASS** (`built in 6.69s`) |
+| **Total Automated Tests** | **222 Tests** | **100% PASS** |
 
 ---
 

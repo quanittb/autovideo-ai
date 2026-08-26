@@ -1111,6 +1111,11 @@ export interface FlowGenerationRequest {
   preserveOriginalAudio?: boolean;
 }
 
+export type FlowCostProvenance =
+  | 'UPLOADED_VIDEO_EDIT'
+  | 'GENERIC_COMPOSER_DIAGNOSTIC'
+  | 'UNKNOWN';
+
 export interface FlowGenerationPreflight {
   projectId: string;
   sourceMediaId: string;
@@ -1122,12 +1127,21 @@ export interface FlowGenerationPreflight {
   promptHash: string;
   videoAttached: boolean;
   videoEditActive: boolean;
+  configurationVerified: boolean;
   configuredModel?: string;
   configuredDuration?: number;
   configuredOrientation?: string;
   outputCount: number;
   liveDisplayedCreditCost?: number;
   liveCreditBalance?: number;
+  costProvenance: FlowCostProvenance;
+  diagnosticComposerCreditCost?: number;
+  observedSourceTitle?: string;
+  observedSourceDuration?: number;
+  observedModel?: string;
+  observedOrientation?: string;
+  observedOutputCount?: number;
+  observedGenerationLength?: number;
   readyForPaidSubmission: boolean;
   blockingCode?: string;
   checkedAt: string;

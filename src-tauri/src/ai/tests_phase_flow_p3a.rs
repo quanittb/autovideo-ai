@@ -285,6 +285,137 @@ async fn test_flow_p3a_05_preflight_logged_out_profile_returns_blocking_code() {
 }
 
 #[tokio::test]
+async fn test_flow_p3a_06_video_edit_inactive_blocks_generic_cost_exposure() {
+    let mock_server = MockFlowServer::start(MockScenario::UnattachedVideoUpload)
+        .await
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service =
+        FlowRuntimeService::with_mock_bridge(paths.clone(), mock_server.base_url.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("profile_ready", "Ready Profile")
+        .unwrap();
+
+    let video_file = temp_dir.path().join("test_input.mp4");
+    std::process::Command::new("ffmpeg")
+        .args(&[
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=10:size=576x1024:rate=30",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            video_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("ffmpeg creation");
+
+    let req = FlowGenerationRequest {
+        project_id: "proj_flow_p3a".to_string(),
+        source_media_id: "media_100".to_string(),
+        profile_id: "profile_ready".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: "".to_string(),
+        prompt_source: None,
+        target_face: None,
+        max_credits: None,
+        preserve_original_audio: Some(true),
+    };
+
+    let preflight = flow_service
+        .preflight_flow_generation(req, video_file)
+        .await
+        .unwrap();
+
+    // When video edit mode is inactive, generic composer cost MUST NOT become liveDisplayedCreditCost
+    assert!(!preflight.video_attached);
+    assert!(!preflight.video_edit_active);
+    assert!(!preflight.configuration_verified);
+    assert_eq!(preflight.cost_provenance, FlowCostProvenance::Unknown);
+    assert_eq!(preflight.live_displayed_credit_cost, None);
+    assert!(!preflight.ready_for_paid_submission);
+    assert_eq!(
+        preflight.blocking_code,
+        Some("FLOW_VIDEO_NOT_ATTACHED".to_string())
+    );
+}
+
+#[tokio::test]
+async fn test_flow_p3a_07_mock_true_edit_exposes_authoritative_cost() {
+    let mock_server = MockFlowServer::start(MockScenario::TrueVideoEditActive)
+        .await
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service =
+        FlowRuntimeService::with_mock_bridge(paths.clone(), mock_server.base_url.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("profile_ready", "Ready Profile")
+        .unwrap();
+
+    let video_file = temp_dir.path().join("test_input.mp4");
+    std::process::Command::new("ffmpeg")
+        .args(&[
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=10:size=576x1024:rate=30",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            video_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("ffmpeg creation");
+
+    let req = FlowGenerationRequest {
+        project_id: "proj_flow_p3a".to_string(),
+        source_media_id: "media_100".to_string(),
+        profile_id: "profile_ready".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: "".to_string(),
+        prompt_source: None,
+        target_face: None,
+        max_credits: None,
+        preserve_original_audio: Some(true),
+    };
+
+    let preflight = flow_service
+        .preflight_flow_generation(req, video_file)
+        .await
+        .unwrap();
+
+    assert!(preflight.video_attached);
+    assert!(preflight.video_edit_active);
+    assert!(preflight.configuration_verified);
+    assert_eq!(
+        preflight.cost_provenance,
+        FlowCostProvenance::UploadedVideoEdit
+    );
+    assert_eq!(preflight.live_displayed_credit_cost, Some(20));
+    assert!(preflight.ready_for_paid_submission);
+    assert_eq!(preflight.blocking_code, None);
+    assert_eq!(
+        preflight.observed_source_title,
+        Some("flow_acceptance_01.mp4".to_string())
+    );
+}
+
+#[tokio::test]
 #[ignore]
 async fn test_flow_p3a_real_google_flow_live_preflight_acceptance() {
     let base_path =
@@ -382,16 +513,33 @@ async fn test_flow_p3a_real_google_flow_live_preflight_acceptance() {
             println!("Prompt Hash: {}", preflight.prompt_hash);
             println!("Video Attached: {}", preflight.video_attached);
             println!("Video Edit Active: {}", preflight.video_edit_active);
-            println!("Configured Model: {:?}", preflight.configured_model);
-            println!("Configured Duration: {:?}", preflight.configured_duration);
+            println!("Config Verified: {}", preflight.configuration_verified);
+            println!("Cost Provenance: {:?}", preflight.cost_provenance);
             println!(
-                "Configured Orientation: {:?}",
-                preflight.configured_orientation
+                "Observed Source Title: {:?}",
+                preflight.observed_source_title
             );
-            println!("Output Count: {}", preflight.output_count);
+            println!(
+                "Observed Source Duration: {:?}",
+                preflight.observed_source_duration
+            );
+            println!("Observed Model: {:?}", preflight.observed_model);
+            println!("Observed Orientation: {:?}", preflight.observed_orientation);
+            println!(
+                "Observed Output Count: {:?}",
+                preflight.observed_output_count
+            );
+            println!(
+                "Observed Generation Length: {:?}",
+                preflight.observed_generation_length
+            );
             println!(
                 "Live Displayed Credit Cost: {:?}",
                 preflight.live_displayed_credit_cost
+            );
+            println!(
+                "Diagnostic Composer Credit Cost: {:?}",
+                preflight.diagnostic_composer_credit_cost
             );
             println!("Live Credit Balance: {:?}", preflight.live_credit_balance);
             println!(
@@ -402,10 +550,6 @@ async fn test_flow_p3a_real_google_flow_live_preflight_acceptance() {
             println!("Checked At: {}", preflight.checked_at);
             println!("==================================================");
 
-            assert!(
-                preflight.live_displayed_credit_cost.is_some(),
-                "Live credit cost should be read"
-            );
             assert_eq!(preflight.prompt_source, PromptSource::SystemDefault);
             assert!(!preflight.prompt_hash.is_empty());
         }

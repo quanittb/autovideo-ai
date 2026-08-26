@@ -370,7 +370,12 @@ export const FlowGenPanel: React.FC = () => {
               <Sparkles className="w-4 h-4 text-indigo-400" />
               <span>
                 Discovered Flow Cost:{' '}
-                <strong>{preflight.liveDisplayedCreditCost ?? 'Unknown'} credits</strong>
+                <strong>{preflight.liveDisplayedCreditCost ? `${preflight.liveDisplayedCreditCost} credits` : 'Unknown'}</strong>
+                {preflight.costProvenance && (
+                  <span className="text-slate-400 ml-2 font-mono text-[10px] uppercase bg-slate-800/80 px-1.5 py-0.5 rounded">
+                    {preflight.costProvenance}
+                  </span>
+                )}
                 {preflight.liveCreditBalance !== undefined && (
                   <span className="text-slate-300 ml-2">
                     (Account Balance: {preflight.liveCreditBalance} credits)
@@ -383,9 +388,13 @@ export const FlowGenPanel: React.FC = () => {
             </span>
           </div>
 
-          <div className="flex items-center gap-4 text-slate-300">
+          <div className="flex items-center gap-4 text-slate-300 flex-wrap">
             <span>Video Attached: {preflight.videoAttached ? 'YES' : 'NO'}</span>
             <span>Edit Mode: {preflight.videoEditActive ? 'ACTIVE (/edit/)' : 'INACTIVE'}</span>
+            <span>Config Verified: {preflight.configurationVerified ? 'YES' : 'NO'}</span>
+            {preflight.observedModel && (
+              <span>Model: {preflight.observedModel}</span>
+            )}
             {preflight.configuredOrientation && (
               <span>Orientation: {preflight.configuredOrientation}</span>
             )}

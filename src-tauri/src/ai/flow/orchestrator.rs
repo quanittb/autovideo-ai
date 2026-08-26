@@ -80,6 +80,14 @@ pub struct FlowGenerationRequest {
     pub preserve_original_audio: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FlowCostProvenance {
+    UploadedVideoEdit,
+    GenericComposerDiagnostic,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowGenerationPreflight {
@@ -96,6 +104,7 @@ pub struct FlowGenerationPreflight {
 
     pub video_attached: bool,
     pub video_edit_active: bool,
+    pub configuration_verified: bool,
 
     #[serde(default)]
     pub configured_model: Option<String>,
@@ -109,6 +118,24 @@ pub struct FlowGenerationPreflight {
     pub live_displayed_credit_cost: Option<u32>,
     #[serde(default)]
     pub live_credit_balance: Option<u32>,
+
+    pub cost_provenance: FlowCostProvenance,
+
+    #[serde(default)]
+    pub diagnostic_composer_credit_cost: Option<u32>,
+
+    #[serde(default)]
+    pub observed_source_title: Option<String>,
+    #[serde(default)]
+    pub observed_source_duration: Option<f64>,
+    #[serde(default)]
+    pub observed_model: Option<String>,
+    #[serde(default)]
+    pub observed_orientation: Option<String>,
+    #[serde(default)]
+    pub observed_output_count: Option<u32>,
+    #[serde(default)]
+    pub observed_generation_length: Option<f64>,
 
     pub ready_for_paid_submission: bool,
 
@@ -371,59 +398,118 @@ impl FlowOrchestrator {
                 prompt_hash,
                 video_attached: false,
                 video_edit_active: false,
+                configuration_verified: false,
                 configured_model: None,
                 configured_duration: None,
                 configured_orientation: None,
                 output_count: 1,
                 live_displayed_credit_cost: None,
                 live_credit_balance: None,
+                cost_provenance: FlowCostProvenance::Unknown,
+                diagnostic_composer_credit_cost: None,
+                observed_source_title: None,
+                observed_source_duration: None,
+                observed_model: None,
+                observed_orientation: None,
+                observed_output_count: None,
+                observed_generation_length: None,
                 ready_for_paid_submission: false,
                 blocking_code: Some(auth_status.to_string()),
                 checked_at: Utc::now().to_rfc3339(),
             });
         }
 
-        let video_attached = val
-            .get("uploadLocated")
-            .and_then(|v| v.as_bool())
+        let edit_verif = val.get("videoEditVerification");
+        let video_attached = edit_verif
+            .and_then(|v| v.get("uploadedVideoAttached"))
+            .and_then(|b| b.as_bool())
             .unwrap_or(false);
 
-        let edit_verif = val.get("videoEditVerification");
         let video_edit_active = edit_verif
             .and_then(|v| v.get("uploadedVideoEditActive"))
             .and_then(|b| b.as_bool())
             .unwrap_or(false);
 
-        let model = val
-            .get("model")
+        let observed_source_title = edit_verif
+            .and_then(|v| v.get("sourceTitle"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let duration = val.get("generationLengthSec").and_then(|v| v.as_f64());
-        let orientation = val
-            .get("orientation")
+        let observed_source_duration = edit_verif
+            .and_then(|v| v.get("inputSelectedDuration"))
+            .and_then(|v| v.as_f64());
+        let observed_model = edit_verif
+            .and_then(|v| v.get("model"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let output_count = val.get("outputCount").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+        let observed_orientation = edit_verif
+            .and_then(|v| v.get("orientation"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let observed_output_count = edit_verif
+            .and_then(|v| v.get("outputCount"))
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32);
+        let observed_generation_length = edit_verif
+            .and_then(|v| v.get("generationLengthSec"))
+            .and_then(|v| v.as_f64());
 
-        let live_cost = val
-            .get("creditEstimateNumber")
+        let model = observed_model.clone();
+        let duration = observed_generation_length;
+        let orientation = observed_orientation.clone();
+        let output_count = observed_output_count.unwrap_or(1);
+
+        let live_cost_raw = edit_verif
+            .and_then(|v| v.get("creditEstimateNumber"))
             .and_then(|v| v.as_u64())
             .map(|c| c as u32);
+
+        let diagnostic_composer_cost = val
+            .get("diagnosticComposerCreditCost")
+            .and_then(|v| v.as_u64())
+            .map(|c| c as u32);
+
         let live_balance = val
             .get("liveCreditBalance")
             .and_then(|v| v.as_u64())
             .map(|c| c as u32);
 
-        let ready_for_paid_submission = video_attached && video_edit_active && live_cost.is_some();
-        let blocking_code = if !video_attached {
-            Some("FLOW_VIDEO_NOT_ATTACHED".to_string())
-        } else if !video_edit_active {
-            Some("FLOW_VIDEO_EDIT_NOT_ACTIVE".to_string())
-        } else if live_cost.is_none() {
-            Some("FLOW_CONFIGURATION_UNVERIFIED".to_string())
-        } else {
-            None
-        };
+        let configuration_verified = video_attached
+            && video_edit_active
+            && observed_model.as_deref() == Some("Omni Flash")
+            && output_count == 1;
+
+        let (cost_provenance, live_displayed_credit_cost, ready_for_paid_submission, blocking_code) =
+            if video_attached && video_edit_active && configuration_verified {
+                if let Some(cost) = live_cost_raw {
+                    (
+                        FlowCostProvenance::UploadedVideoEdit,
+                        Some(cost),
+                        true,
+                        None,
+                    )
+                } else {
+                    (
+                        FlowCostProvenance::Unknown,
+                        None,
+                        false,
+                        Some("FLOW_CONFIGURATION_UNVERIFIED".to_string()),
+                    )
+                }
+            } else {
+                let code = if !video_attached {
+                    "FLOW_VIDEO_NOT_ATTACHED"
+                } else if !video_edit_active {
+                    "FLOW_VIDEO_EDIT_NOT_ACTIVE"
+                } else {
+                    "FLOW_CONFIGURATION_UNVERIFIED"
+                };
+                (
+                    FlowCostProvenance::Unknown,
+                    None,
+                    false,
+                    Some(code.to_string()),
+                )
+            };
 
         Ok(FlowGenerationPreflight {
             project_id: request.project_id,
@@ -436,12 +522,21 @@ impl FlowOrchestrator {
             prompt_hash,
             video_attached,
             video_edit_active,
+            configuration_verified,
             configured_model: model,
             configured_duration: duration,
             configured_orientation: orientation,
             output_count,
-            live_displayed_credit_cost: live_cost,
+            live_displayed_credit_cost,
             live_credit_balance: live_balance,
+            cost_provenance,
+            diagnostic_composer_credit_cost: diagnostic_composer_cost,
+            observed_source_title,
+            observed_source_duration,
+            observed_model,
+            observed_orientation,
+            observed_output_count,
+            observed_generation_length,
             ready_for_paid_submission,
             blocking_code,
             checked_at: Utc::now().to_rfc3339(),
