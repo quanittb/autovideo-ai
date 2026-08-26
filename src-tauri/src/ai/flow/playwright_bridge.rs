@@ -714,7 +714,28 @@ impl FlowActiveBrowserSession {
         max_credits: u32,
         expected_fingerprint: &str,
         expected_config: Option<&super::manifest::FlowRequestedGenerationConfig>,
+        prompt_hash: Option<&str>,
+        source_identity: Option<&str>,
     ) -> Result<FlowSubmissionOutcome, String> {
+        let mut cfg_val = match expected_config {
+            Some(c) => serde_json::to_value(c).unwrap_or(serde_json::Value::Null),
+            None => serde_json::Value::Null,
+        };
+        if let Some(obj) = cfg_val.as_object_mut() {
+            if let Some(ph) = prompt_hash {
+                obj.insert(
+                    "promptHash".to_string(),
+                    serde_json::Value::String(ph.to_string()),
+                );
+            }
+            if let Some(si) = source_identity {
+                obj.insert(
+                    "sourceIdentity".to_string(),
+                    serde_json::Value::String(si.to_string()),
+                );
+            }
+        }
+
         let val = self
             .sidecar
             .call_rpc(
@@ -724,7 +745,7 @@ impl FlowActiveBrowserSession {
                     "expectedLiveCost": expected_live_cost,
                     "maxCredits": max_credits,
                     "expectedFingerprint": expected_fingerprint,
-                    "expectedConfig": expected_config,
+                    "expectedConfig": cfg_val,
                 }),
                 Duration::from_secs(90),
             )

@@ -93,6 +93,11 @@ impl MockFlowServer {
                                     }
 
                                     let (status_line, content_type, body) = Self::handle_request(&req_str, sc);
+                                    let ct_header = if content_type == "text/html" {
+                                        "text/html; charset=utf-8"
+                                    } else {
+                                        content_type
+                                    };
                                     let extra_headers = if req_str.contains("GET /download") {
                                         "Content-Disposition: attachment; filename=\"video.mp4\"\r\n"
                                     } else {
@@ -101,7 +106,7 @@ impl MockFlowServer {
                                     let resp = format!(
                                         "{}\r\nContent-Type: {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n",
                                         status_line,
-                                        content_type,
+                                        ct_header,
                                         extra_headers,
                                         body.len()
                                     );

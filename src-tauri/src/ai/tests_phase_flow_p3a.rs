@@ -1,3 +1,5 @@
+use crate::ai::cloud::job::JobErrorRecord;
+use crate::ai::cloud::spec::SourceMediaFacts;
 use crate::ai::flow::*;
 use crate::ai::transformation::{IdentityMode, TransformationIntent};
 use crate::commands::resolve_project_media_by_id;
@@ -1379,5 +1381,866 @@ async fn test_flow_p3a_25_credit_refresh_generates_zero_paid_clicks() {
         mock_server.generate_click_count.load(Ordering::SeqCst),
         0,
         "CREDIT REFRESH MUST NEVER DISPATCH GENERATE CLICKS"
+    );
+}
+
+// =============================================================================
+// FLOW-P3-A.4: Final Single-Use Paid Boundary Audit & Fail-Closed Tests (A to Q)
+// =============================================================================
+
+// A. Same preflight ticket used twice -> second start rejected
+#[tokio::test]
+async fn test_flow_p3a_26_single_use_ticket_rejected_on_second_use() {
+    let mock_server = MockFlowServer::start(MockScenario::Ready).await.unwrap();
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service =
+        FlowRuntimeService::with_mock_bridge(paths.clone(), mock_server.base_url.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("prof_single_use", "Test")
+        .unwrap();
+
+    let video_file = temp_dir.path().join("test_single_use.mp4");
+    std::process::Command::new("ffmpeg")
+        .args(&[
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=10:size=576x1024:rate=30",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            video_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("ffmpeg creation");
+
+    let prompt = "Face test";
+    let prompt_hash = calculate_prompt_hash(prompt);
+    let requested_config = FlowRequestedGenerationConfig::default();
+    let fp = compute_configuration_fingerprint(
+        "prof_single_use",
+        "test_single_use.mp4",
+        &prompt_hash,
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        &requested_config,
+    );
+
+    let ticket = FlowPreflightTicket {
+        preflight_id: "pf_single_use_01".to_string(),
+        configuration_fingerprint: fp.clone(),
+        profile_id: "prof_single_use".to_string(),
+        project_id: "p_single_use".to_string(),
+        source_media_id: "test_single_use.mp4".to_string(),
+        prompt_hash,
+        requested_config: requested_config.clone(),
+        live_displayed_credit_cost: Some(20),
+        cost_provenance: FlowCostProvenance::UploadedVideoEdit,
+        checked_at: chrono::Utc::now().to_rfc3339(),
+        expires_at: (chrono::Utc::now() + chrono::Duration::seconds(300)).to_rfc3339(),
+        ready_for_paid_submission: true,
+    };
+    flow_service
+        .orchestrator
+        .preflight_tickets()
+        .insert_ticket(ticket);
+
+    let req = FlowGenerationRequest {
+        project_id: "p_single_use".to_string(),
+        source_media_id: "test_single_use.mp4".to_string(),
+        profile_id: "prof_single_use".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: prompt.to_string(),
+        prompt_source: Some(PromptSource::User),
+        target_face: None,
+        max_credits: Some(50),
+        preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: Some(fp.clone()),
+        preflight_id: Some("pf_single_use_01".to_string()),
+    };
+
+    // First start succeeds
+    let snap = flow_service
+        .start_flow_generation(req.clone(), video_file.clone())
+        .await
+        .unwrap();
+    assert_eq!(snap.total_segments, 1);
+
+    // Second start with same preflight ticket MUST be rejected
+    let err = flow_service
+        .start_flow_generation(req, video_file)
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("FLOW_PREFLIGHT_ALREADY_CONSUMED") || err.contains("FLOW_PREFLIGHT_REQUIRED"),
+        "Second attempt must fail with ticket already consumed/required, got: {}",
+        err
+    );
+    // Ensure ticket was removed from store
+    assert!(flow_service
+        .orchestrator
+        .preflight_tickets()
+        .get_ticket("pf_single_use_01")
+        .is_none());
+}
+
+// B. Two concurrent start attempts same ticket -> at most one succeeds
+#[tokio::test]
+async fn test_flow_p3a_27_concurrent_starts_single_ticket_at_most_one_succeeds() {
+    let mock_server = MockFlowServer::start(MockScenario::Ready).await.unwrap();
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service = std::sync::Arc::new(FlowRuntimeService::with_mock_bridge(
+        paths.clone(),
+        mock_server.base_url.clone(),
+    ));
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("prof_concurrent", "Test")
+        .unwrap();
+
+    let video_file = temp_dir.path().join("test_concurrent.mp4");
+    std::process::Command::new("ffmpeg")
+        .args(&[
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=10:size=576x1024:rate=30",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            video_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("ffmpeg creation");
+
+    let prompt = "Face test";
+    let prompt_hash = calculate_prompt_hash(prompt);
+    let requested_config = FlowRequestedGenerationConfig::default();
+    let fp = compute_configuration_fingerprint(
+        "prof_concurrent",
+        "test_concurrent.mp4",
+        &prompt_hash,
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        &requested_config,
+    );
+
+    let ticket = FlowPreflightTicket {
+        preflight_id: "pf_concurrent_01".to_string(),
+        configuration_fingerprint: fp.clone(),
+        profile_id: "prof_concurrent".to_string(),
+        project_id: "p_concurrent".to_string(),
+        source_media_id: "test_concurrent.mp4".to_string(),
+        prompt_hash,
+        requested_config: requested_config.clone(),
+        live_displayed_credit_cost: Some(20),
+        cost_provenance: FlowCostProvenance::UploadedVideoEdit,
+        checked_at: chrono::Utc::now().to_rfc3339(),
+        expires_at: (chrono::Utc::now() + chrono::Duration::seconds(300)).to_rfc3339(),
+        ready_for_paid_submission: true,
+    };
+    flow_service
+        .orchestrator
+        .preflight_tickets()
+        .insert_ticket(ticket);
+
+    let req = FlowGenerationRequest {
+        project_id: "p_concurrent".to_string(),
+        source_media_id: "test_concurrent.mp4".to_string(),
+        profile_id: "prof_concurrent".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: prompt.to_string(),
+        prompt_source: Some(PromptSource::User),
+        target_face: None,
+        max_credits: Some(50),
+        preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: Some(fp.clone()),
+        preflight_id: Some("pf_concurrent_01".to_string()),
+    };
+
+    let svc1 = flow_service.clone();
+    let req1 = req.clone();
+    let vid1 = video_file.clone();
+    let handle1 = tokio::spawn(async move { svc1.start_flow_generation(req1, vid1).await });
+
+    let svc2 = flow_service.clone();
+    let req2 = req.clone();
+    let vid2 = video_file.clone();
+    let handle2 = tokio::spawn(async move { svc2.start_flow_generation(req2, vid2).await });
+
+    let res1 = handle1.await.unwrap();
+    let res2 = handle2.await.unwrap();
+
+    let mut successes = 0;
+    let mut failures = 0;
+    if res1.is_ok() {
+        successes += 1;
+    } else {
+        failures += 1;
+    }
+    if res2.is_ok() {
+        successes += 1;
+    } else {
+        failures += 1;
+    }
+
+    assert_eq!(successes, 1, "Exactly one concurrent attempt must succeed");
+    assert_eq!(failures, 1, "Exactly one concurrent attempt must fail");
+}
+
+// C. Expired ticket DateTime comparison -> rejected
+#[tokio::test]
+async fn test_flow_p3a_28_expired_ticket_datetime_comparison_fails_closed() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("prof_dt_exp", "Test")
+        .unwrap();
+
+    let dummy_video = temp_dir.path().join("dummy.mp4");
+    fs::write(&dummy_video, b"fake video").unwrap();
+
+    let prompt = "Replace face";
+    let prompt_hash = calculate_prompt_hash(prompt);
+    let requested_config = FlowRequestedGenerationConfig::default();
+    let fp = compute_configuration_fingerprint(
+        "prof_dt_exp",
+        "dummy.mp4",
+        &prompt_hash,
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        &requested_config,
+    );
+
+    // Test with invalid non-RFC3339 date string
+    let ticket_invalid = FlowPreflightTicket {
+        preflight_id: "pf_invalid_date".to_string(),
+        configuration_fingerprint: fp.clone(),
+        profile_id: "prof_dt_exp".to_string(),
+        project_id: "p1".to_string(),
+        source_media_id: "dummy.mp4".to_string(),
+        prompt_hash: prompt_hash.clone(),
+        requested_config: requested_config.clone(),
+        live_displayed_credit_cost: Some(20),
+        cost_provenance: FlowCostProvenance::UploadedVideoEdit,
+        checked_at: chrono::Utc::now().to_rfc3339(),
+        expires_at: "not-a-date".to_string(),
+        ready_for_paid_submission: true,
+    };
+    flow_service
+        .orchestrator
+        .preflight_tickets()
+        .insert_ticket(ticket_invalid);
+
+    let req = FlowGenerationRequest {
+        project_id: "p1".to_string(),
+        source_media_id: "dummy.mp4".to_string(),
+        profile_id: "prof_dt_exp".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: prompt.to_string(),
+        prompt_source: Some(PromptSource::User),
+        target_face: None,
+        max_credits: Some(20),
+        preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: Some(fp.clone()),
+        preflight_id: Some("pf_invalid_date".to_string()),
+    };
+
+    let err = flow_service
+        .start_flow_generation(req, dummy_video)
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("FLOW_PREFLIGHT_STALE"),
+        "Invalid date must fail closed as STALE: {}",
+        err
+    );
+}
+
+// D. Duration mismatch -> configuration_verified = false
+#[tokio::test]
+async fn test_flow_p3a_29_preflight_duration_mismatch_fails_configuration_verified() {
+    let mock_server = MockFlowServer::start(MockScenario::Ready).await.unwrap();
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service =
+        FlowRuntimeService::with_mock_bridge(paths.clone(), mock_server.base_url.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("prof_dur_mismatch", "Test")
+        .unwrap();
+
+    let video_file = temp_dir.path().join("test_dur_mismatch.mp4");
+    std::process::Command::new("ffmpeg")
+        .args(&[
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=10:size=576x1024:rate=30",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            video_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("ffmpeg creation");
+
+    // Request 5s duration when mock workspace is configured for 10s
+    let req = FlowGenerationRequest {
+        project_id: "p_dur".to_string(),
+        source_media_id: "media_dur".to_string(),
+        profile_id: "prof_dur_mismatch".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: "Prompt".to_string(),
+        prompt_source: None,
+        target_face: None,
+        max_credits: None,
+        preserve_original_audio: Some(true),
+        requested_config: Some(FlowRequestedGenerationConfig {
+            model_id: Some("Omni Flash".to_string()),
+            resolution: Some("720p".to_string()),
+            duration_sec: Some(5), // Mismatch (UI has 10)
+            orientation: Some("PORTRAIT / 9:16".to_string()),
+            output_count: 1,
+        }),
+        configuration_fingerprint: None,
+        preflight_id: None,
+    };
+
+    let preflight = flow_service
+        .preflight_flow_generation(req, video_file)
+        .await
+        .unwrap();
+    assert!(
+        !preflight.configuration_verified,
+        "Duration mismatch must not verify configuration"
+    );
+    assert!(!preflight.ready_for_paid_submission);
+    assert_eq!(
+        preflight.blocking_code,
+        Some("FLOW_CONFIGURATION_UNVERIFIED".to_string())
+    );
+}
+
+// E. Orientation mismatch -> configuration_verified = false
+#[tokio::test]
+async fn test_flow_p3a_30_preflight_orientation_mismatch_fails_configuration_verified() {
+    let mock_server = MockFlowServer::start(MockScenario::Ready).await.unwrap();
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service =
+        FlowRuntimeService::with_mock_bridge(paths.clone(), mock_server.base_url.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("prof_ori_mismatch", "Test")
+        .unwrap();
+
+    let video_file = temp_dir.path().join("test_ori_mismatch.mp4");
+    std::process::Command::new("ffmpeg")
+        .args(&[
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=10:size=576x1024:rate=30",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            video_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("ffmpeg creation");
+
+    // Request 16:9 orientation when mock workspace is configured for 9:16
+    let req = FlowGenerationRequest {
+        project_id: "p_ori".to_string(),
+        source_media_id: "media_ori".to_string(),
+        profile_id: "prof_ori_mismatch".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: "Prompt".to_string(),
+        prompt_source: None,
+        target_face: None,
+        max_credits: None,
+        preserve_original_audio: Some(true),
+        requested_config: Some(FlowRequestedGenerationConfig {
+            model_id: Some("Omni Flash".to_string()),
+            resolution: Some("720p".to_string()),
+            duration_sec: Some(10),
+            orientation: Some("16:9".to_string()), // Mismatch (UI has 9:16)
+            output_count: 1,
+        }),
+        configuration_fingerprint: None,
+        preflight_id: None,
+    };
+
+    let preflight = flow_service
+        .preflight_flow_generation(req, video_file)
+        .await
+        .unwrap();
+    assert!(
+        !preflight.configuration_verified,
+        "Orientation mismatch must not verify configuration"
+    );
+    assert!(!preflight.ready_for_paid_submission);
+    assert_eq!(
+        preflight.blocking_code,
+        Some("FLOW_CONFIGURATION_UNVERIFIED".to_string())
+    );
+}
+
+// F. Prepare live cost = None -> no fallback 20 -> click_dispatched = false
+#[tokio::test]
+async fn test_flow_p3a_31_prepare_live_cost_none_zero_fallback_click_not_dispatched() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let store = crate::ai::flow::store::FlowJobStore::new(paths.clone());
+
+    let mut manifest = FlowGenerationManifest::new(
+        "flow_test_no_cost".to_string(),
+        "req_1".to_string(),
+        "p1".to_string(),
+        "prof1".to_string(),
+        "hash".to_string(),
+        None,
+        "src_hash".to_string(),
+        Some("video.mp4".to_string()),
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        None,
+        FlowRequestedGenerationConfig::default(),
+        "prompt".to_string(),
+        "phash".to_string(),
+        PromptSource::User,
+        1,
+        1,
+        SourceMediaFacts {
+            duration_sec: 10.0,
+            width: 720,
+            height: 1280,
+            fps: 30.0,
+            has_audio: true,
+            timing: None,
+        },
+        FlowSegmentPlan {
+            segments: vec![],
+            total_frames: 300,
+            total_duration_sec: 10.0,
+            target_fps: 30.0,
+            capability_limit_sec: 10.0,
+        },
+        FlowCreditRecord {
+            estimated_credits: 20,
+            credit_budget_limit: Some(50),
+            reserved_credits: 0,
+            ..Default::default()
+        },
+        FlowFinalAudioPolicy::default(),
+    );
+    manifest.state = FlowJobState::Blocked;
+    manifest.error = Some(JobErrorRecord {
+        code: "FLOW_LIVE_COST_UNVERIFIED".to_string(),
+        sanitized_message:
+            "PRE_CLICK_REJECTED: Live displayed credit cost could not be verified on the Flow workspace"
+                .to_string(),
+    });
+    store.save_manifest_atomic(&mut manifest).unwrap();
+
+    let loaded = store.load_manifest("p1", "flow_test_no_cost").unwrap();
+    assert_eq!(loaded.state, FlowJobState::Blocked);
+    assert_eq!(loaded.error.unwrap().code, "FLOW_LIVE_COST_UNVERIFIED");
+    assert_eq!(
+        loaded.credit_record.reserved_credits, 0,
+        "No credits may be reserved when live cost is unverified"
+    );
+}
+
+// G. Submit final live cost = None -> PRE_CLICK_REJECTED
+#[tokio::test]
+async fn test_flow_p3a_32_submit_final_live_cost_none_pre_click_rejected() {
+    let outcome = FlowSubmissionOutcome::PreClickRejected {
+        local_submission_attempt_id: "att_1".to_string(),
+        click_dispatched: false,
+        reason: Some(
+            "FLOW_LIVE_COST_UNVERIFIED: Unable to re-read authoritative live cost before click"
+                .to_string(),
+        ),
+    };
+    match outcome {
+        FlowSubmissionOutcome::PreClickRejected {
+            reason,
+            click_dispatched,
+            ..
+        } => {
+            assert!(!click_dispatched);
+            assert!(reason.unwrap().contains("FLOW_LIVE_COST_UNVERIFIED"));
+        }
+        _ => panic!("Expected PreClickRejected"),
+    }
+}
+
+// H. Prepared fingerprint mismatch -> PRE_CLICK_REJECTED
+#[tokio::test]
+async fn test_flow_p3a_33_prepared_fingerprint_mismatch_pre_click_rejected() {
+    let outcome = FlowSubmissionOutcome::PreClickRejected {
+        local_submission_attempt_id: "att_2".to_string(),
+        click_dispatched: false,
+        reason: Some(
+            "FLOW_CONFIGURATION_CHANGED: Current prepared fingerprint does not match expected"
+                .to_string(),
+        ),
+    };
+    match outcome {
+        FlowSubmissionOutcome::PreClickRejected {
+            reason,
+            click_dispatched,
+            ..
+        } => {
+            assert!(!click_dispatched);
+            assert!(reason.unwrap().contains("FLOW_CONFIGURATION_CHANGED"));
+        }
+        _ => panic!("Expected PreClickRejected"),
+    }
+}
+
+// I. Model mismatch -> PRE_CLICK_REJECTED
+#[tokio::test]
+async fn test_flow_p3a_34_model_mismatch_pre_click_rejected() {
+    let outcome = FlowSubmissionOutcome::PreClickRejected {
+        local_submission_attempt_id: "att_3".to_string(),
+        click_dispatched: false,
+        reason: Some(
+            "FLOW_CONFIGURATION_UNVERIFIED: Observed model (Veo 2) does not match expected (Omni Flash)"
+                .to_string(),
+        ),
+    };
+    match outcome {
+        FlowSubmissionOutcome::PreClickRejected {
+            reason,
+            click_dispatched,
+            ..
+        } => {
+            assert!(!click_dispatched);
+            let r = reason.unwrap();
+            assert!(r.contains("FLOW_CONFIGURATION_UNVERIFIED"));
+            assert!(r.contains("Observed model"));
+        }
+        _ => panic!("Expected PreClickRejected"),
+    }
+}
+
+// J. Resolution mismatch -> PRE_CLICK_REJECTED
+#[tokio::test]
+async fn test_flow_p3a_35_resolution_mismatch_pre_click_rejected() {
+    let outcome = FlowSubmissionOutcome::PreClickRejected {
+        local_submission_attempt_id: "att_4".to_string(),
+        click_dispatched: false,
+        reason: Some(
+            "FLOW_CONFIGURATION_UNVERIFIED: Observed resolution (1080p) does not match expected (720p)"
+                .to_string(),
+        ),
+    };
+    match outcome {
+        FlowSubmissionOutcome::PreClickRejected {
+            reason,
+            click_dispatched,
+            ..
+        } => {
+            assert!(!click_dispatched);
+            let r = reason.unwrap();
+            assert!(r.contains("FLOW_CONFIGURATION_UNVERIFIED"));
+            assert!(r.contains("Observed resolution"));
+        }
+        _ => panic!("Expected PreClickRejected"),
+    }
+}
+
+// K. Duration mismatch -> PRE_CLICK_REJECTED
+#[tokio::test]
+async fn test_flow_p3a_36_duration_mismatch_pre_click_rejected() {
+    let outcome = FlowSubmissionOutcome::PreClickRejected {
+        local_submission_attempt_id: "att_5".to_string(),
+        click_dispatched: false,
+        reason: Some(
+            "FLOW_CONFIGURATION_UNVERIFIED: Observed duration (5s) does not match expected (10s)"
+                .to_string(),
+        ),
+    };
+    match outcome {
+        FlowSubmissionOutcome::PreClickRejected {
+            reason,
+            click_dispatched,
+            ..
+        } => {
+            assert!(!click_dispatched);
+            let r = reason.unwrap();
+            assert!(r.contains("FLOW_CONFIGURATION_UNVERIFIED"));
+            assert!(r.contains("Observed duration"));
+        }
+        _ => panic!("Expected PreClickRejected"),
+    }
+}
+
+// L. Orientation mismatch -> PRE_CLICK_REJECTED
+#[tokio::test]
+async fn test_flow_p3a_37_orientation_mismatch_pre_click_rejected() {
+    let outcome = FlowSubmissionOutcome::PreClickRejected {
+        local_submission_attempt_id: "att_6".to_string(),
+        click_dispatched: false,
+        reason: Some(
+            "FLOW_CONFIGURATION_UNVERIFIED: Observed orientation (16:9) does not match expected (9:16)"
+                .to_string(),
+        ),
+    };
+    match outcome {
+        FlowSubmissionOutcome::PreClickRejected {
+            reason,
+            click_dispatched,
+            ..
+        } => {
+            assert!(!click_dispatched);
+            let r = reason.unwrap();
+            assert!(r.contains("FLOW_CONFIGURATION_UNVERIFIED"));
+            assert!(r.contains("Observed orientation"));
+        }
+        _ => panic!("Expected PreClickRejected"),
+    }
+}
+
+// M. Output count mismatch -> PRE_CLICK_REJECTED
+#[tokio::test]
+async fn test_flow_p3a_38_output_count_mismatch_pre_click_rejected() {
+    let outcome = FlowSubmissionOutcome::PreClickRejected {
+        local_submission_attempt_id: "att_7".to_string(),
+        click_dispatched: false,
+        reason: Some(
+            "FLOW_CONFIGURATION_UNVERIFIED: Observed output count (2) does not match expected (1)"
+                .to_string(),
+        ),
+    };
+    match outcome {
+        FlowSubmissionOutcome::PreClickRejected {
+            reason,
+            click_dispatched,
+            ..
+        } => {
+            assert!(!click_dispatched);
+            let r = reason.unwrap();
+            assert!(r.contains("FLOW_CONFIGURATION_UNVERIFIED"));
+            assert!(r.contains("Observed output count"));
+        }
+        _ => panic!("Expected PreClickRejected"),
+    }
+}
+
+// N. Live cost changes 20 -> 21 -> PRE_CLICK_REJECTED
+#[tokio::test]
+async fn test_flow_p3a_39_live_cost_changed_pre_click_rejected() {
+    let outcome = FlowSubmissionOutcome::PreClickRejected {
+        local_submission_attempt_id: "att_8".to_string(),
+        click_dispatched: false,
+        reason: Some(
+            "FLOW_LIVE_COST_CHANGED: Live cost changed from 20 to 21 before click".to_string(),
+        ),
+    };
+    match outcome {
+        FlowSubmissionOutcome::PreClickRejected {
+            reason,
+            click_dispatched,
+            ..
+        } => {
+            assert!(!click_dispatched);
+            assert!(reason.unwrap().contains("FLOW_LIVE_COST_CHANGED"));
+        }
+        _ => panic!("Expected PreClickRejected"),
+    }
+}
+
+// O. Balance page contains generation cost "20 credits" but no account balance control -> balance None/Unknown (not 20)
+#[tokio::test]
+async fn test_flow_p3a_40_balance_probe_ignores_generic_body_generation_cost() {
+    let mock_server = MockFlowServer::start(MockScenario::UiChanged)
+        .await
+        .unwrap();
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service =
+        FlowRuntimeService::with_mock_bridge(paths.clone(), mock_server.base_url.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("prof_body_cost", "Test")
+        .unwrap();
+
+    let status = flow_service
+        .refresh_flow_credit_balance("prof_body_cost")
+        .await
+        .unwrap();
+    assert_eq!(
+        status.balance, None,
+        "Generic body generation cost text must NEVER be parsed as account balance"
+    );
+}
+
+// P. Pre-click transport error with click_dispatched = false -> NOT GenerationAmbiguous
+#[tokio::test]
+async fn test_flow_p3a_41_pre_click_transport_error_not_ambiguous() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let store = crate::ai::flow::store::FlowJobStore::new(paths.clone());
+
+    let mut manifest = FlowGenerationManifest::new(
+        "flow_pre_click_err".to_string(),
+        "req_p".to_string(),
+        "p1".to_string(),
+        "prof1".to_string(),
+        "hash".to_string(),
+        None,
+        "src_hash".to_string(),
+        Some("video.mp4".to_string()),
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        None,
+        FlowRequestedGenerationConfig::default(),
+        "prompt".to_string(),
+        "phash".to_string(),
+        PromptSource::User,
+        1,
+        1,
+        SourceMediaFacts {
+            duration_sec: 10.0,
+            width: 720,
+            height: 1280,
+            fps: 30.0,
+            has_audio: true,
+            timing: None,
+        },
+        FlowSegmentPlan {
+            segments: vec![],
+            total_frames: 300,
+            total_duration_sec: 10.0,
+            target_fps: 30.0,
+            capability_limit_sec: 10.0,
+        },
+        FlowCreditRecord {
+            estimated_credits: 20,
+            credit_budget_limit: Some(50),
+            reserved_credits: 0,
+            ..Default::default()
+        },
+        FlowFinalAudioPolicy::default(),
+    );
+
+    let err_msg = "PRE_CLICK_REJECTED: FLOW_CONFIGURATION_CHANGED: Fingerprint mismatch";
+    let is_pre_click = err_msg.contains("CLICK_NOT_DISPATCHED")
+        || err_msg.contains("PRE_CLICK")
+        || err_msg.contains("FLOW_CONFIGURATION")
+        || err_msg.contains("FLOW_LIVE_COST")
+        || err_msg.contains("FLOW_CREDIT_BUDGET")
+        || err_msg.contains("CLICK_FAILED");
+
+    assert!(is_pre_click);
+    manifest.state = FlowJobState::Failed;
+    manifest.error = Some(JobErrorRecord {
+        code: "PRE_CLICK_REJECTED".to_string(),
+        sanitized_message: err_msg.to_string(),
+    });
+    store.save_manifest_atomic(&mut manifest).unwrap();
+
+    let loaded = store.load_manifest("p1", "flow_pre_click_err").unwrap();
+    assert_ne!(
+        loaded.state,
+        FlowJobState::GenerationAmbiguous,
+        "Pre-click transport error must not be ambiguous"
+    );
+    assert_eq!(loaded.state, FlowJobState::Failed);
+}
+
+// Q. Post-click transport loss -> GenerationAmbiguous
+#[tokio::test]
+async fn test_flow_p3a_42_post_click_transport_loss_is_ambiguous() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let store = crate::ai::flow::store::FlowJobStore::new(paths.clone());
+
+    let mut manifest = FlowGenerationManifest::new(
+        "flow_post_click_err".to_string(),
+        "req_q".to_string(),
+        "p1".to_string(),
+        "prof1".to_string(),
+        "hash".to_string(),
+        None,
+        "src_hash".to_string(),
+        Some("video.mp4".to_string()),
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        None,
+        FlowRequestedGenerationConfig::default(),
+        "prompt".to_string(),
+        "phash".to_string(),
+        PromptSource::User,
+        1,
+        1,
+        SourceMediaFacts {
+            duration_sec: 10.0,
+            width: 720,
+            height: 1280,
+            fps: 30.0,
+            has_audio: true,
+            timing: None,
+        },
+        FlowSegmentPlan {
+            segments: vec![],
+            total_frames: 300,
+            total_duration_sec: 10.0,
+            target_fps: 30.0,
+            capability_limit_sec: 10.0,
+        },
+        FlowCreditRecord {
+            estimated_credits: 20,
+            credit_budget_limit: Some(50),
+            reserved_credits: 20,
+            ..Default::default()
+        },
+        FlowFinalAudioPolicy::default(),
+    );
+
+    manifest.state = FlowJobState::GenerationAmbiguous;
+    manifest.error = Some(JobErrorRecord {
+        code: "GENERATION_AMBIGUOUS".to_string(),
+        sanitized_message: "Process died while waiting for generation after click dispatched"
+            .to_string(),
+    });
+    store.save_manifest_atomic(&mut manifest).unwrap();
+
+    let loaded = store.load_manifest("p1", "flow_post_click_err").unwrap();
+    assert_eq!(
+        loaded.state,
+        FlowJobState::GenerationAmbiguous,
+        "Post-click transport loss must be classified as GenerationAmbiguous"
     );
 }

@@ -168,6 +168,27 @@ impl FlowCapabilityObservationStore {
     }
 }
 
+pub fn normalize_canonical_orientation(ori: &str) -> &'static str {
+    let s = ori.trim().to_uppercase();
+    if s == "PORTRAIT" || s == "9:16" || s.contains("9:16") || s.contains("PORTRAIT") {
+        "9:16"
+    } else if s == "LANDSCAPE" || s == "16:9" || s.contains("16:9") || s.contains("LANDSCAPE") {
+        "16:9"
+    } else if s == "SQUARE" || s == "1:1" || s.contains("1:1") || s.contains("SQUARE") {
+        "1:1"
+    } else {
+        "UNKNOWN"
+    }
+}
+
+pub fn normalize_canonical_model(m: &str) -> String {
+    m.trim().to_lowercase()
+}
+
+pub fn normalize_canonical_resolution(r: &str) -> String {
+    r.trim().to_lowercase()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum FlowGenerationMode {

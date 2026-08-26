@@ -1,6 +1,7 @@
 import { BrowserContext, Page, chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 
 export interface LaunchParams {
   profilePath: string;
@@ -79,16 +80,49 @@ function cleanAndParseCreditNumber(rawStr: string): number | null {
 
 export function parseLocalizedCreditNumber(text: string): number | null {
   if (!text) return null;
-  // Match localized patterns requiring either suffix (credits, tín dụng) or prefix (balance, credits, tín dụng, còn)
-  const suffixMatch = text.match(/([0-9][0-9.,\s]*[0-9]|[0-9]+)\s*(?:credits?|tín dụng)\b/i);
+  // Match localized patterns requiring either suffix (credits, tín dụng, tÃ­n dá»¥ng, tin dung) or prefix (balance, credits, tín dụng, tÃ­n dá»¥ng, còn)
+  const suffixMatch = text.match(/([0-9][0-9.,\s]*[0-9]|[0-9]+)\s*(?:credits?|tín\s*dụng|tÃ­n\s*dá»¥ng|tin\s*dung)/i);
   if (suffixMatch) {
     return cleanAndParseCreditNumber(suffixMatch[1]);
   }
-  const prefixMatch = text.match(/(?:còn|balance|credits?|tín dụng)\s*[:]?\s*([0-9][0-9.,\s]*[0-9]|[0-9]+)/i);
+  const prefixMatch = text.match(/(?:còn|balance|credits?|tín\s*dụng|tÃ­n\s*dá»¥ng|tin\s*dung)\s*[:]?\s*([0-9][0-9.,\s]*[0-9]|[0-9]+)/i);
   if (prefixMatch) {
     return cleanAndParseCreditNumber(prefixMatch[1]);
   }
   return null;
+}
+
+export function normalizeCanonicalOrientation(ori?: string): string {
+  const s = (ori || '').trim().toUpperCase();
+  if (s === 'PORTRAIT' || s === '9:16' || s.includes('9:16') || s.includes('PORTRAIT')) return '9:16';
+  if (s === 'LANDSCAPE' || s === '16:9' || s.includes('16:9') || s.includes('LANDSCAPE')) return '16:9';
+  if (s === 'SQUARE' || s === '1:1' || s.includes('1:1') || s.includes('SQUARE')) return '1:1';
+  return 'UNKNOWN';
+}
+
+export function normalizeCanonicalModel(model?: string): string {
+  return (model || 'Omni Flash').trim().toLowerCase();
+}
+
+export function normalizeCanonicalResolution(res?: string): string {
+  return (res || '720p').trim().toLowerCase();
+}
+
+export function computePreparedFingerprint(data: {
+  operationContext: string;
+  sourceIdentity: string;
+  promptHash: string;
+  model: string;
+  resolution: string;
+  durationSec: number;
+  orientation: string;
+  outputCount: number;
+}): string {
+  const normModel = normalizeCanonicalModel(data.model);
+  const normRes = normalizeCanonicalResolution(data.resolution);
+  const normOri = normalizeCanonicalOrientation(data.orientation);
+  const canonicalStr = `${data.operationContext}:${data.sourceIdentity}:${data.promptHash}:${normModel}:${normRes}:${data.durationSec}:${normOri}:${data.outputCount}`;
+  return crypto.createHash('sha256').update(canonicalStr).digest('hex');
 }
 
 /**
@@ -632,8 +666,8 @@ export async function ensureUploadedVideoEditActive(
   let creditReadback2 = await getCreditText();
 
   // Strict tooltip-only cost extraction for production video edit
-  const costMatch = (creditReadback2 || creditReadback1).match(/(\d+)/);
-  const costNum = costMatch ? parseInt(costMatch[1], 10) : undefined;
+  const parsedCost = parseLocalizedCreditNumber(creditReadback2) ?? parseLocalizedCreditNumber(creditReadback1);
+  const costNum = parsedCost !== null ? parsedCost : undefined;
   const creditStable = creditReadback1 === creditReadback2 || (costNum !== undefined && costNum > 0);
 
   let costClassification: VideoEditModeVerification['costClassification'] = 'UNKNOWN_CURRENT_PRICING';
@@ -720,6 +754,113 @@ export async function locateSettingsControl(page: Page) {
       ) {
         return btn;
       }
+    }
+  }
+  return null;
+}
+
+export async function readActiveEditState(page: Page): Promise<{
+  model: string;
+  resolution: string;
+  durationSec: number;
+  orientation: string;
+  outputCount: number;
+  sourceTitle: string;
+}> {
+  let model = 'Omni Flash';
+  let resolution = '720p';
+  let durationSec = 10;
+  let orientation = 'PORTRAIT / 9:16';
+  let outputCount = 1;
+
+  const settingsBtn = await locateSettingsControl(page);
+  const summaryText = settingsBtn ? (await settingsBtn.innerText().catch(() => '')).trim() : '';
+
+  if (summaryText) {
+    if (summaryText.toLowerCase().includes('1080p')) resolution = '1080p';
+    else if (summaryText.toLowerCase().includes('720p')) resolution = '720p';
+
+    const durMatch = summaryText.match(/(\d+)\s*s\b/i);
+    if (durMatch) durationSec = parseInt(durMatch[1], 10);
+
+    if (summaryText.includes('9:16') || summaryText.includes('crop_9_16')) {
+      orientation = 'PORTRAIT / 9:16';
+    } else if (summaryText.includes('16:9') || summaryText.includes('crop_16_9')) {
+      orientation = 'LANDSCAPE / 16:9';
+    }
+
+    const cntMatch = summaryText.match(/x(\d+)/i);
+    if (cntMatch) outputCount = parseInt(cntMatch[1], 10);
+  }
+
+  const activeOri = page
+    .locator('#settings-popover [data-testid^="ori-"][data-state="active"], [role="menu"] [data-testid^="ori-"][data-state="active"]')
+    .first();
+  if ((await activeOri.count().catch(() => 0)) > 0) {
+    const oriText = (await activeOri.innerText().catch(() => '')).trim();
+    if (oriText.includes('9:16') || oriText.includes('crop_9_16')) orientation = 'PORTRAIT / 9:16';
+    else if (oriText.includes('16:9') || oriText.includes('crop_16_9')) orientation = 'LANDSCAPE / 16:9';
+  }
+
+  const activeLen = page
+    .locator('#settings-popover [data-testid^="length-"][data-state="active"], [role="menu"] [data-testid^="length-"][data-state="active"]')
+    .first();
+  if ((await activeLen.count().catch(() => 0)) > 0) {
+    const lenText = (await activeLen.innerText().catch(() => '')).trim();
+    const m = lenText.match(/(\d+)/);
+    if (m) durationSec = parseInt(m[1], 10);
+  }
+
+  const activeCnt = page
+    .locator('#settings-popover [data-testid^="count-"][data-state="active"], [role="menu"] [data-testid^="count-"][data-state="active"]')
+    .first();
+  if ((await activeCnt.count().catch(() => 0)) > 0) {
+    const cntText = (await activeCnt.innerText().catch(() => '')).trim();
+    const m = cntText.match(/x?(\d+)/i);
+    if (m) outputCount = parseInt(m[1], 10);
+  }
+
+  const activeModel = page
+    .locator('#settings-popover [data-testid="model-select"], [role="menu"] [data-testid="model-select"]')
+    .first();
+  if ((await activeModel.count().catch(() => 0)) > 0) {
+    const mText = (await activeModel.innerText().catch(() => '')).trim();
+    if (mText) model = mText;
+  }
+
+  const sourceChip = page.locator('#source-video-chip, [data-testid="source-chip"]').first();
+  const sourceTitle = ((await sourceChip.innerText().catch(() => '')) || '').trim();
+
+  return {
+    model,
+    resolution,
+    durationSec,
+    orientation,
+    outputCount,
+    sourceTitle,
+  };
+}
+
+export async function readLiveCostTooltip(page: Page, generateBtn: any): Promise<number | null> {
+  await generateBtn.hover().catch(() => {});
+  await page.waitForTimeout(300);
+
+  const tooltips = page.locator(
+    '[role="tooltip"], div[data-radix-popper-content-wrapper], div[class*="tooltip"], #credit-info, [id*="credit"]'
+  );
+  const count = await tooltips.count().catch(() => 0);
+  console.error(`[readLiveCostTooltip] Found ${count} tooltip elements`);
+  for (let i = 0; i < count; i++) {
+    const text = ((await tooltips.nth(i).innerText().catch(() => '')) || '').trim();
+    const textContent = ((await tooltips.nth(i).textContent().catch(() => '')) || '').trim();
+    console.error(`[readLiveCostTooltip] #${i}: text="${text}", textContent="${textContent}"`);
+    const parsed = parseLocalizedCreditNumber(text);
+    if (parsed !== null) {
+      return parsed;
+    }
+    const parsedContent = parseLocalizedCreditNumber(textContent);
+    if (parsedContent !== null) {
+      return parsedContent;
     }
   }
   return null;
@@ -1590,19 +1731,19 @@ export class FlowUiAdapterV1 {
     // 1. Check direct semantic credit balance elements
     const creditLocators = [
       'header [data-testid*="credit"]',
+      'header [data-testid*="balance"]',
+      'header [data-testid*="user-credits"]',
+      '[role="banner"] [data-testid*="credit"]',
+      '[role="banner"] [data-testid*="balance"]',
       'header [aria-label*="credit" i]',
       'header [aria-label*="tín dụng" i]',
       'header [title*="credit" i]',
       'header [title*="tín dụng" i]',
-      '[role="banner"] [data-testid*="credit"]',
       'header button:has-text("credits")',
       'header button:has-text("tín dụng")',
-      'header div:has-text("credits")',
-      'header div:has-text("tín dụng")',
-      'header span:has-text("credits")',
-      'header span:has-text("tín dụng")',
-      'header',
-      '[role="banner"]',
+      'header div[data-testid*="credit"]',
+      'header span[data-testid*="credit"]',
+      'header span[data-testid*="user-credits"]',
     ];
 
     let balance: number | null = null;
@@ -1624,11 +1765,6 @@ export class FlowUiAdapterV1 {
           }
         }
       } catch {}
-    }
-
-    if (balance === null) {
-      const bodyText = ((await this.page.locator('body').innerText().catch(() => '')) || '').slice(0, 2000);
-      balance = parseLocalizedCreditNumber(bodyText);
     }
 
     return {
@@ -1663,6 +1799,7 @@ export class FlowUiAdapterV1 {
     liveDisplayedCreditCost?: number;
     costProvenance: 'UPLOADED_VIDEO_EDIT' | 'GENERIC_COMPOSER_DIAGNOSTIC' | 'UNKNOWN';
     preparedFingerprint: string;
+    sourceIdentity?: string;
   }> {
     const page = this.page;
     if (!page) throw new Error('Browser not launched');
@@ -1769,7 +1906,19 @@ export class FlowUiAdapterV1 {
     const observedCount = editVerif?.outputCount || 1;
     const liveCost = editVerif?.creditEstimateNumber;
 
-    const preparedFingerprint = `${params.localSubmissionAttemptId || 'att'}:${observedModel}:${observedRes}:${observedLen}:${observedOrient}:${observedCount}:${liveCost || 0}`;
+    const sourceIdentity = editVerif?.sourceTitle || (params.videoPath ? path.basename(params.videoPath) : 'source');
+    const promptHash = crypto.createHash('sha256').update(params.prompt.trim()).digest('hex');
+
+    const preparedFingerprint = computePreparedFingerprint({
+      operationContext: 'UPLOADED_VIDEO_EDIT',
+      sourceIdentity,
+      promptHash,
+      model: observedModel,
+      resolution: observedRes,
+      durationSec: observedLen,
+      orientation: observedOrient,
+      outputCount: observedCount,
+    });
 
     return {
       generateReady: true,
@@ -1783,6 +1932,7 @@ export class FlowUiAdapterV1 {
       liveDisplayedCreditCost: liveCost,
       costProvenance: editVerif?.uploadedVideoEditActive ? 'UPLOADED_VIDEO_EDIT' : 'UNKNOWN',
       preparedFingerprint,
+      sourceIdentity,
     };
   }
 
@@ -1797,6 +1947,8 @@ export class FlowUiAdapterV1 {
       durationSec?: number;
       orientation?: string;
       outputCount?: number;
+      promptHash?: string;
+      sourceIdentity?: string;
     };
   }): Promise<{
     outcome: 'PRE_CLICK_REJECTED' | 'PROVEN_SUBMITTED' | 'POST_CLICK_AMBIGUOUS';
@@ -1853,30 +2005,123 @@ export class FlowUiAdapterV1 {
       };
     }
 
-    // 3. Re-read live cost tooltip
-    let currentCost: number | null = null;
-    await generateBtn.hover().catch(() => {});
-    await page.waitForTimeout(300);
-    const tooltips = page.locator('[role="tooltip"], div[data-radix-popper-content-wrapper], div[class*="tooltip"], #credit-info, [id*="credit"]');
-    const count = await tooltips.count().catch(() => 0);
-    for (let i = 0; i < count; i++) {
-      const text = ((await tooltips.nth(i).innerText().catch(() => '')) || '').trim();
-      const match = text.match(/(\d+)/);
-      if (match) {
-        currentCost = parseInt(match[1], 10);
-        break;
+    // 3. Re-read active edit configuration immediately before click
+    const activeState = await readActiveEditState(page);
+
+    // Requirement 9: Revalidate expected configuration
+    if (params.expectedConfig) {
+      if (params.expectedConfig.modelId) {
+        const expModel = normalizeCanonicalModel(params.expectedConfig.modelId);
+        const obsModel = normalizeCanonicalModel(activeState.model);
+        if (obsModel !== expModel) {
+          return {
+            outcome: 'PRE_CLICK_REJECTED',
+            clickDispatched: false,
+            localSubmissionAttemptId: params.localSubmissionAttemptId,
+            reason: `FLOW_CONFIGURATION_UNVERIFIED: Observed model (${activeState.model}) does not match expected (${params.expectedConfig.modelId})`,
+          };
+        }
+      }
+
+      if (params.expectedConfig.resolution) {
+        const expRes = normalizeCanonicalResolution(params.expectedConfig.resolution);
+        const obsRes = normalizeCanonicalResolution(activeState.resolution);
+        if (obsRes !== expRes) {
+          return {
+            outcome: 'PRE_CLICK_REJECTED',
+            clickDispatched: false,
+            localSubmissionAttemptId: params.localSubmissionAttemptId,
+            reason: `FLOW_CONFIGURATION_UNVERIFIED: Observed resolution (${activeState.resolution}) does not match expected (${params.expectedConfig.resolution})`,
+          };
+        }
+      }
+
+      if (params.expectedConfig.durationSec !== undefined) {
+        if (activeState.durationSec !== params.expectedConfig.durationSec) {
+          return {
+            outcome: 'PRE_CLICK_REJECTED',
+            clickDispatched: false,
+            localSubmissionAttemptId: params.localSubmissionAttemptId,
+            reason: `FLOW_CONFIGURATION_UNVERIFIED: Observed duration (${activeState.durationSec}s) does not match expected (${params.expectedConfig.durationSec}s)`,
+          };
+        }
+      }
+
+      if (params.expectedConfig.orientation) {
+        const expOri = normalizeCanonicalOrientation(params.expectedConfig.orientation);
+        const obsOri = normalizeCanonicalOrientation(activeState.orientation);
+        if (obsOri !== expOri) {
+          return {
+            outcome: 'PRE_CLICK_REJECTED',
+            clickDispatched: false,
+            localSubmissionAttemptId: params.localSubmissionAttemptId,
+            reason: `FLOW_CONFIGURATION_UNVERIFIED: Observed orientation (${activeState.orientation}) does not match expected (${params.expectedConfig.orientation})`,
+          };
+        }
+      }
+
+      if (params.expectedConfig.outputCount !== undefined) {
+        if (activeState.outputCount !== params.expectedConfig.outputCount) {
+          return {
+            outcome: 'PRE_CLICK_REJECTED',
+            clickDispatched: false,
+            localSubmissionAttemptId: params.localSubmissionAttemptId,
+            reason: `FLOW_CONFIGURATION_UNVERIFIED: Observed output count (${activeState.outputCount}) does not match expected (${params.expectedConfig.outputCount})`,
+          };
+        }
       }
     }
 
-    if (currentCost !== null) {
-      if (currentCost > params.maxCredits) {
+    // Requirement 8: Revalidate prepared fingerprint
+    if (params.expectedFingerprint) {
+      const currentFp = computePreparedFingerprint({
+        operationContext: 'UPLOADED_VIDEO_EDIT',
+        sourceIdentity: params.expectedConfig?.sourceIdentity || activeState.sourceTitle || 'source',
+        promptHash: params.expectedConfig?.promptHash || '',
+        model: activeState.model,
+        resolution: activeState.resolution,
+        durationSec: activeState.durationSec,
+        orientation: activeState.orientation,
+        outputCount: activeState.outputCount,
+      });
+
+      if (currentFp !== params.expectedFingerprint) {
         return {
           outcome: 'PRE_CLICK_REJECTED',
           clickDispatched: false,
           localSubmissionAttemptId: params.localSubmissionAttemptId,
-          reason: `FLOW_CREDIT_BUDGET_EXCEEDED: Re-read live cost (${currentCost}) exceeds max budget (${params.maxCredits})`,
+          reason: `FLOW_CONFIGURATION_CHANGED: Current prepared fingerprint (${currentFp}) does not match expected (${params.expectedFingerprint})`,
         };
       }
+    }
+
+    // Requirements 11, 12, 13, 14: Re-read live cost immediately before click
+    const currentCost = await readLiveCostTooltip(page, generateBtn);
+    if (currentCost === null) {
+      return {
+        outcome: 'PRE_CLICK_REJECTED',
+        clickDispatched: false,
+        localSubmissionAttemptId: params.localSubmissionAttemptId,
+        reason: 'FLOW_LIVE_COST_UNVERIFIED: Unable to re-read authoritative live cost before click',
+      };
+    }
+
+    if (currentCost !== params.expectedLiveCost) {
+      return {
+        outcome: 'PRE_CLICK_REJECTED',
+        clickDispatched: false,
+        localSubmissionAttemptId: params.localSubmissionAttemptId,
+        reason: `FLOW_LIVE_COST_CHANGED: Live cost changed from ${params.expectedLiveCost} to ${currentCost} before click`,
+      };
+    }
+
+    if (currentCost > params.maxCredits) {
+      return {
+        outcome: 'PRE_CLICK_REJECTED',
+        clickDispatched: false,
+        localSubmissionAttemptId: params.localSubmissionAttemptId,
+        reason: `FLOW_CREDIT_BUDGET_EXCEEDED: Re-read live cost (${currentCost}) exceeds max budget (${params.maxCredits})`,
+      };
     }
 
     // 4. Click Generate exactly once
@@ -1955,11 +2200,23 @@ export class FlowUiAdapterV1 {
       localSubmissionAttemptId: params.localSubmissionAttemptId,
     });
 
+    const promptHash = crypto.createHash('sha256').update(params.prompt.trim()).digest('hex');
+    const sourceIdentity = (prep as any).sourceIdentity || (params.videoPath ? path.basename(params.videoPath) : 'source');
+
     const submitRes = await this.submitPreparedVideoEdit({
       localSubmissionAttemptId: params.localSubmissionAttemptId,
       expectedLiveCost: prep.liveDisplayedCreditCost || 20,
       maxCredits: 99999,
       expectedFingerprint: prep.preparedFingerprint,
+      expectedConfig: {
+        promptHash,
+        sourceIdentity,
+        modelId: prep.observedConfig.model,
+        resolution: prep.observedConfig.resolution,
+        durationSec: prep.observedConfig.generationLengthSec,
+        orientation: prep.observedConfig.orientation,
+        outputCount: prep.observedConfig.outputCount,
+      },
     });
 
     if (submitRes.outcome === 'PRE_CLICK_REJECTED') {
