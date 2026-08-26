@@ -4,6 +4,7 @@ import {
   FlowGenerationRequest,
   FlowJobSnapshot,
   FlowProfileInfo,
+  FlowGenerationPreflight,
   GeminiCredentialStatus,
   PromptSource,
   TransformationIntent,
@@ -18,7 +19,9 @@ interface FlowJobStoreState {
   geminiStatus: GeminiCredentialStatus | null;
   activeJob: FlowJobSnapshot | null;
   jobs: FlowJobSnapshot[];
+  preflight: FlowGenerationPreflight | null;
   isStarting: boolean;
+  isPreflighting: boolean;
   isLoadingProfiles: boolean;
   error: string | null;
 
@@ -32,6 +35,8 @@ interface FlowJobStoreState {
   loadGeminiStatus: () => Promise<void>;
   testGeminiApiKey: () => Promise<GeminiCredentialStatus>;
   loadFlowJobs: (projectId: string) => Promise<void>;
+  preflightFlowJob: (request: FlowGenerationRequest) => Promise<FlowGenerationPreflight>;
+  clearPreflight: () => void;
   startFlowJob: (
     projectId: string,
     profileId: string,
@@ -60,7 +65,9 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
   geminiStatus: null,
   activeJob: null,
   jobs: [],
+  preflight: null,
   isStarting: false,
+  isPreflighting: false,
   isLoadingProfiles: false,
   error: null,
 
@@ -185,6 +192,26 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
     } catch (err) {
       // Ignored non-blocking
     }
+  },
+
+  preflightFlowJob: async (request: FlowGenerationRequest) => {
+    set({ isPreflighting: true, error: null });
+    try {
+      const preflight = await flowApi.preflightGeneration(request);
+      set({ preflight, isPreflighting: false });
+      return preflight;
+    } catch (err: any) {
+      const errMsg =
+        typeof err === 'string'
+          ? err
+          : err?.message || 'Preflight inspection failed';
+      set({ error: errMsg, isPreflighting: false });
+      throw err;
+    }
+  },
+
+  clearPreflight: () => {
+    set({ preflight: null });
   },
 
   startFlowJob: async (

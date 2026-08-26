@@ -24,7 +24,8 @@ pub use manifest::{
 pub use manual_chrome::{ManualChromeProcess, SystemChromeLauncher};
 pub use mock_flow_server::{MockFlowServer, MockFlowServerHandle, MockScenario};
 pub use orchestrator::{
-    FlowCancellationRegistry, FlowGenerationRequest, FlowOrchestrator, FlowRuntimeService,
+    FlowCancellationRegistry, FlowGenerationPreflight, FlowGenerationRequest, FlowOrchestrator,
+    FlowRuntimeService,
 };
 pub use output_validator::FlowOutputValidator;
 pub use playwright_bridge::{

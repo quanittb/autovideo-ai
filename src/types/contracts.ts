@@ -332,6 +332,12 @@ export type TransformationIntent =
 
 export type IdentityMode = 'GENERATED' | 'REFERENCE';
 
+export type PromptSource =
+  | 'USER'
+  | 'GEMINI_OPTIMIZED'
+  | 'GEMINI_OPTIMIZED_THEN_EDITED'
+  | 'SYSTEM_DEFAULT';
+
 export interface TargetFaceSelection {
   index: number;
   descriptor?: string;
@@ -339,6 +345,28 @@ export interface TargetFaceSelection {
   anchorTimestampSec?: number;
   anchorFrameTimestampSec?: number;
   normalizedBoundingBox?: [number, number, number, number];
+}
+
+export interface FlowGenerationPreflight {
+  projectId: string;
+  sourceMediaId: string;
+  profileId: string;
+  transformationIntent: TransformationIntent;
+  identityMode: IdentityMode;
+  resolvedPrompt: string;
+  promptSource: PromptSource;
+  promptHash: string;
+  videoAttached: boolean;
+  videoEditActive: boolean;
+  configuredModel?: string;
+  configuredDuration?: number;
+  configuredOrientation?: string;
+  outputCount: number;
+  liveDisplayedCreditCost?: number;
+  liveCreditBalance?: number;
+  readyForPaidSubmission: boolean;
+  blockingCode?: string;
+  checkedAt: string;
 }
 
 export interface DerivedMediaProvenance {

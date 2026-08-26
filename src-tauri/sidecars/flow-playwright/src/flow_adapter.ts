@@ -389,15 +389,28 @@ export async function ensureUploadedVideoEditActive(
         await page.waitForTimeout(3000);
       }
 
-      // Bounded wait up to 40s for media card to appear and complete transcoding on canvas
+      // Bounded wait up to 40s for media card to appear or direct /edit/ transition
       for (let i = 0; i < 20; i++) {
         await page.waitForTimeout(2000);
+        if (await checkEditActive()) {
+          console.error(`[ensureUploadedVideoEditActive] Directly transitioned to /edit/ view on iteration ${i}`);
+          editActive = true;
+          break;
+        }
         canvasCard = page
           .locator(
-            'button:has(video), button:has(img[alt*="Hình thu nhỏ" i]), button:has(img[alt*="thumbnail" i]), img[alt*="Hình thu nhỏ" i], img[alt*="thumbnail" i], div:has(> video)'
+            'button:has(video), button:has(img[alt*="Hình thu nhỏ" i]), button:has(img[alt*="thumbnail" i]), img[alt*="Hình thu nhỏ" i], img[alt*="thumbnail" i], div:has(> video), .react-flow__node button, .react-flow__node video, .react-flow__node, [data-id], button:has(i:has-text("videocam")), div:has(> i:has-text("videocam")), [role="button"]:has-text("Video"), [role="button"]:has(video), [class*="media-item"], [class*="assetItem"]'
           )
           .first();
-        if ((await canvasCard.count().catch(() => 0)) > 0 && (await canvasCard.isVisible().catch(() => false))) {
+        const cardCount = await canvasCard.count().catch(() => 0);
+        const cardVis = cardCount > 0 && (await canvasCard.isVisible().catch(() => false));
+        if (i % 3 === 0) {
+          const bodySnippet = ((await page.locator('body').innerText().catch(() => '')) || '').slice(0, 300).replace(/\n+/g, ' ');
+          console.error(`[ensureUploadedVideoEditActive] Iteration ${i}: cardCount=${cardCount}, cardVis=${cardVis}, snippet: ${bodySnippet}`);
+        } else {
+          console.error(`[ensureUploadedVideoEditActive] Iteration ${i}: cardCount=${cardCount}, cardVis=${cardVis}`);
+        }
+        if (cardVis) {
           hasCard = true;
           console.error(`[ensureUploadedVideoEditActive] Transcoded card appeared on iteration ${i}`);
           break;
@@ -418,8 +431,18 @@ export async function ensureUploadedVideoEditActive(
         await page.waitForTimeout(500);
         await canvasCard.dblclick().catch(() => {});
       }
-      await page.waitForURL(url => url.toString().includes('/edit/'), { timeout: 8000 }).catch(() => {});
-      await page.waitForTimeout(3000);
+      await page.waitForURL(url => url.toString().includes('/edit/'), { timeout: 10000 }).catch(() => {});
+      await page.waitForTimeout(2000);
+
+      // If still not edit URL, try clicking explicit edit button in toolbar if present
+      if (!(await checkEditActive())) {
+        const editBtn = page.locator('button:has-text("Chỉnh sửa"), button:has-text("Edit"), button[aria-label*="edit" i], button:has(i:has-text("edit"))').first();
+        if ((await editBtn.count().catch(() => 0)) > 0 && (await editBtn.isVisible().catch(() => false))) {
+          await editBtn.click().catch(() => {});
+          await page.waitForURL(url => url.toString().includes('/edit/'), { timeout: 8000 }).catch(() => {});
+          await page.waitForTimeout(2000);
+        }
+      }
     }
 
     editActive = await checkEditActive();
@@ -1252,6 +1275,7 @@ export class FlowUiAdapterV1 {
     outputCount?: number;
     creditEstimateText?: string;
     creditEstimateNumber?: number;
+    liveCreditBalance?: number;
     summaryButtonText?: string;
     videoEditVerification?: VideoEditModeVerification | null;
   }> {
@@ -1270,24 +1294,26 @@ export class FlowUiAdapterV1 {
     }
 
     // If on project dashboard, enter active project workspace (bounded check)
-    for (let attempt = 0; attempt < 8; attempt++) {
-      if (this.page.url().includes('/project/')) break;
-      const projectLink = this.page.locator('a[href*="/tools/flow/project/"]').first();
-      if ((await projectLink.count().catch(() => 0)) > 0 && (await projectLink.isVisible().catch(() => false))) {
-        await projectLink.click().catch(() => {});
-        await this.page.waitForTimeout(4000);
-        break;
+    const isMockApp = (await this.page.locator('#flow-app').count().catch(() => 0)) > 0;
+    if (!isMockApp && !this.page.url().includes('/project/') && !this.page.url().includes('/edit/')) {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        if (this.page.url().includes('/project/')) break;
+        const projectLink = this.page.locator('a[href*="/tools/flow/project/"]').first();
+        if ((await projectLink.count().catch(() => 0)) > 0 && (await projectLink.isVisible().catch(() => false))) {
+          await projectLink.click().catch(() => {});
+          await this.page.waitForTimeout(4000);
+          break;
+        }
+        const newProjBtn = this.page.locator('button:has-text("Dự án mới"), button:has-text("New Project")').first();
+        if ((await newProjBtn.count().catch(() => 0)) > 0 && (await newProjBtn.isVisible().catch(() => false))) {
+          await newProjBtn.click().catch(() => {});
+          await this.page.waitForTimeout(4000);
+          break;
+        }
+        await this.page.waitForTimeout(1000);
       }
-      const newProjBtn = this.page.locator('button:has-text("Dự án mới"), button:has-text("New Project")').first();
-      if ((await newProjBtn.count().catch(() => 0)) > 0 && (await newProjBtn.isVisible().catch(() => false))) {
-        await newProjBtn.click().catch(() => {});
-        await this.page.waitForTimeout(4000);
-        break;
-      }
-      await this.page.waitForTimeout(1000);
+      await this.page.waitForTimeout(2000);
     }
-
-    await this.page.waitForTimeout(2000);
 
     let videoEditVerification: VideoEditModeVerification | null = null;
     if (params.videoPath) {
@@ -1346,6 +1372,19 @@ export class FlowUiAdapterV1 {
       generateEnabled = !disabled && ariaDisabled !== 'true';
     }
 
+    let liveCreditBalance: number | undefined;
+    try {
+      const headerText =
+        (await this.page
+          .locator('header, [role="banner"], [data-testid*="credit"], [class*="header"]')
+          .innerText()
+          .catch(() => '')) || '';
+      const balanceMatch = headerText.match(/(\d+)\s*(tín dụng|credits)/i);
+      if (balanceMatch) {
+        liveCreditBalance = parseInt(balanceMatch[1], 10);
+      }
+    } catch {}
+
     return {
       authStatus: auth.status,
       workspaceAccessible: true,
@@ -1359,6 +1398,7 @@ export class FlowUiAdapterV1 {
       outputCount: videoEditVerification?.outputCount || settingsReadback?.outputCount,
       creditEstimateText: videoEditVerification?.creditReadback2 || settingsReadback?.creditEstimateText,
       creditEstimateNumber: videoEditVerification?.creditEstimateNumber || settingsReadback?.creditEstimateNumber,
+      liveCreditBalance,
       summaryButtonText: settingsReadback?.summaryButtonText,
       videoEditVerification,
     };

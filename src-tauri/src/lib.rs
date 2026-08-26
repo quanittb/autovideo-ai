@@ -188,6 +188,7 @@ pub fn run() {
             close_flow_profile_browser,
             verify_flow_profile_login,
             refresh_flow_profile_status,
+            preflight_flow_generation,
             start_flow_generation,
             cancel_flow_generation,
             get_flow_job_status,

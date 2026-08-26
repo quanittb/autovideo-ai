@@ -1111,6 +1111,28 @@ export interface FlowGenerationRequest {
   preserveOriginalAudio?: boolean;
 }
 
+export interface FlowGenerationPreflight {
+  projectId: string;
+  sourceMediaId: string;
+  profileId: string;
+  transformationIntent: TransformationIntent;
+  identityMode: IdentityMode;
+  resolvedPrompt: string;
+  promptSource: PromptSource;
+  promptHash: string;
+  videoAttached: boolean;
+  videoEditActive: boolean;
+  configuredModel?: string;
+  configuredDuration?: number;
+  configuredOrientation?: string;
+  outputCount: number;
+  liveDisplayedCreditCost?: number;
+  liveCreditBalance?: number;
+  readyForPaidSubmission: boolean;
+  blockingCode?: string;
+  checkedAt: string;
+}
+
 export interface FlowJobSnapshot {
   parentId: string;
   projectId: string;
@@ -1181,6 +1203,9 @@ export const flowApi = {
 
   getAuthStatus: (profileId: string): Promise<string> =>
     invoke('refresh_flow_profile_status', { profileId }),
+
+  preflightGeneration: (request: FlowGenerationRequest): Promise<FlowGenerationPreflight> =>
+    invoke('preflight_flow_generation', { request }),
 
   startGeneration: (request: FlowGenerationRequest): Promise<FlowJobSnapshot> =>
     invoke('start_flow_generation', { request }),

@@ -12,6 +12,7 @@ vi.mock('../../lib/ipc', () => ({
     refreshProfileStatus: vi.fn(),
     getGeminiStatus: vi.fn(),
     testGeminiApiKey: vi.fn(),
+    preflightGeneration: vi.fn(),
     startFlowGeneration: vi.fn(),
     startGeneration: vi.fn(),
     listFlowJobs: vi.fn(),
@@ -246,5 +247,45 @@ describe('flowJobStore', () => {
     expect(state.activeJob?.state).toBe('COMPLETED');
     expect(state.activeJob?.completedGenerations).toBe(2);
     expect(state.activeJob?.finalOutputReady).toBe(true);
+  });
+
+  it('performs preflightFlowJob and manages preflight state and error', async () => {
+    vi.mocked(flowApi.preflightGeneration).mockResolvedValueOnce({
+      projectId: 'proj_test',
+      sourceMediaId: 'media_001',
+      profileId: 'prof_1',
+      transformationIntent: 'FACE_REPLACE',
+      identityMode: 'GENERATED',
+      resolvedPrompt: 'Default Prompt',
+      promptSource: 'SYSTEM_DEFAULT',
+      promptHash: 'hash_default',
+      videoAttached: true,
+      videoEditActive: true,
+      configuredModel: 'Omni Flash',
+      configuredDuration: 10,
+      configuredOrientation: 'PORTRAIT',
+      outputCount: 1,
+      liveDisplayedCreditCost: 20,
+      liveCreditBalance: 100,
+      readyForPaidSubmission: true,
+      checkedAt: '2026-08-25T00:00:00Z',
+    });
+
+    const res = await useFlowJobStore.getState().preflightFlowJob({
+      projectId: 'proj_test',
+      profileId: 'prof_1',
+      sourceMediaId: 'media_001',
+      prompt: '',
+    });
+
+    const state = useFlowJobStore.getState();
+    expect(state.preflight).not.toBeNull();
+    expect(state.preflight?.liveDisplayedCreditCost).toBe(20);
+    expect(state.preflight?.readyForPaidSubmission).toBe(true);
+    expect(state.isPreflighting).toBe(false);
+    expect(res.liveDisplayedCreditCost).toBe(20);
+
+    useFlowJobStore.getState().clearPreflight();
+    expect(useFlowJobStore.getState().preflight).toBeNull();
   });
 });

@@ -2516,6 +2516,30 @@ pub async fn refresh_flow_profile_status(
 }
 
 #[command]
+pub async fn preflight_flow_generation(
+    request: crate::ai::flow::FlowGenerationRequest,
+    flow_service: tauri::State<'_, Arc<crate::ai::flow::FlowRuntimeService>>,
+) -> Result<crate::ai::flow::FlowGenerationPreflight, String> {
+    let paths = crate::system::StoragePaths::default_paths();
+    let media_id_opt = if request.source_media_id.trim().is_empty() {
+        None
+    } else {
+        Some(request.source_media_id.as_str())
+    };
+
+    let (canonical_source, _) =
+        resolve_project_media_by_id(&request.project_id, media_id_opt, &paths)?;
+
+    if !canonical_source.exists() {
+        return Err(format!("SOURCE_MEDIA_NOT_FOUND: {:?}", canonical_source));
+    }
+
+    flow_service
+        .preflight_flow_generation(request, canonical_source)
+        .await
+}
+
+#[command]
 pub async fn start_flow_generation(
     request: crate::ai::flow::FlowGenerationRequest,
     flow_service: tauri::State<'_, Arc<crate::ai::flow::FlowRuntimeService>>,

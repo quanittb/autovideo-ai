@@ -608,7 +608,7 @@ impl FlowActiveBrowserSession {
                     "prompt": prompt,
                     "videoPath": video_path_str
                 }),
-                Duration::from_secs(30),
+                Duration::from_secs(120),
             )
             .await
     }

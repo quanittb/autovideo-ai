@@ -14,7 +14,9 @@ export const FlowGenPanel: React.FC = () => {
     selectedProfileId,
     geminiStatus,
     activeJob,
+    preflight,
     isStarting,
+    isPreflighting,
     isLoadingProfiles,
     error: storeError,
     loadProfiles,
@@ -23,6 +25,8 @@ export const FlowGenPanel: React.FC = () => {
     openProfileBrowser,
     loadGeminiStatus,
     loadFlowJobs,
+    preflightFlowJob,
+    clearPreflight,
     startFlowJob,
     pollJobStatus,
   } = useFlowJobStore();
@@ -123,8 +127,30 @@ export const FlowGenPanel: React.FC = () => {
     return () => clearInterval(timer);
   }, [activeJob, projectId, pollJobStatus]);
 
+  useEffect(() => {
+    clearPreflight();
+  }, [projectId, selectedProfileId, selectedMediaId, transformationIntent, prompt, clearPreflight]);
+
   const isPromptValid =
     transformationIntent === 'FACE_REPLACE' ? true : prompt.trim().length > 0;
+
+  const handleCheckCost = async () => {
+    if (!projectId || !selectedProfileId || !selectedMediaId.trim() || !isPromptValid) return;
+    try {
+      await preflightFlowJob({
+        projectId,
+        profileId: selectedProfileId,
+        sourceMediaId: selectedMediaId.trim(),
+        transformationIntent,
+        identityMode: 'GENERATED',
+        prompt: prompt.trim(),
+        promptSource,
+        preserveOriginalAudio: true,
+      });
+    } catch {
+      // Handled by store
+    }
+  };
 
   const handleStartGeneration = async () => {
     if (!projectId || !selectedProfileId || !selectedMediaId.trim() || !isPromptValid) return;
@@ -332,6 +358,49 @@ export const FlowGenPanel: React.FC = () => {
         onUndo={handleUndo}
       />
 
+      {/* Preflight Inspection Banner */}
+      {preflight && (
+        <div className={`p-4 rounded-xl border text-xs flex flex-col gap-2 ${
+          preflight.readyForPaidSubmission
+            ? 'bg-indigo-950/40 border-indigo-500/30'
+            : 'bg-amber-950/40 border-amber-500/30 text-amber-200'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 font-medium">
+              <Sparkles className="w-4 h-4 text-indigo-400" />
+              <span>
+                Discovered Flow Cost:{' '}
+                <strong>{preflight.liveDisplayedCreditCost ?? 'Unknown'} credits</strong>
+                {preflight.liveCreditBalance !== undefined && (
+                  <span className="text-slate-300 ml-2">
+                    (Account Balance: {preflight.liveCreditBalance} credits)
+                  </span>
+                )}
+              </span>
+            </div>
+            <span className="text-slate-400">
+              Verified at {new Date(preflight.checkedAt).toLocaleTimeString()}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-4 text-slate-300">
+            <span>Video Attached: {preflight.videoAttached ? 'YES' : 'NO'}</span>
+            <span>Edit Mode: {preflight.videoEditActive ? 'ACTIVE (/edit/)' : 'INACTIVE'}</span>
+            {preflight.configuredOrientation && (
+              <span>Orientation: {preflight.configuredOrientation}</span>
+            )}
+            <span>Outputs: x{preflight.outputCount}</span>
+          </div>
+
+          {preflight.blockingCode && (
+            <div className="flex items-center gap-1.5 text-amber-400 font-semibold mt-1">
+              <AlertCircle className="w-3.5 h-3.5" />
+              <span>Blocking Code: {preflight.blockingCode}</span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Execution Guard & Action */}
       <div className="flex items-center justify-between p-4 bg-slate-900/40 border border-slate-800 rounded-xl flex-wrap gap-3">
         <div className="flex items-center gap-4 text-xs text-slate-400">
@@ -352,25 +421,49 @@ export const FlowGenPanel: React.FC = () => {
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={handleStartGeneration}
-          disabled={
-            !projectId ||
-            !selectedProfileId ||
-            !isProfileReady ||
-            isManualBrowserOpen ||
-            isProfileLocked ||
-            !isPromptValid ||
-            !selectedMediaId ||
-            isStarting ||
-            (activeJob !== null && activeJob.state !== 'COMPLETED' && activeJob.state !== 'FAILED' && activeJob.state !== 'CANCELLED')
-          }
-          className="flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl shadow-lg transition cursor-pointer"
-        >
-          <Play className="w-4 h-4 fill-white" />
-          {isStarting ? 'Initiating Pipeline...' : 'Generate with Google Flow'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleCheckCost}
+            disabled={
+              !projectId ||
+              !selectedProfileId ||
+              !isProfileReady ||
+              isManualBrowserOpen ||
+              isProfileLocked ||
+              !isPromptValid ||
+              !selectedMediaId ||
+              isStarting ||
+              isPreflighting ||
+              (activeJob !== null && activeJob.state !== 'COMPLETED' && activeJob.state !== 'FAILED' && activeJob.state !== 'CANCELLED')
+            }
+            className="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-slate-600 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl transition cursor-pointer"
+          >
+            <Sparkles className={`w-3.5 h-3.5 text-indigo-400 ${isPreflighting ? 'animate-spin' : ''}`} />
+            {isPreflighting ? 'Checking Flow Cost...' : 'Check Flow Cost'}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleStartGeneration}
+            disabled={
+              !projectId ||
+              !selectedProfileId ||
+              !isProfileReady ||
+              isManualBrowserOpen ||
+              isProfileLocked ||
+              !isPromptValid ||
+              !selectedMediaId ||
+              isStarting ||
+              isPreflighting ||
+              (activeJob !== null && activeJob.state !== 'COMPLETED' && activeJob.state !== 'FAILED' && activeJob.state !== 'CANCELLED')
+            }
+            className="flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl shadow-lg transition cursor-pointer"
+          >
+            <Play className="w-4 h-4 fill-white" />
+            {isStarting ? 'Initiating Pipeline...' : 'Generate with Google Flow'}
+          </button>
+        </div>
       </div>
 
       {/* Active Job Progress */}

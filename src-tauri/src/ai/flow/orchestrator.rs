@@ -80,6 +80,44 @@ pub struct FlowGenerationRequest {
     pub preserve_original_audio: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowGenerationPreflight {
+    pub project_id: String,
+    pub source_media_id: String,
+    pub profile_id: String,
+
+    pub transformation_intent: TransformationIntent,
+    pub identity_mode: IdentityMode,
+
+    pub resolved_prompt: String,
+    pub prompt_source: PromptSource,
+    pub prompt_hash: String,
+
+    pub video_attached: bool,
+    pub video_edit_active: bool,
+
+    #[serde(default)]
+    pub configured_model: Option<String>,
+    #[serde(default)]
+    pub configured_duration: Option<f64>,
+    #[serde(default)]
+    pub configured_orientation: Option<String>,
+    pub output_count: u32,
+
+    #[serde(default)]
+    pub live_displayed_credit_cost: Option<u32>,
+    #[serde(default)]
+    pub live_credit_balance: Option<u32>,
+
+    pub ready_for_paid_submission: bool,
+
+    #[serde(default)]
+    pub blocking_code: Option<String>,
+
+    pub checked_at: String,
+}
+
 // -----------------------------------------------------------------------------
 // 3. Flow Runtime Service (Application-Level Manager)
 // -----------------------------------------------------------------------------
@@ -103,6 +141,16 @@ impl FlowRuntimeService {
             orchestrator: Arc::new(FlowOrchestrator::with_mock_bridge(storage_paths, mock_url)),
             cancellations: Arc::new(FlowCancellationRegistry::new()),
         }
+    }
+
+    pub async fn preflight_flow_generation(
+        &self,
+        request: FlowGenerationRequest,
+        canonical_source: PathBuf,
+    ) -> Result<FlowGenerationPreflight, String> {
+        self.orchestrator
+            .preflight_flow_generation(request, canonical_source)
+            .await
     }
 
     pub async fn start_flow_generation(
@@ -229,6 +277,175 @@ impl FlowOrchestrator {
 
         self.start_flow_generation_with_request(request, source_video_path, None)
             .await
+    }
+
+    pub async fn preflight_flow_generation(
+        &self,
+        request: FlowGenerationRequest,
+        canonical_source_path: PathBuf,
+    ) -> Result<FlowGenerationPreflight, String> {
+        let intent = request
+            .transformation_intent
+            .unwrap_or(TransformationIntent::FaceReplace);
+        let identity_mode = request.identity_mode.unwrap_or(IdentityMode::Generated);
+
+        // Capability check
+        match intent {
+            TransformationIntent::BackgroundRemove => {
+                return Err(
+                    "FLOW_CAPABILITY_UNSUPPORTED: Background removal is not supported by Google Flow".to_string(),
+                );
+            }
+            TransformationIntent::FaceReplace => {
+                if identity_mode == IdentityMode::Reference {
+                    return Err(
+                        "FLOW_REFERENCE_IDENTITY_NOT_SUPPORTED: Face replacement with custom reference image is not supported by Google Flow".to_string(),
+                    );
+                }
+            }
+            _ => {}
+        }
+
+        let mut clean_prompt = request.prompt.trim().to_string();
+        let resolved_prompt_source = if clean_prompt.is_empty() {
+            if intent == TransformationIntent::FaceReplace
+                && identity_mode == IdentityMode::Generated
+            {
+                clean_prompt = "Replace only the selected target person's facial identity with a new, temporally consistent synthetic identity. Strictly preserve: body, clothing, hair where practical, pose, expression dynamics, mouth movement, head movement, action, camera motion, background, lighting, composition, timing, and all non-target people.".to_string();
+                PromptSource::SystemDefault
+            } else {
+                return Err("REQUEST_INVALID: Prompt cannot be empty for non-default transformation intents".to_string());
+            }
+        } else {
+            request.prompt_source.unwrap_or(PromptSource::User)
+        };
+
+        if !canonical_source_path.exists() {
+            return Err(format!(
+                "FILE_NOT_FOUND: Source video does not exist: {:?}",
+                canonical_source_path
+            ));
+        }
+
+        // Verify profile exists
+        let profile_dir = self.profile_manager.get_profile_dir(&request.profile_id)?;
+        if !profile_dir.exists() {
+            return Err(format!(
+                "PROFILE_NOT_FOUND: Profile {} does not exist",
+                request.profile_id
+            ));
+        }
+
+        // Probe source video
+        let facts = SourceMediaProbe::probe_file(&canonical_source_path)
+            .map_err(|e| format!("PROBE_FAILED: {}", e))?;
+
+        if facts.duration_sec <= 0.0 || facts.fps <= 0.0 {
+            return Err("INVALID_MEDIA: Media facts have invalid duration or fps".to_string());
+        }
+
+        let prompt_hash = calculate_prompt_hash(&clean_prompt);
+
+        // Perform browser preflight with sidecar
+        let mut session = self.bridge.open_active_session(&profile_dir).await?;
+        let preflight_res = session
+            .dry_run_preflight(&clean_prompt, Some(&canonical_source_path))
+            .await;
+        session.close().await;
+
+        let val = preflight_res?;
+        let auth_status = val
+            .get("authStatus")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UNKNOWN");
+
+        if auth_status != "READY" {
+            return Ok(FlowGenerationPreflight {
+                project_id: request.project_id,
+                source_media_id: request.source_media_id,
+                profile_id: request.profile_id,
+                transformation_intent: intent,
+                identity_mode,
+                resolved_prompt: clean_prompt,
+                prompt_source: resolved_prompt_source,
+                prompt_hash,
+                video_attached: false,
+                video_edit_active: false,
+                configured_model: None,
+                configured_duration: None,
+                configured_orientation: None,
+                output_count: 1,
+                live_displayed_credit_cost: None,
+                live_credit_balance: None,
+                ready_for_paid_submission: false,
+                blocking_code: Some(auth_status.to_string()),
+                checked_at: Utc::now().to_rfc3339(),
+            });
+        }
+
+        let video_attached = val
+            .get("uploadLocated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let edit_verif = val.get("videoEditVerification");
+        let video_edit_active = edit_verif
+            .and_then(|v| v.get("uploadedVideoEditActive"))
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
+
+        let model = val
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let duration = val.get("generationLengthSec").and_then(|v| v.as_f64());
+        let orientation = val
+            .get("orientation")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let output_count = val.get("outputCount").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+
+        let live_cost = val
+            .get("creditEstimateNumber")
+            .and_then(|v| v.as_u64())
+            .map(|c| c as u32);
+        let live_balance = val
+            .get("liveCreditBalance")
+            .and_then(|v| v.as_u64())
+            .map(|c| c as u32);
+
+        let ready_for_paid_submission = video_attached && video_edit_active && live_cost.is_some();
+        let blocking_code = if !video_attached {
+            Some("FLOW_VIDEO_NOT_ATTACHED".to_string())
+        } else if !video_edit_active {
+            Some("FLOW_VIDEO_EDIT_NOT_ACTIVE".to_string())
+        } else if live_cost.is_none() {
+            Some("FLOW_CONFIGURATION_UNVERIFIED".to_string())
+        } else {
+            None
+        };
+
+        Ok(FlowGenerationPreflight {
+            project_id: request.project_id,
+            source_media_id: request.source_media_id,
+            profile_id: request.profile_id,
+            transformation_intent: intent,
+            identity_mode,
+            resolved_prompt: clean_prompt,
+            prompt_source: resolved_prompt_source,
+            prompt_hash,
+            video_attached,
+            video_edit_active,
+            configured_model: model,
+            configured_duration: duration,
+            configured_orientation: orientation,
+            output_count,
+            live_displayed_credit_cost: live_cost,
+            live_credit_balance: live_balance,
+            ready_for_paid_submission,
+            blocking_code,
+            checked_at: Utc::now().to_rfc3339(),
+        })
     }
 
     pub async fn start_flow_generation_with_request(

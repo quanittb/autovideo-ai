@@ -1,0 +1,417 @@
+use crate::ai::flow::*;
+use crate::ai::transformation::{IdentityMode, TransformationIntent};
+use crate::commands::resolve_project_media_by_id;
+use crate::projects::{ProjectEditorState, ProjectManager, SourceMedia};
+use crate::system::StoragePaths;
+use std::fs;
+use std::sync::atomic::Ordering;
+use tempfile::tempdir;
+
+#[test]
+fn test_flow_p3a_01_preflight_resolves_canonical_media_id() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let manager = ProjectManager::new(paths.clone());
+
+    let mut project = manager.create_project("Preflight Media Test").unwrap();
+    let proj_dir = paths.projects_dir.join(&project.id);
+    let media_dir = proj_dir.join("media");
+    fs::create_dir_all(&media_dir).unwrap();
+
+    let orig_file = media_dir.join("input_source.mp4");
+    fs::write(&orig_file, b"fake video").unwrap();
+
+    project.source_media = Some(SourceMedia {
+        media_id: "media_orig_100".to_string(),
+        original_file_name: "input_source.mp4".to_string(),
+        source_path: orig_file.clone(),
+        duration_ms: 10000,
+        width: 1080,
+        height: 1920,
+        fps: 30.0,
+        file_size_bytes: 1000,
+        container: "mp4".to_string(),
+        video_codec: "h264".to_string(),
+        audio_codec: Some("aac".to_string()),
+        has_audio: true,
+    });
+    project.editor_state = Some(ProjectEditorState {
+        active_media_id: Some("media_orig_100".to_string()),
+        ..Default::default()
+    });
+    manager.update_project(&project).unwrap();
+
+    // 1. Resolve explicitly by mediaId
+    let (resolved_path, source_media) =
+        resolve_project_media_by_id(&project.id, Some("media_orig_100"), &paths).unwrap();
+    assert_eq!(source_media.media_id, "media_orig_100");
+    assert_eq!(
+        resolved_path.canonicalize().unwrap(),
+        orig_file.canonicalize().unwrap()
+    );
+
+    // 2. Reject path traversal
+    let traversal_err =
+        resolve_project_media_by_id(&project.id, Some("../../etc/passwd"), &paths).unwrap_err();
+    assert!(
+        traversal_err.contains("MEDIA_NOT_FOUND") || traversal_err.contains("SECURITY_VIOLATION")
+    );
+}
+
+#[test]
+fn test_flow_p3a_02_preflight_resolves_system_default_prompt() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    // Create profile
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("test_profile", "Test")
+        .unwrap();
+
+    let dummy_video = temp_dir.path().join("dummy.mp4");
+    fs::write(&dummy_video, b"fake video").unwrap();
+
+    let req = FlowGenerationRequest {
+        project_id: "proj_1".to_string(),
+        source_media_id: "dummy.mp4".to_string(),
+        profile_id: "test_profile".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: "  ".to_string(),
+        prompt_source: None,
+        target_face: None,
+        max_credits: None,
+        preserve_original_audio: Some(true),
+    };
+
+    let probe_err = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(flow_service.preflight_flow_generation(req, dummy_video))
+        .unwrap_err();
+
+    // It resolved prompt to SYSTEM_DEFAULT and proceeded to source media probe
+    assert!(
+        probe_err.contains("PROBE_FAILED") || probe_err.contains("INVALID_MEDIA"),
+        "Expected media probe failure, got: {}",
+        probe_err
+    );
+}
+
+#[test]
+fn test_flow_p3a_03_preflight_blocks_reference_and_empty_style_before_browser() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("test_profile", "Test")
+        .unwrap();
+
+    let video_file = temp_dir.path().join("source.mp4");
+    fs::write(&video_file, b"fake video").unwrap();
+
+    // 1. Reference mode is blocked
+    let req_ref = FlowGenerationRequest {
+        project_id: "p1".to_string(),
+        source_media_id: "source.mp4".to_string(),
+        profile_id: "test_profile".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Reference),
+        prompt: "Replace face".to_string(),
+        prompt_source: None,
+        target_face: None,
+        max_credits: None,
+        preserve_original_audio: Some(true),
+    };
+
+    let ref_err = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(flow_service.preflight_flow_generation(req_ref, video_file.clone()))
+        .unwrap_err();
+    assert!(ref_err.contains("FLOW_REFERENCE_IDENTITY_NOT_SUPPORTED"));
+
+    // 2. Empty prompt on STYLE_EDIT is blocked
+    let req_style = FlowGenerationRequest {
+        project_id: "p1".to_string(),
+        source_media_id: "source.mp4".to_string(),
+        profile_id: "test_profile".to_string(),
+        transformation_intent: Some(TransformationIntent::StyleEdit),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: "".to_string(),
+        prompt_source: None,
+        target_face: None,
+        max_credits: None,
+        preserve_original_audio: Some(true),
+    };
+
+    let style_err = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(flow_service.preflight_flow_generation(req_style, video_file))
+        .unwrap_err();
+    assert!(style_err.contains("REQUEST_INVALID"));
+}
+
+#[tokio::test]
+async fn test_flow_p3a_04_preflight_mock_flow_readback_and_zero_generate_clicks() {
+    let mock_server = MockFlowServer::start(MockScenario::TrueVideoEditActive)
+        .await
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service =
+        FlowRuntimeService::with_mock_bridge(paths.clone(), mock_server.base_url.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("profile_ready", "Ready Profile")
+        .unwrap();
+
+    // Create real minimal video file
+    let video_file = temp_dir.path().join("test_input.mp4");
+    std::process::Command::new("ffmpeg")
+        .args(&[
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=10:size=576x1024:rate=30",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            video_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("ffmpeg creation");
+
+    let req = FlowGenerationRequest {
+        project_id: "proj_flow_p3a".to_string(),
+        source_media_id: "media_100".to_string(),
+        profile_id: "profile_ready".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: "".to_string(),
+        prompt_source: None,
+        target_face: None,
+        max_credits: None,
+        preserve_original_audio: Some(true),
+    };
+
+    let preflight = flow_service
+        .preflight_flow_generation(req, video_file)
+        .await
+        .unwrap();
+
+    // Verify preflight readback
+    assert_eq!(
+        preflight.transformation_intent,
+        TransformationIntent::FaceReplace
+    );
+    assert_eq!(preflight.identity_mode, IdentityMode::Generated);
+    assert_eq!(preflight.prompt_source, PromptSource::SystemDefault);
+    assert!(!preflight.prompt_hash.is_empty());
+    assert!(preflight.video_attached);
+    assert!(preflight.video_edit_active);
+    assert_eq!(preflight.live_displayed_credit_cost, Some(20));
+    assert!(preflight.ready_for_paid_submission);
+    assert_eq!(preflight.blocking_code, None);
+
+    // CRITICAL: Absolute zero generate click invariant!
+    assert_eq!(
+        mock_server.generate_click_count.load(Ordering::SeqCst),
+        0,
+        "PREFLIGHT MUST NEVER DISPATCH GENERATE CLICK"
+    );
+}
+
+#[tokio::test]
+async fn test_flow_p3a_05_preflight_logged_out_profile_returns_blocking_code() {
+    let mock_server = MockFlowServer::start(MockScenario::LoggedOut)
+        .await
+        .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service =
+        FlowRuntimeService::with_mock_bridge(paths.clone(), mock_server.base_url.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("profile_logged_out", "Logged Out Profile")
+        .unwrap();
+
+    let video_file = temp_dir.path().join("test_input.mp4");
+    std::process::Command::new("ffmpeg")
+        .args(&[
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=10:size=576x1024:rate=30",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            video_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("ffmpeg creation");
+
+    let req = FlowGenerationRequest {
+        project_id: "proj_flow_p3a".to_string(),
+        source_media_id: "media_100".to_string(),
+        profile_id: "profile_logged_out".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: "".to_string(),
+        prompt_source: None,
+        target_face: None,
+        max_credits: None,
+        preserve_original_audio: Some(true),
+    };
+
+    let preflight = flow_service
+        .preflight_flow_generation(req, video_file)
+        .await
+        .unwrap();
+
+    assert!(!preflight.ready_for_paid_submission);
+    assert_eq!(preflight.blocking_code, Some("LOGIN_REQUIRED".to_string()));
+    assert_eq!(mock_server.generate_click_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_flow_p3a_real_google_flow_live_preflight_acceptance() {
+    let base_path =
+        std::path::PathBuf::from("D:/rustProject/autovideo-ai/src-tauri/.autovideo_data");
+    let paths = StoragePaths::resolve_from_base(&base_path);
+    let manager = ProjectManager::new(paths.clone());
+
+    // 1. Create or use a real project
+    let mut project = manager
+        .create_project("Phase FLOW-P3-A Real Preflight Project")
+        .unwrap();
+    let proj_dir = paths.projects_dir.join(&project.id);
+    let media_dir = proj_dir.join("media");
+    fs::create_dir_all(&media_dir).unwrap();
+
+    let source_video = std::path::PathBuf::from(
+        "D:/rustProject/autovideo-ai/test-assets/phase20c/videos/flow_acceptance_01.mp4",
+    );
+    assert!(
+        source_video.exists(),
+        "Source test video must exist at {:?}",
+        source_video
+    );
+
+    let dest_media_path = media_dir.join("flow_acceptance_01.mp4");
+    fs::copy(&source_video, &dest_media_path).unwrap();
+
+    let media_id = format!("media_{}", uuid::Uuid::new_v4());
+    project.source_media = Some(SourceMedia {
+        media_id: media_id.clone(),
+        original_file_name: "flow_acceptance_01.mp4".to_string(),
+        source_path: dest_media_path.clone(),
+        duration_ms: 9988,
+        width: 576,
+        height: 1024,
+        fps: 30.0,
+        file_size_bytes: fs::metadata(&dest_media_path).unwrap().len(),
+        container: "mp4".to_string(),
+        video_codec: "h264".to_string(),
+        audio_codec: Some("aac".to_string()),
+        has_audio: true,
+    });
+    project.editor_state = Some(ProjectEditorState {
+        active_media_id: Some(media_id.clone()),
+        ..Default::default()
+    });
+    manager.update_project(&project).unwrap();
+
+    // 2. Setup FlowRuntimeService with real sidecar
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let req = FlowGenerationRequest {
+        project_id: project.id.clone(),
+        source_media_id: media_id.clone(),
+        profile_id: "profile_2".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: "".to_string(),
+        prompt_source: None,
+        target_face: None,
+        max_credits: Some(50),
+        preserve_original_audio: Some(true),
+    };
+
+    let dest_canon = dest_media_path.canonicalize().unwrap();
+    let dest_canon_str = dest_canon.to_string_lossy().to_string();
+    let clean_dest_path = if let Some(stripped) = dest_canon_str.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(stripped)
+    } else {
+        dest_canon
+    };
+
+    println!(
+        "[FLOW-P3-A LIVE PREFLIGHT] Starting preflight with Profile 'profile_2' and video '{}'",
+        clean_dest_path.display()
+    );
+    let preflight_res = flow_service
+        .preflight_flow_generation(req, clean_dest_path)
+        .await;
+
+    match preflight_res {
+        Ok(preflight) => {
+            println!("==================================================");
+            println!("FLOW-P3-A LIVE PREFLIGHT RESULT:");
+            println!("Project ID: {}", preflight.project_id);
+            println!("Source Media ID: {}", preflight.source_media_id);
+            println!("Profile ID: {}", preflight.profile_id);
+            println!(
+                "Transformation Intent: {:?}",
+                preflight.transformation_intent
+            );
+            println!("Identity Mode: {:?}", preflight.identity_mode);
+            println!("Prompt Source: {:?}", preflight.prompt_source);
+            println!("Resolved Prompt: {}", preflight.resolved_prompt);
+            println!("Prompt Hash: {}", preflight.prompt_hash);
+            println!("Video Attached: {}", preflight.video_attached);
+            println!("Video Edit Active: {}", preflight.video_edit_active);
+            println!("Configured Model: {:?}", preflight.configured_model);
+            println!("Configured Duration: {:?}", preflight.configured_duration);
+            println!(
+                "Configured Orientation: {:?}",
+                preflight.configured_orientation
+            );
+            println!("Output Count: {}", preflight.output_count);
+            println!(
+                "Live Displayed Credit Cost: {:?}",
+                preflight.live_displayed_credit_cost
+            );
+            println!("Live Credit Balance: {:?}", preflight.live_credit_balance);
+            println!(
+                "Ready For Paid Submission: {}",
+                preflight.ready_for_paid_submission
+            );
+            println!("Blocking Code: {:?}", preflight.blocking_code);
+            println!("Checked At: {}", preflight.checked_at);
+            println!("==================================================");
+
+            assert!(
+                preflight.live_displayed_credit_cost.is_some(),
+                "Live credit cost should be read"
+            );
+            assert_eq!(preflight.prompt_source, PromptSource::SystemDefault);
+            assert!(!preflight.prompt_hash.is_empty());
+        }
+        Err(err) => {
+            println!("[FLOW-P3-A LIVE PREFLIGHT ERROR] {}", err);
+            panic!("Live preflight failed: {}", err);
+        }
+    }
+}
