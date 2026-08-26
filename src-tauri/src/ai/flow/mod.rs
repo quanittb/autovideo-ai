@@ -14,8 +14,9 @@ pub mod store;
 
 pub use browser_session::{FlowBrowserSessionManager, ManualLoginBrowserSession};
 pub use capability::{
-    FlowCapabilityContext, FlowCapabilityPolicy, FlowCapabilitySource, FlowCreditRecord,
-    FlowGenerationMode, FlowModelCapabilitiesSnapshot, FlowModelCapability,
+    FlowCapabilityContext, FlowCapabilityObservation, FlowCapabilityObservationStore,
+    FlowCapabilityPolicy, FlowCapabilitySource, FlowCreditRecord, FlowGenerationMode,
+    FlowModelCapabilitiesSnapshot, FlowModelCapability,
     OMNI_EDIT_UPLOADED_VIDEO_ESTIMATED_CREDITS_PER_GENERATION,
     OMNI_VIDEO_GENERATE_ESTIMATED_CREDITS_PER_GENERATION,
 };
@@ -30,12 +31,13 @@ pub use mock_flow_server::{MockFlowServer, MockFlowServerHandle, MockScenario};
 pub use orchestrator::{
     compute_configuration_fingerprint, FlowCancellationRegistry, FlowCostProvenance,
     FlowCreditSource, FlowCreditStatus, FlowGenerationPreflight, FlowGenerationRequest,
-    FlowOrchestrator, FlowProfileCreditStatus, FlowRuntimeService,
+    FlowOrchestrator, FlowPreflightTicket, FlowPreflightTicketStore, FlowProfileCreditStatus,
+    FlowRuntimeService,
 };
 pub use output_validator::FlowOutputValidator;
 pub use playwright_bridge::{
-    FlowAuthStatus, FlowGenerationSettings, FlowPollResult, FlowSettingsReadback, PlaywrightBridge,
-    PlaywrightSidecarProcess,
+    FlowAuthStatus, FlowGenerationSettings, FlowPollResult, FlowSettingsReadback,
+    FlowSubmissionOutcome, PlaywrightBridge, PlaywrightSidecarProcess, PreparedFlowSubmission,
 };
 pub use profile::{FlowProfileGuard, FlowProfileInfo, FlowProfileManager, FlowProfileSnapshot};
 pub use prompt_optimizer::{

@@ -423,31 +423,34 @@ impl MockFlowServer {
 <html>
 <head><title>Google Flow Mock</title></head>
 <body>
-<div id="flow-app" data-authenticated="true">
-  <textarea id="prompt-input" placeholder="Enter prompt"></textarea>
+<div id="flow-app" data-authenticated="true" data-edit-active="true">
+  <header><span data-testid="user-credits">50 credits</span></header>
+  <div id="source-video-chip" data-testid="source-chip">input.mp4</div>
+  <div class="lf-player-container">00:00:10</div>
+  <textarea id="prompt-input" placeholder="Mô tả nội dung bạn muốn chỉnh sửa"></textarea>
   <input type="file" id="video-upload" />
-  <button id="settings-button">Video · 720p · 8s crop_16_9 x2</button>
+  <button id="settings-button">Video · 720p · 10s crop_9_16 x1</button>
   <div id="settings-popover" role="menu" data-state="closed" style="display:none;">
     <button data-testid="model-select">Omni Flash</button>
-    <button role="tab" data-testid="ori-portrait" data-state="inactive">crop_9_16 9:16</button>
-    <button role="tab" data-testid="ori-landscape" data-state="active">crop_16_9 16:9</button>
+    <button role="tab" data-testid="ori-portrait" data-state="active">crop_9_16 9:16</button>
+    <button role="tab" data-testid="ori-landscape" data-state="inactive">crop_16_9 16:9</button>
     <button role="tab" data-testid="length-4s" data-state="inactive">4s</button>
     <button role="tab" data-testid="length-6s" data-state="inactive">6s</button>
-    <button role="tab" data-testid="length-8s" data-state="active">8s</button>
-    <button role="tab" data-testid="length-10s" data-state="inactive">10s</button>
-    <button role="tab" data-testid="count-x1" data-state="inactive">x1</button>
-    <button role="tab" data-testid="count-x2" data-state="active">x2</button>
+    <button role="tab" data-testid="length-8s" data-state="inactive">8s</button>
+    <button role="tab" data-testid="length-10s" data-state="active">10s</button>
+    <button role="tab" data-testid="count-x1" data-state="active">x1</button>
+    <button role="tab" data-testid="count-x2" data-state="inactive">x2</button>
     <button role="tab" data-testid="count-x3" data-state="inactive">x3</button>
     <button role="tab" data-testid="count-x4" data-state="inactive">x4</button>
-    <div id="credit-info">Quá trình tạo sẽ tốn 15 tín dụng</div>
+    <div id="credit-info">Quá trình tạo sẽ tốn 20 tín dụng</div>
   </div>
   <button id="generate-button">Generate</button>
   {}
 </div>
 <script>
-  let curLength = '8s';
-  let curOri = '16:9';
-  let curCount = 'x2';
+  let curLength = '10s';
+  let curOri = '9:16';
+  let curCount = 'x1';
 
   function updateSummary() {{
     document.getElementById('settings-button').innerText = 'Video · 720p · ' + curLength + ' ' + (curOri === '9:16' ? 'crop_9_16' : 'crop_16_9') + ' ' + curCount;

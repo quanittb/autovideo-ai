@@ -428,6 +428,7 @@ export interface FlowGenerationRequest {
   preserveOriginalAudio?: boolean;
   requestedConfig?: FlowRequestedGenerationConfig;
   configurationFingerprint?: string;
+  preflightId?: string;
 }
 
 export type FlowCostProvenance =
@@ -468,6 +469,8 @@ export interface FlowGenerationPreflight {
   readyForPaidSubmission: boolean;
   blockingCode?: string;
   checkedAt: string;
+  preflightId: string;
+  expiresAt: string;
 }
 
 export type FlowJobState =

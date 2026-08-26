@@ -58,10 +58,12 @@ impl FlowCancellationRegistry {
 // -----------------------------------------------------------------------------
 
 pub use super::capability::{
-    FlowCapabilityContext, FlowCapabilityPolicy, FlowCapabilitySource, FlowCreditRecord,
-    FlowModelCapabilitiesSnapshot, FlowModelCapability,
+    FlowCapabilityContext, FlowCapabilityObservation, FlowCapabilityObservationStore,
+    FlowCapabilityPolicy, FlowCapabilitySource, FlowCreditRecord, FlowModelCapabilitiesSnapshot,
+    FlowModelCapability,
 };
 pub use super::manifest::{FlowObservedGenerationConfig, FlowRequestedGenerationConfig};
+pub use super::playwright_bridge::{FlowSubmissionOutcome, PreparedFlowSubmission};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,11 +89,60 @@ pub struct FlowGenerationRequest {
     pub requested_config: Option<FlowRequestedGenerationConfig>,
     #[serde(default)]
     pub configuration_fingerprint: Option<String>,
+    #[serde(default)]
+    pub preflight_id: Option<String>,
 }
 
 impl FlowGenerationRequest {
     pub fn canonical_requested_config(&self) -> FlowRequestedGenerationConfig {
         self.requested_config.clone().unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowPreflightTicket {
+    pub preflight_id: String,
+    pub configuration_fingerprint: String,
+    pub profile_id: String,
+    pub project_id: String,
+    pub source_media_id: String,
+    pub prompt_hash: String,
+    pub requested_config: FlowRequestedGenerationConfig,
+    pub live_displayed_credit_cost: Option<u32>,
+    pub cost_provenance: FlowCostProvenance,
+    pub checked_at: String,
+    pub expires_at: String,
+    pub ready_for_paid_submission: bool,
+}
+
+use std::collections::HashMap;
+use std::sync::RwLock as StdRwLock;
+
+#[derive(Debug, Clone, Default)]
+pub struct FlowPreflightTicketStore {
+    tickets: Arc<StdRwLock<HashMap<String, FlowPreflightTicket>>>,
+}
+
+impl FlowPreflightTicketStore {
+    pub fn new() -> Self {
+        Self {
+            tickets: Arc::new(StdRwLock::new(HashMap::new())),
+        }
+    }
+
+    pub fn insert_ticket(&self, ticket: FlowPreflightTicket) {
+        if let Ok(mut guard) = self.tickets.write() {
+            guard.insert(ticket.preflight_id.clone(), ticket);
+        }
+    }
+
+    pub fn get_ticket(&self, preflight_id: &str) -> Option<FlowPreflightTicket> {
+        if let Ok(guard) = self.tickets.read() {
+            guard.get(preflight_id).cloned()
+        } else {
+            None
+        }
     }
 }
 
@@ -225,6 +276,10 @@ pub struct FlowGenerationPreflight {
     pub blocking_code: Option<String>,
 
     pub checked_at: String,
+    #[serde(default)]
+    pub preflight_id: String,
+    #[serde(default)]
+    pub expires_at: String,
 }
 
 // -----------------------------------------------------------------------------
@@ -322,6 +377,7 @@ impl FlowRuntimeService {
 }
 
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // 4. Flow Orchestrator Core Implementation
 // -----------------------------------------------------------------------------
 
@@ -332,6 +388,8 @@ pub struct FlowOrchestrator {
     profile_manager: FlowProfileManager,
     bridge: PlaywrightBridge,
     capability_policy: FlowCapabilityPolicy,
+    capability_observations: Arc<FlowCapabilityObservationStore>,
+    preflight_tickets: Arc<FlowPreflightTicketStore>,
 }
 
 impl FlowOrchestrator {
@@ -340,6 +398,8 @@ impl FlowOrchestrator {
         let profile_manager = FlowProfileManager::new(storage_paths.app_data_dir.clone());
         let bridge = PlaywrightBridge::new();
         let capability_policy = FlowCapabilityPolicy::for_edit_uploaded_video();
+        let capability_observations = Arc::new(FlowCapabilityObservationStore::new());
+        let preflight_tickets = Arc::new(FlowPreflightTicketStore::new());
 
         Self {
             storage_paths,
@@ -347,6 +407,8 @@ impl FlowOrchestrator {
             profile_manager,
             bridge,
             capability_policy,
+            capability_observations,
+            preflight_tickets,
         }
     }
 
@@ -355,6 +417,8 @@ impl FlowOrchestrator {
         let profile_manager = FlowProfileManager::new(storage_paths.app_data_dir.clone());
         let bridge = PlaywrightBridge::with_mock_url(mock_url);
         let capability_policy = FlowCapabilityPolicy::for_edit_uploaded_video();
+        let capability_observations = Arc::new(FlowCapabilityObservationStore::new());
+        let preflight_tickets = Arc::new(FlowPreflightTicketStore::new());
 
         Self {
             storage_paths,
@@ -362,6 +426,8 @@ impl FlowOrchestrator {
             profile_manager,
             bridge,
             capability_policy,
+            capability_observations,
+            preflight_tickets,
         }
     }
 
@@ -379,6 +445,14 @@ impl FlowOrchestrator {
 
     pub fn capability_policy(&self) -> &FlowCapabilityPolicy {
         &self.capability_policy
+    }
+
+    pub fn capability_observations(&self) -> &FlowCapabilityObservationStore {
+        &self.capability_observations
+    }
+
+    pub fn preflight_tickets(&self) -> &FlowPreflightTicketStore {
+        &self.preflight_tickets
     }
 
     pub async fn refresh_flow_credit_balance(
@@ -470,45 +544,8 @@ impl FlowOrchestrator {
         profile_id: &str,
         operation_context: FlowCapabilityContext,
     ) -> FlowModelCapabilitiesSnapshot {
-        let models = match operation_context {
-            FlowCapabilityContext::UploadedVideoEdit => {
-                vec![FlowModelCapability {
-                    model_id: "Omni Flash".to_string(),
-                    display_name: "Omni Flash".to_string(),
-                    supported_resolutions: vec!["720p".to_string(), "1080p".to_string()],
-                    supported_durations_sec: vec![10],
-                    supported_orientations: vec!["PORTRAIT".to_string(), "LANDSCAPE".to_string()],
-                    supported_output_counts: vec![1],
-                    supports_uploaded_video_edit: true,
-                    source: FlowCapabilitySource::CachedLiveObservation,
-                    context: FlowCapabilityContext::UploadedVideoEdit,
-                    observed_at: Utc::now().to_rfc3339(),
-                }]
-            }
-            FlowCapabilityContext::GenericVideoGeneration => {
-                vec![FlowModelCapability {
-                    model_id: "Omni Flash".to_string(),
-                    display_name: "Omni Flash".to_string(),
-                    supported_resolutions: vec!["720p".to_string(), "1080p".to_string()],
-                    supported_durations_sec: vec![5, 10],
-                    supported_orientations: vec!["PORTRAIT".to_string(), "LANDSCAPE".to_string()],
-                    supported_output_counts: vec![1, 2, 4],
-                    supports_uploaded_video_edit: false,
-                    source: FlowCapabilitySource::CachedLiveObservation,
-                    context: FlowCapabilityContext::GenericVideoGeneration,
-                    observed_at: Utc::now().to_rfc3339(),
-                }]
-            }
-        };
-
-        FlowModelCapabilitiesSnapshot {
-            profile_id: profile_id.to_string(),
-            operation_context,
-            models,
-            source: FlowCapabilitySource::CachedLiveObservation,
-            observed_at: Utc::now().to_rfc3339(),
-            status: "READY".to_string(),
-        }
+        self.capability_observations
+            .get_snapshot(profile_id, operation_context)
     }
 
     pub async fn start_flow_generation(
@@ -532,6 +569,7 @@ impl FlowOrchestrator {
             preserve_original_audio: Some(true),
             requested_config: None,
             configuration_fingerprint: None,
+            preflight_id: None,
         };
 
         self.start_flow_generation_with_request(request, source_video_path, None)
@@ -628,6 +666,8 @@ impl FlowOrchestrator {
             .unwrap_or("UNKNOWN");
 
         if auth_status != "READY" {
+            let preflight_id = format!("pf_{}", uuid::Uuid::new_v4());
+            let expires_at = (Utc::now() + chrono::Duration::seconds(300)).to_rfc3339();
             return Ok(FlowGenerationPreflight {
                 project_id: request.project_id,
                 source_media_id: request.source_media_id,
@@ -661,6 +701,8 @@ impl FlowOrchestrator {
                 ready_for_paid_submission: false,
                 blocking_code: Some(auth_status.to_string()),
                 checked_at: Utc::now().to_rfc3339(),
+                preflight_id,
+                expires_at,
             });
         }
 
@@ -801,6 +843,46 @@ impl FlowOrchestrator {
             }
         }
 
+        let preflight_id = format!("pf_{}", uuid::Uuid::new_v4());
+        let expires_at = (Utc::now() + chrono::Duration::seconds(300)).to_rfc3339();
+
+        if ready_for_paid_submission && video_attached && video_edit_active {
+            self.capability_observations
+                .record_observation(FlowCapabilityObservation {
+                    profile_id: request.profile_id.clone(),
+                    operation_context: FlowCapabilityContext::UploadedVideoEdit,
+                    model_id: model.clone().unwrap_or_else(|| "Omni Flash".to_string()),
+                    display_name: model.clone().unwrap_or_else(|| "Omni Flash".to_string()),
+                    supported_resolutions: vec![observed_resolution
+                        .clone()
+                        .unwrap_or_else(|| "720p".to_string())],
+                    supported_durations_sec: vec![10],
+                    supported_orientations: vec![orientation
+                        .clone()
+                        .unwrap_or_else(|| "9:16".to_string())],
+                    supported_output_counts: vec![output_count],
+                    supports_uploaded_video_edit: true,
+                    observed_at: Utc::now().to_rfc3339(),
+                    adapter_version: "flow-playwright-1.0".to_string(),
+                });
+        }
+
+        let ticket = FlowPreflightTicket {
+            preflight_id: preflight_id.clone(),
+            configuration_fingerprint: configuration_fingerprint.clone(),
+            profile_id: request.profile_id.clone(),
+            project_id: request.project_id.clone(),
+            source_media_id: request.source_media_id.clone(),
+            prompt_hash: prompt_hash.clone(),
+            requested_config: requested_config.clone(),
+            live_displayed_credit_cost,
+            cost_provenance,
+            checked_at: Utc::now().to_rfc3339(),
+            expires_at: expires_at.clone(),
+            ready_for_paid_submission,
+        };
+        self.preflight_tickets.insert_ticket(ticket);
+
         Ok(FlowGenerationPreflight {
             project_id: request.project_id,
             source_media_id: request.source_media_id,
@@ -834,6 +916,8 @@ impl FlowOrchestrator {
             ready_for_paid_submission,
             blocking_code,
             checked_at: Utc::now().to_rfc3339(),
+            preflight_id,
+            expires_at,
         })
     }
 
@@ -895,10 +979,26 @@ impl FlowOrchestrator {
             ));
         }
 
+        let max_credits = request.max_credits.ok_or_else(|| {
+            "FLOW_CREDIT_BUDGET_REQUIRED: Explicit maxCredits budget limit is mandatory for paid execution".to_string()
+        })?;
+
+        let preflight_id = request.preflight_id.as_deref().ok_or_else(|| {
+            "FLOW_PREFLIGHT_REQUIRED: Paid generation requires a valid preflightId from a successful preflight".to_string()
+        })?;
+
+        let req_fp = request
+            .configuration_fingerprint
+            .as_deref()
+            .ok_or_else(|| {
+                "FLOW_PREFLIGHT_REQUIRED: Paid generation requires configurationFingerprint"
+                    .to_string()
+            })?;
+
         let prompt_hash = calculate_prompt_hash(&clean_prompt);
         let requested_config = request.canonical_requested_config();
 
-        // Validate configuration fingerprint if supplied
+        // Validate configuration fingerprint against expected
         let expected_fingerprint = compute_configuration_fingerprint(
             &request.profile_id,
             &request.source_media_id,
@@ -908,13 +1008,51 @@ impl FlowOrchestrator {
             &requested_config,
         );
 
-        if let Some(ref fp) = request.configuration_fingerprint {
-            if fp != &expected_fingerprint {
-                return Err(
-                    "FLOW_PREFLIGHT_STALE: Preflight configuration signature is invalid or stale"
-                        .to_string(),
-                );
-            }
+        if req_fp != &expected_fingerprint {
+            return Err(
+                "FLOW_PREFLIGHT_STALE: Preflight configuration signature is invalid or stale"
+                    .to_string(),
+            );
+        }
+
+        // Validate preflight ticket from store
+        let ticket = self
+            .preflight_tickets
+            .get_ticket(preflight_id)
+            .ok_or_else(|| "FLOW_PREFLIGHT_REQUIRED: Preflight ticket not found".to_string())?;
+
+        let now_str = Utc::now().to_rfc3339();
+        if now_str > ticket.expires_at {
+            return Err("FLOW_PREFLIGHT_STALE: Preflight ticket has expired".to_string());
+        }
+
+        if ticket.project_id != request.project_id
+            || ticket.profile_id != request.profile_id
+            || ticket.source_media_id != request.source_media_id
+            || ticket.configuration_fingerprint != req_fp
+        {
+            return Err(
+                "FLOW_PREFLIGHT_STALE: Preflight configuration signature is invalid or stale"
+                    .to_string(),
+            );
+        }
+
+        if !ticket.ready_for_paid_submission {
+            return Err(
+                "FLOW_PREFLIGHT_NOT_READY: Preflight was not authorized for paid submission"
+                    .to_string(),
+            );
+        }
+
+        let live_cost = ticket.live_displayed_credit_cost.ok_or_else(|| {
+            "FLOW_PREFLIGHT_REQUIRED: Live displayed cost was not verified in preflight".to_string()
+        })?;
+
+        if live_cost > max_credits {
+            return Err(format!(
+                "FLOW_CREDIT_BUDGET_EXCEEDED: Live displayed cost ({}) exceeds max budget ({})",
+                live_cost, max_credits
+            ));
         }
 
         // Probe source video
@@ -942,17 +1080,7 @@ impl FlowOrchestrator {
         let mut credit_record = super::capability::FlowCreditRecord::default();
         let estimated = self.capability_policy.estimate_credits(plan.segments.len());
         credit_record.estimated_credits = estimated;
-        credit_record.credit_budget_limit = request.max_credits;
-
-        // Pre-check estimated budget if set
-        if let Some(max_credits) = request.max_credits {
-            if estimated > max_credits {
-                return Err(format!(
-                    "PRE_CLICK_REJECTED: Estimated credits ({}) exceed max credit budget limit ({})",
-                    estimated, max_credits
-                ));
-            }
-        }
+        credit_record.credit_budget_limit = Some(max_credits);
 
         let audio_policy = FlowFinalAudioPolicy {
             preserve_original_audio: request.preserve_original_audio.unwrap_or(true),
@@ -1211,11 +1339,57 @@ impl FlowOrchestrator {
                     }
 
                     // Pre-Click Credit Budget Sequence:
-                    let estimated_unit_cost = self.capability_policy.credits_per_generation;
+                    let session_ref = active_session.as_mut().ok_or_else(|| {
+                        "INTERNAL_ERROR: Missing active browser session".to_string()
+                    })?;
+
+                    manifest.active_segment_index = i;
+                    manifest.state = FlowJobState::Submitting;
+                    manifest.child_segments[i].state = FlowJobState::Submitting;
+
+                    let attempt_id = format!("att_{}_{}", i, Utc::now().timestamp_millis());
+
+                    // 1. Prepare video edit submission
+                    let prep = match session_ref
+                        .prepare_video_edit(
+                            &frozen_prompt,
+                            Some(&seg_input_path),
+                            Some(seg_duration),
+                            Some(&manifest.requested_generation_config),
+                            &attempt_id,
+                        )
+                        .await
+                    {
+                        Ok(p) => p,
+                        Err(e) => {
+                            if let Some(s) = active_session.take() {
+                                s.close().await;
+                            }
+                            let is_ui_changed = e.contains("FLOW_UI_CHANGED");
+                            let job_state = if is_ui_changed {
+                                FlowJobState::FlowUiChanged
+                            } else {
+                                FlowJobState::Failed
+                            };
+                            manifest.state = job_state;
+                            manifest.child_segments[i].state = job_state;
+                            manifest.error = Some(JobErrorRecord {
+                                code: if is_ui_changed {
+                                    "FLOW_UI_CHANGED".to_string()
+                                } else {
+                                    "PREPARATION_FAILED".to_string()
+                                },
+                                sanitized_message: e,
+                            });
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            return Ok(());
+                        }
+                    };
+
+                    // Validate live cost against budget
+                    let unit_live_cost = prep.live_displayed_credit_cost.unwrap_or(20);
                     if let Some(budget_limit) = manifest.credit_record.credit_budget_limit {
-                        let projected =
-                            manifest.credit_record.reserved_credits + estimated_unit_cost;
-                        if projected > budget_limit {
+                        if manifest.credit_record.reserved_credits + unit_live_cost > budget_limit {
                             if let Some(s) = active_session.take() {
                                 s.close().await;
                             }
@@ -1225,17 +1399,13 @@ impl FlowOrchestrator {
                                 code: "FLOW_CREDIT_BUDGET_EXCEEDED".to_string(),
                                 sanitized_message: format!(
                                     "PRE_CLICK_REJECTED: Submitting segment #{} requires {} credits, which exceeds budget limit of {} credits (currently reserved: {})",
-                                    i, estimated_unit_cost, budget_limit, manifest.credit_record.reserved_credits
+                                    i, unit_live_cost, budget_limit, manifest.credit_record.reserved_credits
                                 ),
                             });
                             self.store.save_manifest_atomic(&mut manifest)?;
                             return Ok(());
                         }
                     }
-
-                    manifest.active_segment_index = i;
-                    manifest.state = FlowJobState::Submitting;
-                    manifest.child_segments[i].state = FlowJobState::Submitting;
 
                     // CHECKPOINT 7: Immediately before attempt persistence & click
                     if self
@@ -1250,37 +1420,89 @@ impl FlowOrchestrator {
                         return Ok(());
                     }
 
-                    // Before click: Persist local submission attempt state FIRST!
-                    let attempt_id = format!("att_{}_{}", i, Utc::now().timestamp_millis());
+                    // Before click: Persist local submission attempt state & reserve LIVE cost
                     manifest.child_segments[i].local_submission_attempt_id =
                         Some(attempt_id.clone());
                     manifest.child_segments[i].submission_state =
                         FlowChildSubmissionState::AttemptPersisted;
-                    manifest.credit_record.reserved_credits += estimated_unit_cost;
+                    manifest.credit_record.reserved_credits += unit_live_cost;
                     self.store.save_manifest_atomic(&mut manifest)?;
 
-                    // Execute ONE browser submission via active session
-                    let session_ref = active_session.as_mut().ok_or_else(|| {
-                        "INTERNAL_ERROR: Missing active browser session".to_string()
-                    })?;
+                    let max_budget = manifest.credit_record.credit_budget_limit.unwrap_or(99999);
 
-                    match session_ref
-                        .submit(
-                            &frozen_prompt,
-                            Some(&seg_input_path),
-                            seg_duration,
+                    // Execute ONE click with pre-click validation
+                    let submit_outcome = session_ref
+                        .submit_prepared(
                             &attempt_id,
+                            unit_live_cost,
+                            max_budget,
+                            &prep.prepared_fingerprint,
+                            Some(&manifest.requested_generation_config),
                         )
-                        .await
-                    {
-                        Ok(ev) => {
+                        .await;
+
+                    match submit_outcome {
+                        Ok(FlowSubmissionOutcome::ProvenSubmitted {
+                            generation_evidence,
+                            ..
+                        }) => {
                             manifest.child_segments[i].submission_state =
                                 FlowChildSubmissionState::ProvenSubmitted;
-                            manifest.child_segments[i].submission_evidence = Some(ev.clone());
+                            manifest.child_segments[i].submission_evidence =
+                                Some(generation_evidence.clone());
                             manifest.state = FlowJobState::Generating;
                             manifest.child_segments[i].state = FlowJobState::Generating;
                             self.store.save_manifest_atomic(&mut manifest)?;
-                            ev
+                            generation_evidence
+                        }
+                        Ok(FlowSubmissionOutcome::PreClickRejected { reason, .. }) => {
+                            // Rollback reserved credits since click was NOT dispatched
+                            manifest.credit_record.reserved_credits = manifest
+                                .credit_record
+                                .reserved_credits
+                                .saturating_sub(unit_live_cost);
+                            if let Some(s) = active_session.take() {
+                                s.close().await;
+                            }
+                            let reason_str =
+                                reason.unwrap_or_else(|| "Pre-click validation failed".to_string());
+                            let is_ui_changed = reason_str.contains("FLOW_UI_CHANGED");
+                            let job_state = if is_ui_changed {
+                                FlowJobState::FlowUiChanged
+                            } else {
+                                FlowJobState::Failed
+                            };
+                            manifest.state = job_state;
+                            manifest.child_segments[i].state = job_state;
+                            manifest.error = Some(JobErrorRecord {
+                                code: if is_ui_changed {
+                                    "FLOW_UI_CHANGED".to_string()
+                                } else if reason_str.contains("FLOW_CREDIT_BUDGET_EXCEEDED") {
+                                    "FLOW_CREDIT_BUDGET_EXCEEDED".to_string()
+                                } else {
+                                    "PRE_CLICK_REJECTED".to_string()
+                                },
+                                sanitized_message: reason_str,
+                            });
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            return Ok(());
+                        }
+                        Ok(FlowSubmissionOutcome::PostClickAmbiguous { reason, .. }) => {
+                            if let Some(s) = active_session.take() {
+                                s.close().await;
+                            }
+                            manifest.state = FlowJobState::GenerationAmbiguous;
+                            manifest.child_segments[i].state = FlowJobState::GenerationAmbiguous;
+                            manifest.child_segments[i].submission_state =
+                                FlowChildSubmissionState::Ambiguous;
+                            manifest.error = Some(JobErrorRecord {
+                                code: "GENERATION_AMBIGUOUS".to_string(),
+                                sanitized_message: reason.unwrap_or_else(|| {
+                                    "Post-click transition ambiguous".to_string()
+                                }),
+                            });
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            return Ok(());
                         }
                         Err(e) => {
                             if let Some(s) = active_session.take() {

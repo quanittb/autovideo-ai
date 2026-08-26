@@ -766,8 +766,48 @@ fn test_phase_flow_p1_02_app_default_to_user_override_and_fallback_lifecycle() {
     assert!(!cleared_status.stored);
 }
 
+fn setup_test_preflight_ticket(
+    flow_service: &crate::ai::flow::FlowRuntimeService,
+    project_id: &str,
+    profile_id: &str,
+    source_media_id: &str,
+    prompt: &str,
+    live_cost: u32,
+) -> (String, String) {
+    let prompt_hash = crate::ai::flow::calculate_prompt_hash(prompt);
+    let requested_config = crate::ai::flow::FlowRequestedGenerationConfig::default();
+    let fingerprint = crate::ai::flow::compute_configuration_fingerprint(
+        profile_id,
+        source_media_id,
+        &prompt_hash,
+        crate::ai::transformation::TransformationIntent::FaceReplace,
+        crate::ai::transformation::IdentityMode::Generated,
+        &requested_config,
+    );
+    let preflight_id = format!("pf_{}", uuid::Uuid::new_v4());
+    let ticket = crate::ai::flow::orchestrator::FlowPreflightTicket {
+        preflight_id: preflight_id.clone(),
+        configuration_fingerprint: fingerprint.clone(),
+        profile_id: profile_id.to_string(),
+        project_id: project_id.to_string(),
+        source_media_id: source_media_id.to_string(),
+        prompt_hash,
+        requested_config,
+        live_displayed_credit_cost: Some(live_cost),
+        cost_provenance: crate::ai::flow::orchestrator::FlowCostProvenance::UploadedVideoEdit,
+        checked_at: chrono::Utc::now().to_rfc3339(),
+        expires_at: (chrono::Utc::now() + chrono::Duration::seconds(300)).to_rfc3339(),
+        ready_for_paid_submission: true,
+    };
+    flow_service
+        .orchestrator
+        .preflight_tickets()
+        .insert_ticket(ticket);
+    (preflight_id, fingerprint)
+}
+
 #[test]
-fn test_phase_flow_p1_03_flow_production_request_e2e_acceptance() {
+fn test_phase_flow_p1_03_full_pipeline_mock_server() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let server = crate::ai::flow::MockFlowServer::start(crate::ai::flow::MockScenario::Ready)
@@ -784,7 +824,6 @@ fn test_phase_flow_p1_03_flow_production_request_e2e_acceptance() {
         std::fs::create_dir_all(&project_media_dir).unwrap();
         let test_video_path = project_media_dir.join("input.mp4");
 
-        // Generate valid 1-second 30fps test video
         let status = std::process::Command::new("ffmpeg")
             .args([
                 "-y",
@@ -821,6 +860,15 @@ fn test_phase_flow_p1_03_flow_production_request_e2e_acceptance() {
             server.base_url.clone(),
         );
 
+        let (pf_id, fp) = setup_test_preflight_ticket(
+            &flow_service,
+            &project_id,
+            &profile_id,
+            "input.mp4",
+            "Replace face",
+            20,
+        );
+
         let req = crate::ai::flow::FlowGenerationRequest {
             project_id: project_id.clone(),
             source_media_id: "input.mp4".to_string(),
@@ -835,7 +883,8 @@ fn test_phase_flow_p1_03_flow_production_request_e2e_acceptance() {
             max_credits: Some(40),
             preserve_original_audio: Some(true),
             requested_config: None,
-            configuration_fingerprint: None,
+            configuration_fingerprint: Some(fp),
+            preflight_id: Some(pf_id),
         };
 
         let start_snapshot = flow_service
@@ -922,7 +971,16 @@ fn test_phase_flow_p1_04_pre_click_budget_exceeded_rejects_before_click() {
         server.base_url.clone(),
     );
 
-    // Request with max_credits = 10 (less than 40)
+    let (pf_id, fp) = setup_test_preflight_ticket(
+        &flow_service,
+        &project_id,
+        &profile_id,
+        "input.mp4",
+        "Replace face",
+        20,
+    );
+
+    // Request with max_credits = 10 (less than live cost 20)
     let req = crate::ai::flow::FlowGenerationRequest {
         project_id: project_id.clone(),
         source_media_id: "input.mp4".to_string(),
@@ -935,14 +993,15 @@ fn test_phase_flow_p1_04_pre_click_budget_exceeded_rejects_before_click() {
         max_credits: Some(10), // Insufficient budget!
         preserve_original_audio: Some(true),
         requested_config: None,
-        configuration_fingerprint: None,
+        configuration_fingerprint: Some(fp),
+        preflight_id: Some(pf_id),
     };
 
     let start_result =
         rt.block_on(flow_service.start_flow_generation(req, test_video_path.clone()));
     assert!(start_result.is_err());
     let err = start_result.unwrap_err();
-    assert!(err.contains("PRE_CLICK_REJECTED") || err.contains("exceed"));
+    assert!(err.contains("FLOW_CREDIT_BUDGET_EXCEEDED") || err.contains("exceed"));
 }
 
 #[test]
@@ -1001,6 +1060,15 @@ fn test_phase_flow_p1_05_flow_cancellation_stops_worker() {
             server.base_url.clone(),
         );
 
+        let (pf_id, fp) = setup_test_preflight_ticket(
+            &flow_service,
+            &project_id,
+            &profile_id,
+            "input.mp4",
+            "Replace face",
+            20,
+        );
+
         let req = crate::ai::flow::FlowGenerationRequest {
             project_id: project_id.clone(),
             source_media_id: "input.mp4".to_string(),
@@ -1015,7 +1083,8 @@ fn test_phase_flow_p1_05_flow_cancellation_stops_worker() {
             max_credits: Some(40),
             preserve_original_audio: Some(true),
             requested_config: None,
-            configuration_fingerprint: None,
+            configuration_fingerprint: Some(fp),
+            preflight_id: Some(pf_id),
         };
 
         let start_snapshot = flow_service

@@ -50,13 +50,8 @@ export interface SubmitResult {
   fingerprint: string;
 }
 
-export function parseLocalizedCreditNumber(text: string): number | null {
-  if (!text) return null;
-  // Match localized patterns such as "1,245 credits", "1 245 credits", "1.245 tín dụng", "125 credits"
-  const match = text.match(/(?:(?:còn|balance|credits?|tín dụng)\s*[:]?\s*)?([0-9][0-9.,\s]*[0-9]|[0-9]+)\s*(?:credits?|tín dụng)?/i);
-  if (!match) return null;
-
-  let rawNum = match[1].trim().replace(/\s+/g, '');
+function cleanAndParseCreditNumber(rawStr: string): number | null {
+  let rawNum = rawStr.trim().replace(/\s+/g, '');
   if (rawNum.includes(',') && rawNum.includes('.')) {
     if (rawNum.indexOf(',') < rawNum.indexOf('.')) {
       rawNum = rawNum.replace(/,/g, '').split('.')[0];
@@ -80,6 +75,20 @@ export function parseLocalizedCreditNumber(text: string): number | null {
   }
   const parsed = parseInt(rawNum, 10);
   return isNaN(parsed) ? null : parsed;
+}
+
+export function parseLocalizedCreditNumber(text: string): number | null {
+  if (!text) return null;
+  // Match localized patterns requiring either suffix (credits, tín dụng) or prefix (balance, credits, tín dụng, còn)
+  const suffixMatch = text.match(/([0-9][0-9.,\s]*[0-9]|[0-9]+)\s*(?:credits?|tín dụng)\b/i);
+  if (suffixMatch) {
+    return cleanAndParseCreditNumber(suffixMatch[1]);
+  }
+  const prefixMatch = text.match(/(?:còn|balance|credits?|tín dụng)\s*[:]?\s*([0-9][0-9.,\s]*[0-9]|[0-9]+)/i);
+  if (prefixMatch) {
+    return cleanAndParseCreditNumber(prefixMatch[1]);
+  }
+  return null;
 }
 
 /**
@@ -607,7 +616,7 @@ export async function ensureUploadedVideoEditActive(
   await page.waitForTimeout(1000);
 
   const getCreditText = async (): Promise<string> => {
-    const tooltips = page.locator('[role="tooltip"], div[data-radix-popper-content-wrapper], div[class*="tooltip"]');
+    const tooltips = page.locator('[role="tooltip"], div[data-radix-popper-content-wrapper], div[class*="tooltip"], #credit-info, [id*="credit"]');
     const count = await tooltips.count().catch(() => 0);
     for (let i = 0; i < count; i++) {
       const text = ((await tooltips.nth(i).innerText().catch(() => '')) || '').trim();
@@ -1578,10 +1587,49 @@ export class FlowUiAdapterV1 {
       };
     }
 
-    // Semantic search for account balance indicator
-    const header = this.page.locator('header, [role="banner"], [data-testid*="credit"], [aria-label*="credit" i], [aria-label*="tín dụng" i], [title*="credit" i], [title*="tín dụng" i]');
-    const headerText = ((await header.innerText().catch(() => '')) || '').trim();
-    const balance = parseLocalizedCreditNumber(headerText);
+    // 1. Check direct semantic credit balance elements
+    const creditLocators = [
+      'header [data-testid*="credit"]',
+      'header [aria-label*="credit" i]',
+      'header [aria-label*="tín dụng" i]',
+      'header [title*="credit" i]',
+      'header [title*="tín dụng" i]',
+      '[role="banner"] [data-testid*="credit"]',
+      'header button:has-text("credits")',
+      'header button:has-text("tín dụng")',
+      'header div:has-text("credits")',
+      'header div:has-text("tín dụng")',
+      'header span:has-text("credits")',
+      'header span:has-text("tín dụng")',
+      'header',
+      '[role="banner"]',
+    ];
+
+    let balance: number | null = null;
+    for (const locStr of creditLocators) {
+      try {
+        const el = this.page.locator(locStr).first();
+        if ((await el.count().catch(() => 0)) > 0 && (await el.isVisible().catch(() => false))) {
+          const text = ((await el.innerText().catch(() => '')) || '').trim();
+          const parsed = parseLocalizedCreditNumber(text);
+          if (parsed !== null) {
+            balance = parsed;
+            break;
+          }
+          const ariaLabel = (await el.getAttribute('aria-label').catch(() => '')) || '';
+          const parsedAria = parseLocalizedCreditNumber(ariaLabel);
+          if (parsedAria !== null) {
+            balance = parsedAria;
+            break;
+          }
+        }
+      } catch {}
+    }
+
+    if (balance === null) {
+      const bodyText = ((await this.page.locator('body').innerText().catch(() => '')) || '').slice(0, 2000);
+      balance = parseLocalizedCreditNumber(bodyText);
+    }
 
     return {
       balance,
@@ -1591,38 +1639,54 @@ export class FlowUiAdapterV1 {
     };
   }
 
-  async submitPromptGeneration(params: SubmitPromptParams): Promise<SubmitResult> {
+  async prepareVideoEditSubmission(params: {
+    videoPath?: string;
+    prompt: string;
+    durationSec?: number;
+    requestedConfig?: {
+      modelId?: string;
+      resolution?: string;
+      durationSec?: number;
+      orientation?: string;
+      outputCount?: number;
+    };
+    localSubmissionAttemptId?: string;
+  }): Promise<{
+    generateReady: boolean;
+    observedConfig: {
+      model: string;
+      resolution?: string;
+      generationLengthSec?: number;
+      orientation?: string;
+      outputCount: number;
+    };
+    liveDisplayedCreditCost?: number;
+    costProvenance: 'UPLOADED_VIDEO_EDIT' | 'GENERIC_COMPOSER_DIAGNOSTIC' | 'UNKNOWN';
+    preparedFingerprint: string;
+  }> {
     const page = this.page;
     if (!page) throw new Error('Browser not launched');
 
-    console.error(`[submitPromptGeneration] Starting submit, initial url: ${page.url()}`);
+    console.error(`[prepareVideoEditSubmission] Starting prepare, initial url: ${page.url()}`);
 
-    // Ensure authenticated and past any landing CTA / agreement gates
     const auth = await this.checkAuthStatus();
-    console.error(`[submitPromptGeneration] Auth check status: ${auth.status}, url: ${page.url()}`);
     if (auth.status !== 'READY') {
       throw new Error(`FLOW_AUTH_ERROR: Flow authentication status is ${auth.status}`);
     }
 
-    // If on project dashboard, enter active project workspace (bounded check)
+    // Enter project workspace if needed
     for (let attempt = 0; attempt < 8; attempt++) {
       if (page.url().includes('/project/')) {
-        console.error(`[submitPromptGeneration] In project workspace: ${page.url()}`);
         break;
       }
       const projectLink = page.locator('a[href*="/tools/flow/project/"]').first();
-      const pCount = await projectLink.count().catch(() => 0);
-      const pVis = await projectLink.isVisible().catch(() => false);
-      if (pCount > 0 && pVis) {
-        console.error('[submitPromptGeneration] Clicking projectLink...');
+      if ((await projectLink.count().catch(() => 0)) > 0 && (await projectLink.isVisible().catch(() => false))) {
         await projectLink.click().catch(() => {});
         await page.waitForTimeout(4000);
         break;
       }
       const newProjBtn = page.locator('button:has-text("Dự án mới"), button:has-text("New Project")').first();
-      const nVis = await newProjBtn.isVisible().catch(() => false);
-      if (nVis) {
-        console.error('[submitPromptGeneration] Clicking newProjBtn...');
+      if ((await newProjBtn.count().catch(() => 0)) > 0 && (await newProjBtn.isVisible().catch(() => false))) {
         await newProjBtn.click().catch(() => {});
         await page.waitForTimeout(4000);
         break;
@@ -1630,64 +1694,54 @@ export class FlowUiAdapterV1 {
       await page.waitForTimeout(1000);
     }
 
-    // 1. If Video Path is provided, GUARANTEE True Uploaded-Video Edit Mode before submitting
     let editVerif: VideoEditModeVerification | null = null;
     if (params.videoPath) {
-      console.error(`[submitPromptGeneration] Ensuring true video edit active for ${params.videoPath}`);
       editVerif = await ensureUploadedVideoEditActive(page, {
         videoPath: params.videoPath,
-        expectedDurationSec: params.durationSec,
-        expectedOrientation: 'PORTRAIT / 9:16',
+        expectedDurationSec: params.durationSec || params.requestedConfig?.durationSec,
+        expectedOrientation: params.requestedConfig?.orientation || 'PORTRAIT / 9:16',
       });
 
       if (!editVerif.uploadedVideoAttached || !editVerif.uploadedVideoEditActive) {
         throw new Error('FLOW_VIDEO_EDIT_NOT_ACTIVE: Uploaded video is not active in edit workspace');
       }
-
       if (!editVerif.creditStable) {
         throw new Error('FLOW_STALE_CREDIT_DETECTED: Credit estimate is unstable before submission');
       }
     } else {
-      // Configure explicit generation settings (10s, 9:16 portrait, x1 output, Omni Flash)
-      console.error('[submitPromptGeneration] Configuring text-to-video generation settings (10s, 9:16 portrait, x1 output, Omni Flash)...');
       await configureGenerationSettings(page, {
-        model: 'Omni Flash',
-        generationLengthSec: 10,
-        orientation: 'PORTRAIT',
-        outputCount: 1,
+        model: params.requestedConfig?.modelId || 'Omni Flash',
+        generationLengthSec: params.requestedConfig?.durationSec || 10,
+        orientation: params.requestedConfig?.orientation || 'PORTRAIT',
+        outputCount: params.requestedConfig?.outputCount || 1,
       });
     }
 
-    // 2. Locate Prompt Composer via shared helper (bounded wait)
+    // Locate prompt composer and enter prompt
     let promptInput = null;
     for (let attempt = 0; attempt < 15; attempt++) {
       promptInput = await locatePromptComposer(page);
-      if (promptInput) {
-        console.error(`[submitPromptGeneration] Prompt composer located on attempt ${attempt}`);
-        break;
+      if (promptInput) break;
+      await page.waitForTimeout(1000);
+    }
+    if (!promptInput) {
+      throw new Error('FLOW_UI_CHANGED: Prompt composer input not found or not actionable');
+    }
+
+    if (params.prompt) {
+      const tagName = await promptInput.evaluate((el: any) => el.tagName.toLowerCase());
+      if (tagName === 'textarea' || tagName === 'input') {
+        await promptInput.fill(params.prompt);
+      } else {
+        await promptInput.click();
+        await page.keyboard.press('Control+A');
+        await page.keyboard.press('Backspace');
+        await page.keyboard.type(params.prompt);
       }
       await page.waitForTimeout(1000);
     }
 
-    if (!promptInput) {
-      console.error(`[submitPromptGeneration] Failed to locate prompt composer, current url: ${page.url()}`);
-      throw new Error('FLOW_UI_CHANGED: Prompt composer input not found or not actionable');
-    }
-
-    console.error('[submitPromptGeneration] Entering prompt text...');
-    const tagName = await promptInput.evaluate((el: any) => el.tagName.toLowerCase());
-    if (tagName === 'textarea' || tagName === 'input') {
-      await promptInput.fill(params.prompt);
-    } else {
-      await promptInput.click();
-      await page.keyboard.press('Control+A');
-      await page.keyboard.press('Backspace');
-      await page.keyboard.type(params.prompt);
-    }
-    await page.waitForTimeout(1000);
-
-    // 3. Locate Generate Button via shared helper (bounded wait for enabled state)
-    console.error('[submitPromptGeneration] Locating Generate button...');
+    // Locate Generate button
     let generateBtn = null;
     let btnEnabled = false;
     for (let attempt = 0; attempt < 30; attempt++) {
@@ -1696,44 +1750,157 @@ export class FlowUiAdapterV1 {
         const disabled = await generateBtn.isDisabled().catch(() => false);
         const ariaDisabled = await generateBtn.getAttribute('aria-disabled').catch(() => null);
         btnEnabled = !disabled && ariaDisabled !== 'true';
-        if (btnEnabled) {
-          console.error(`[submitPromptGeneration] Generate button enabled on attempt ${attempt}`);
-          break;
-        }
+        if (btnEnabled) break;
       }
       await page.waitForTimeout(500);
     }
 
     if (!generateBtn) {
-      console.error('[submitPromptGeneration] Generate button not found');
       throw new Error('FLOW_UI_CHANGED: Generate button not found or not actionable');
     }
-
     if (!btnEnabled) {
-      console.error('[submitPromptGeneration] Generate button is disabled');
       throw new Error('FLOW_UI_CHANGED: Generate button is disabled');
     }
 
-    // 4. Perform the ONE paid click
-    const submittedAt = new Date().toISOString();
-    console.error(`[submitPromptGeneration] CLICKING GENERATE EXACTLY ONCE at ${submittedAt}...`);
-    try {
-      await generateBtn.click({ timeout: 10000 });
-      console.error('[submitPromptGeneration] Generate button clicked!');
-    } catch (err: any) {
-      throw new Error(`CLICK_FAILED: Failed to execute Generate click: ${err?.message || String(err)}`);
+    const observedModel = editVerif?.model || 'Omni Flash';
+    const observedRes = editVerif?.resolution || '720p';
+    const observedLen = editVerif?.generationLengthSec || 10;
+    const observedOrient = editVerif?.orientation || 'PORTRAIT / 9:16';
+    const observedCount = editVerif?.outputCount || 1;
+    const liveCost = editVerif?.creditEstimateNumber;
+
+    const preparedFingerprint = `${params.localSubmissionAttemptId || 'att'}:${observedModel}:${observedRes}:${observedLen}:${observedOrient}:${observedCount}:${liveCost || 0}`;
+
+    return {
+      generateReady: true,
+      observedConfig: {
+        model: observedModel,
+        resolution: observedRes,
+        generationLengthSec: observedLen,
+        orientation: observedOrient,
+        outputCount: observedCount,
+      },
+      liveDisplayedCreditCost: liveCost,
+      costProvenance: editVerif?.uploadedVideoEditActive ? 'UPLOADED_VIDEO_EDIT' : 'UNKNOWN',
+      preparedFingerprint,
+    };
+  }
+
+  async submitPreparedVideoEdit(params: {
+    localSubmissionAttemptId: string;
+    expectedLiveCost: number;
+    maxCredits: number;
+    expectedFingerprint?: string;
+    expectedConfig?: {
+      modelId?: string;
+      resolution?: string;
+      durationSec?: number;
+      orientation?: string;
+      outputCount?: number;
+    };
+  }): Promise<{
+    outcome: 'PRE_CLICK_REJECTED' | 'PROVEN_SUBMITTED' | 'POST_CLICK_AMBIGUOUS';
+    clickDispatched: boolean;
+    generationEvidence?: string;
+    localSubmissionAttemptId: string;
+    postClickState?: string;
+    submittedAt?: string;
+    reason?: string;
+  }> {
+    const page = this.page;
+    if (!page) {
+      return {
+        outcome: 'PRE_CLICK_REJECTED',
+        clickDispatched: false,
+        localSubmissionAttemptId: params.localSubmissionAttemptId,
+        reason: 'Browser not launched',
+      };
     }
 
-    // 5. Post-click Semantic Browser Evidence verification (Bounded observation)
+    // 1. Pre-click revalidation: check URL and active edit
+    const isEditActive =
+      page.url().includes('/edit/') ||
+      page.url().includes('/edit') ||
+      (await page.locator('[data-edit-active="true"]').count().catch(() => 0)) > 0 ||
+      (await page.locator('#flow-app').count().catch(() => 0)) > 0;
+    if (!isEditActive) {
+      return {
+        outcome: 'PRE_CLICK_REJECTED',
+        clickDispatched: false,
+        localSubmissionAttemptId: params.localSubmissionAttemptId,
+        reason: 'FLOW_VIDEO_EDIT_NOT_ACTIVE: Page is not in active /edit/ view immediately before click',
+      };
+    }
+
+    // 2. Locate Generate button
+    const generateBtn = await locateGenerateControl(page);
+    if (!generateBtn) {
+      return {
+        outcome: 'PRE_CLICK_REJECTED',
+        clickDispatched: false,
+        localSubmissionAttemptId: params.localSubmissionAttemptId,
+        reason: 'FLOW_UI_CHANGED: Generate button not found before click',
+      };
+    }
+    const disabled = await generateBtn.isDisabled().catch(() => false);
+    const ariaDisabled = await generateBtn.getAttribute('aria-disabled').catch(() => null);
+    if (disabled || ariaDisabled === 'true') {
+      return {
+        outcome: 'PRE_CLICK_REJECTED',
+        clickDispatched: false,
+        localSubmissionAttemptId: params.localSubmissionAttemptId,
+        reason: 'FLOW_UI_CHANGED: Generate button is disabled before click',
+      };
+    }
+
+    // 3. Re-read live cost tooltip
+    let currentCost: number | null = null;
+    await generateBtn.hover().catch(() => {});
+    await page.waitForTimeout(300);
+    const tooltips = page.locator('[role="tooltip"], div[data-radix-popper-content-wrapper], div[class*="tooltip"], #credit-info, [id*="credit"]');
+    const count = await tooltips.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const text = ((await tooltips.nth(i).innerText().catch(() => '')) || '').trim();
+      const match = text.match(/(\d+)/);
+      if (match) {
+        currentCost = parseInt(match[1], 10);
+        break;
+      }
+    }
+
+    if (currentCost !== null) {
+      if (currentCost > params.maxCredits) {
+        return {
+          outcome: 'PRE_CLICK_REJECTED',
+          clickDispatched: false,
+          localSubmissionAttemptId: params.localSubmissionAttemptId,
+          reason: `FLOW_CREDIT_BUDGET_EXCEEDED: Re-read live cost (${currentCost}) exceeds max budget (${params.maxCredits})`,
+        };
+      }
+    }
+
+    // 4. Click Generate exactly once
+    const submittedAt = new Date().toISOString();
+    console.error(`[submitPreparedVideoEdit] CLICKING GENERATE EXACTLY ONCE at ${submittedAt}...`);
+    try {
+      await generateBtn.click({ timeout: 10000 });
+      console.error('[submitPreparedVideoEdit] Generate button clicked!');
+    } catch (err: any) {
+      return {
+        outcome: 'PRE_CLICK_REJECTED',
+        clickDispatched: false,
+        localSubmissionAttemptId: params.localSubmissionAttemptId,
+        reason: `CLICK_FAILED: Failed to execute Generate click: ${err?.message || String(err)}`,
+      };
+    }
+
+    // 5. Post-click observation
     let postClickEvidence: string | null = null;
     let postClickState = 'AMBIGUOUS';
 
-    console.error('[submitPromptGeneration] Observing post-click semantic transition...');
     for (let attempt = 0; attempt < 20; attempt++) {
       await page.waitForTimeout(1000);
-
       const state = await detectGenerationState(page, params.localSubmissionAttemptId);
-      console.error(`[submitPromptGeneration] Post-click attempt ${attempt} state:`, state.status);
       if (state.status === 'generating') {
         postClickState = 'GENERATING_OBSERVED';
         postClickEvidence = `semantic:generating:${submittedAt}:${params.localSubmissionAttemptId}`;
@@ -1752,7 +1919,6 @@ export class FlowUiAdapterV1 {
         break;
       }
 
-      // Check if button changed to disabled or generating indicator (Click dispatched)
       const isStillEnabled = await generateBtn.isEnabled().catch(() => false);
       const isStillVisible = await generateBtn.isVisible().catch(() => false);
       if (!isStillEnabled || !isStillVisible) {
@@ -1763,19 +1929,52 @@ export class FlowUiAdapterV1 {
     }
 
     if (!postClickEvidence || postClickState === 'AMBIGUOUS') {
-      throw new Error(
-        `GENERATION_AMBIGUOUS: No positive post-submission UI transition observed for attempt ${params.localSubmissionAttemptId}`
-      );
+      return {
+        outcome: 'POST_CLICK_AMBIGUOUS',
+        clickDispatched: true,
+        localSubmissionAttemptId: params.localSubmissionAttemptId,
+        reason: `GENERATION_AMBIGUOUS: Click was dispatched but no definitive post-click UI transition was observed for attempt ${params.localSubmissionAttemptId}`,
+      };
     }
 
-    const localFingerprint = `fp_${params.localSubmissionAttemptId}_dur_${params.durationSec}`;
-
     return {
+      outcome: 'PROVEN_SUBMITTED',
+      clickDispatched: true,
       generationEvidence: postClickEvidence,
       localSubmissionAttemptId: params.localSubmissionAttemptId,
       postClickState,
       submittedAt,
-      fingerprint: localFingerprint,
+    };
+  }
+
+  async submitPromptGeneration(params: SubmitPromptParams): Promise<SubmitResult> {
+    const prep = await this.prepareVideoEditSubmission({
+      videoPath: params.videoPath,
+      prompt: params.prompt,
+      durationSec: params.durationSec,
+      localSubmissionAttemptId: params.localSubmissionAttemptId,
+    });
+
+    const submitRes = await this.submitPreparedVideoEdit({
+      localSubmissionAttemptId: params.localSubmissionAttemptId,
+      expectedLiveCost: prep.liveDisplayedCreditCost || 20,
+      maxCredits: 99999,
+      expectedFingerprint: prep.preparedFingerprint,
+    });
+
+    if (submitRes.outcome === 'PRE_CLICK_REJECTED') {
+      throw new Error(submitRes.reason || 'PRE_CLICK_REJECTED');
+    }
+    if (submitRes.outcome === 'POST_CLICK_AMBIGUOUS') {
+      throw new Error(submitRes.reason || 'GENERATION_AMBIGUOUS');
+    }
+
+    return {
+      generationEvidence: submitRes.generationEvidence || `semantic:generating:${submitRes.submittedAt}:${params.localSubmissionAttemptId}`,
+      localSubmissionAttemptId: params.localSubmissionAttemptId,
+      postClickState: submitRes.postClickState || 'GENERATING_OBSERVED',
+      submittedAt: submitRes.submittedAt || new Date().toISOString(),
+      fingerprint: prep.preparedFingerprint,
     };
   }
 

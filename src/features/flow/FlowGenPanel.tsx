@@ -210,6 +210,7 @@ export const FlowGenPanel: React.FC = () => {
         preserveOriginalAudio: true,
         requestedConfig: currentRequestedConfig,
         configurationFingerprint: preflight?.configurationFingerprint,
+        preflightId: preflight?.preflightId,
       }
     );
   };

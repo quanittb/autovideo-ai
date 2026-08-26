@@ -64,6 +64,7 @@ interface FlowJobStoreState {
       preserveOriginalAudio?: boolean;
       requestedConfig?: import('../types/contracts').FlowRequestedGenerationConfig;
       configurationFingerprint?: string;
+      preflightId?: string;
     }
   ) => Promise<void>;
   cancelFlowJob: (projectId: string, parentId: string) => Promise<void>;
@@ -331,6 +332,7 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
         preserveOriginalAudio: options?.preserveOriginalAudio,
         requestedConfig: options?.requestedConfig,
         configurationFingerprint: options?.configurationFingerprint,
+        preflightId: options?.preflightId,
       };
       const job = await flowApi.startGeneration(req);
       set((state) => ({

@@ -72,6 +72,52 @@ pub struct FlowSettingsReadback {
     pub summary_button_text: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedFlowSubmission {
+    pub generate_ready: bool,
+    pub observed_config: super::manifest::FlowObservedGenerationConfig,
+    #[serde(default)]
+    pub live_displayed_credit_cost: Option<u32>,
+    pub cost_provenance: super::orchestrator::FlowCostProvenance,
+    pub prepared_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "outcome",
+    rename_all = "SCREAMING_SNAKE_CASE",
+    rename_all_fields = "camelCase"
+)]
+pub enum FlowSubmissionOutcome {
+    #[serde(rename_all = "camelCase")]
+    PreClickRejected {
+        #[serde(default)]
+        reason: Option<String>,
+        #[serde(default)]
+        click_dispatched: bool,
+        local_submission_attempt_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    ProvenSubmitted {
+        #[serde(alias = "generationEvidence")]
+        generation_evidence: String,
+        click_dispatched: bool,
+        local_submission_attempt_id: String,
+        #[serde(default)]
+        post_click_state: Option<String>,
+        #[serde(default)]
+        submitted_at: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    PostClickAmbiguous {
+        #[serde(default)]
+        reason: Option<String>,
+        click_dispatched: bool,
+        local_submission_attempt_id: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JsonRpcRequest {
     id: String,
@@ -631,6 +677,61 @@ impl FlowActiveBrowserSession {
                 Duration::from_secs(45),
             )
             .await
+    }
+
+    pub async fn prepare_video_edit(
+        &mut self,
+        prompt: &str,
+        video_path: Option<&Path>,
+        duration_sec: Option<f64>,
+        requested_config: Option<&super::manifest::FlowRequestedGenerationConfig>,
+        local_submission_attempt_id: &str,
+    ) -> Result<PreparedFlowSubmission, String> {
+        let video_path_str = video_path.map(|p| p.to_string_lossy().to_string());
+        let val = self
+            .sidecar
+            .call_rpc(
+                "prepare_video_edit_submission",
+                serde_json::json!({
+                    "prompt": prompt,
+                    "videoPath": video_path_str,
+                    "durationSec": duration_sec,
+                    "requestedConfig": requested_config,
+                    "localSubmissionAttemptId": local_submission_attempt_id,
+                }),
+                Duration::from_secs(90),
+            )
+            .await?;
+
+        serde_json::from_value(val)
+            .map_err(|e| format!("Failed to parse prepared flow submission: {}", e))
+    }
+
+    pub async fn submit_prepared(
+        &mut self,
+        local_submission_attempt_id: &str,
+        expected_live_cost: u32,
+        max_credits: u32,
+        expected_fingerprint: &str,
+        expected_config: Option<&super::manifest::FlowRequestedGenerationConfig>,
+    ) -> Result<FlowSubmissionOutcome, String> {
+        let val = self
+            .sidecar
+            .call_rpc(
+                "submit_prepared_video_edit",
+                serde_json::json!({
+                    "localSubmissionAttemptId": local_submission_attempt_id,
+                    "expectedLiveCost": expected_live_cost,
+                    "maxCredits": max_credits,
+                    "expectedFingerprint": expected_fingerprint,
+                    "expectedConfig": expected_config,
+                }),
+                Duration::from_secs(90),
+            )
+            .await?;
+
+        serde_json::from_value(val)
+            .map_err(|e| format!("Failed to parse submission outcome: {}", e))
     }
 
     pub async fn submit(

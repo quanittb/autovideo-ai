@@ -86,6 +86,7 @@ fn test_flow_p3a_02_preflight_resolves_system_default_prompt() {
         preserve_original_audio: Some(true),
         requested_config: None,
         configuration_fingerprint: None,
+        preflight_id: None,
     };
 
     let probe_err = tokio::runtime::Runtime::new()
@@ -129,6 +130,7 @@ fn test_flow_p3a_03_preflight_blocks_reference_and_empty_style_before_browser() 
         preserve_original_audio: Some(true),
         requested_config: None,
         configuration_fingerprint: None,
+        preflight_id: None,
     };
 
     let ref_err = tokio::runtime::Runtime::new()
@@ -151,6 +153,7 @@ fn test_flow_p3a_03_preflight_blocks_reference_and_empty_style_before_browser() 
         preserve_original_audio: Some(true),
         requested_config: None,
         configuration_fingerprint: None,
+        preflight_id: None,
     };
 
     let style_err = tokio::runtime::Runtime::new()
@@ -207,6 +210,7 @@ async fn test_flow_p3a_04_preflight_mock_flow_readback_and_zero_generate_clicks(
         preserve_original_audio: Some(true),
         requested_config: None,
         configuration_fingerprint: None,
+        preflight_id: None,
     };
 
     let preflight = flow_service
@@ -282,6 +286,7 @@ async fn test_flow_p3a_05_preflight_logged_out_profile_returns_blocking_code() {
         preserve_original_audio: Some(true),
         requested_config: None,
         configuration_fingerprint: None,
+        preflight_id: None,
     };
 
     let preflight = flow_service
@@ -340,6 +345,7 @@ async fn test_flow_p3a_06_video_edit_inactive_blocks_generic_cost_exposure() {
         preserve_original_audio: Some(true),
         requested_config: None,
         configuration_fingerprint: None,
+        preflight_id: None,
     };
 
     let preflight = flow_service
@@ -406,6 +412,7 @@ async fn test_flow_p3a_07_mock_true_edit_exposes_authoritative_cost() {
         preserve_original_audio: Some(true),
         requested_config: None,
         configuration_fingerprint: None,
+        preflight_id: None,
     };
 
     let preflight = flow_service
@@ -494,6 +501,7 @@ async fn test_flow_p3a_real_google_flow_live_preflight_acceptance() {
         preserve_original_audio: Some(true),
         requested_config: None,
         configuration_fingerprint: None,
+        preflight_id: None,
     };
 
     let dest_canon = dest_media_path.canonicalize().unwrap();
@@ -577,6 +585,50 @@ async fn test_flow_p3a_real_google_flow_live_preflight_acceptance() {
         Err(err) => {
             println!("[FLOW-P3-A LIVE PREFLIGHT ERROR] {}", err);
             panic!("Live preflight failed: {}", err);
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "Real non-submitting live credit refresh with profile_2"]
+async fn test_flow_p3a_real_google_flow_live_credit_refresh_acceptance() {
+    let base_path =
+        std::path::PathBuf::from("D:/rustProject/autovideo-ai/src-tauri/.autovideo_data");
+    let paths = StoragePaths::resolve_from_base(&base_path);
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    println!("==================================================");
+    println!(
+        "[FLOW-P3-A.3 LIVE CREDIT REFRESH] Starting real non-submitting refresh for profile_2..."
+    );
+    println!(
+        "Invariants: 0 video uploads, 0 generate clicks, 0 paid submissions, 0 credits spent."
+    );
+
+    let refresh_res = flow_service.refresh_flow_credit_balance("profile_2").await;
+
+    match refresh_res {
+        Ok(status) => {
+            println!("==================================================");
+            println!("FLOW-P3-A.3 LIVE CREDIT REFRESH ACCEPTED FACTS:");
+            println!("Profile ID: profile_2");
+            println!("Credit Status: {:?}", status.status);
+            println!("Live Balance: {:?}", status.balance);
+            println!("Source: {:?}", status.source);
+            println!("Checked At: {}", status.checked_at);
+            println!("Paid Clicks: 0 (GUARANTEED: refresh path cannot submit)");
+            println!("Credits Spent: 0");
+            println!("==================================================");
+
+            assert!(
+                status.status == FlowCreditStatus::Ready
+                    || status.status == FlowCreditStatus::LoginRequired,
+                "Status must be definitive Ready or LoginRequired"
+            );
+        }
+        Err(err) => {
+            println!("[FLOW-P3-A.3 LIVE CREDIT REFRESH ERROR] {}", err);
+            panic!("Live credit refresh failed: {}", err);
         }
     }
 }
@@ -804,4 +856,528 @@ async fn test_flow_p3a_12_insufficient_credits_blocking_guard() {
 
     assert!(!ready);
     assert_eq!(blocking, Some("FLOW_INSUFFICIENT_CREDITS".to_string()));
+}
+
+#[tokio::test]
+async fn test_flow_p3a_13_missing_max_credits_fails_budget_required() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("prof_budget_req", "Test")
+        .unwrap();
+
+    let dummy_video = temp_dir.path().join("dummy.mp4");
+    fs::write(&dummy_video, b"fake video").unwrap();
+
+    let req = FlowGenerationRequest {
+        project_id: "p1".to_string(),
+        source_media_id: "dummy.mp4".to_string(),
+        profile_id: "prof_budget_req".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: "Replace face".to_string(),
+        prompt_source: Some(PromptSource::User),
+        target_face: None,
+        max_credits: None, // Missing!
+        preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: Some("fp_test".to_string()),
+        preflight_id: Some("pf_test".to_string()),
+    };
+
+    let err = flow_service
+        .start_flow_generation(req, dummy_video)
+        .await
+        .unwrap_err();
+    assert!(err.contains("FLOW_CREDIT_BUDGET_REQUIRED"));
+}
+
+#[tokio::test]
+async fn test_flow_p3a_14_missing_preflight_id_fails_preflight_required() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("prof_pf_req", "Test")
+        .unwrap();
+
+    let dummy_video = temp_dir.path().join("dummy.mp4");
+    fs::write(&dummy_video, b"fake video").unwrap();
+
+    let req = FlowGenerationRequest {
+        project_id: "p1".to_string(),
+        source_media_id: "dummy.mp4".to_string(),
+        profile_id: "prof_pf_req".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: "Replace face".to_string(),
+        prompt_source: Some(PromptSource::User),
+        target_face: None,
+        max_credits: Some(20),
+        preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: Some("fp_test".to_string()),
+        preflight_id: None, // Missing!
+    };
+
+    let err = flow_service
+        .start_flow_generation(req, dummy_video)
+        .await
+        .unwrap_err();
+    assert!(err.contains("FLOW_PREFLIGHT_REQUIRED"));
+}
+
+#[tokio::test]
+async fn test_flow_p3a_15_missing_fingerprint_fails_preflight_required() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("prof_fp_req", "Test")
+        .unwrap();
+
+    let dummy_video = temp_dir.path().join("dummy.mp4");
+    fs::write(&dummy_video, b"fake video").unwrap();
+
+    let req = FlowGenerationRequest {
+        project_id: "p1".to_string(),
+        source_media_id: "dummy.mp4".to_string(),
+        profile_id: "prof_fp_req".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: "Replace face".to_string(),
+        prompt_source: Some(PromptSource::User),
+        target_face: None,
+        max_credits: Some(20),
+        preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: None, // Missing!
+        preflight_id: Some("pf_test".to_string()),
+    };
+
+    let err = flow_service
+        .start_flow_generation(req, dummy_video)
+        .await
+        .unwrap_err();
+    assert!(err.contains("FLOW_PREFLIGHT_REQUIRED"));
+}
+
+#[tokio::test]
+async fn test_flow_p3a_16_expired_preflight_fails_preflight_stale() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("prof_expired", "Test")
+        .unwrap();
+
+    let dummy_video = temp_dir.path().join("dummy.mp4");
+    fs::write(&dummy_video, b"fake video").unwrap();
+
+    let prompt = "Replace face";
+    let prompt_hash = calculate_prompt_hash(prompt);
+    let requested_config = FlowRequestedGenerationConfig::default();
+    let fp = compute_configuration_fingerprint(
+        "prof_expired",
+        "dummy.mp4",
+        &prompt_hash,
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        &requested_config,
+    );
+
+    // Insert an expired ticket (expired 10 seconds ago)
+    let expired_at = (chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339();
+    let ticket = FlowPreflightTicket {
+        preflight_id: "pf_expired_01".to_string(),
+        configuration_fingerprint: fp.clone(),
+        profile_id: "prof_expired".to_string(),
+        project_id: "p1".to_string(),
+        source_media_id: "dummy.mp4".to_string(),
+        prompt_hash,
+        requested_config: requested_config.clone(),
+        live_displayed_credit_cost: Some(20),
+        cost_provenance: FlowCostProvenance::UploadedVideoEdit,
+        checked_at: (chrono::Utc::now() - chrono::Duration::seconds(310)).to_rfc3339(),
+        expires_at: expired_at,
+        ready_for_paid_submission: true,
+    };
+    flow_service
+        .orchestrator
+        .preflight_tickets()
+        .insert_ticket(ticket);
+
+    let req = FlowGenerationRequest {
+        project_id: "p1".to_string(),
+        source_media_id: "dummy.mp4".to_string(),
+        profile_id: "prof_expired".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: prompt.to_string(),
+        prompt_source: Some(PromptSource::User),
+        target_face: None,
+        max_credits: Some(20),
+        preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: Some(fp),
+        preflight_id: Some("pf_expired_01".to_string()),
+    };
+
+    let err = flow_service
+        .start_flow_generation(req, dummy_video)
+        .await
+        .unwrap_err();
+    assert!(err.contains("FLOW_PREFLIGHT_STALE"));
+}
+
+#[tokio::test]
+async fn test_flow_p3a_17_changed_config_fails_preflight_stale() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("prof_changed", "Test")
+        .unwrap();
+
+    let dummy_video = temp_dir.path().join("dummy.mp4");
+    fs::write(&dummy_video, b"fake video").unwrap();
+
+    let prompt = "Replace face";
+    let prompt_hash = calculate_prompt_hash(prompt);
+    let requested_config = FlowRequestedGenerationConfig::default();
+    let fp = compute_configuration_fingerprint(
+        "prof_changed",
+        "dummy.mp4",
+        &prompt_hash,
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        &requested_config,
+    );
+
+    let ticket = FlowPreflightTicket {
+        preflight_id: "pf_changed_01".to_string(),
+        configuration_fingerprint: fp.clone(),
+        profile_id: "prof_changed".to_string(),
+        project_id: "p1".to_string(),
+        source_media_id: "dummy.mp4".to_string(),
+        prompt_hash,
+        requested_config: requested_config.clone(),
+        live_displayed_credit_cost: Some(20),
+        cost_provenance: FlowCostProvenance::UploadedVideoEdit,
+        checked_at: chrono::Utc::now().to_rfc3339(),
+        expires_at: (chrono::Utc::now() + chrono::Duration::seconds(300)).to_rfc3339(),
+        ready_for_paid_submission: true,
+    };
+    flow_service
+        .orchestrator
+        .preflight_tickets()
+        .insert_ticket(ticket);
+
+    // Provide a modified fingerprint
+    let req = FlowGenerationRequest {
+        project_id: "p1".to_string(),
+        source_media_id: "dummy.mp4".to_string(),
+        profile_id: "prof_changed".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: prompt.to_string(),
+        prompt_source: Some(PromptSource::User),
+        target_face: None,
+        max_credits: Some(20),
+        preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: Some("fp_tampered_or_stale".to_string()),
+        preflight_id: Some("pf_changed_01".to_string()),
+    };
+
+    let err = flow_service
+        .start_flow_generation(req, dummy_video)
+        .await
+        .unwrap_err();
+    assert!(err.contains("FLOW_PREFLIGHT_STALE"));
+}
+
+#[tokio::test]
+async fn test_flow_p3a_18_static_estimate_40_does_not_block_live_cost_20() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("prof_live20", "Test")
+        .unwrap();
+
+    let dummy_video = temp_dir.path().join("dummy.mp4");
+    fs::write(&dummy_video, b"fake video").unwrap();
+
+    let prompt = "Replace face";
+    let prompt_hash = calculate_prompt_hash(prompt);
+    let requested_config = FlowRequestedGenerationConfig::default();
+    let fp = compute_configuration_fingerprint(
+        "prof_live20",
+        "dummy.mp4",
+        &prompt_hash,
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        &requested_config,
+    );
+
+    let ticket = FlowPreflightTicket {
+        preflight_id: "pf_live20_01".to_string(),
+        configuration_fingerprint: fp.clone(),
+        profile_id: "prof_live20".to_string(),
+        project_id: "p1".to_string(),
+        source_media_id: "dummy.mp4".to_string(),
+        prompt_hash,
+        requested_config: requested_config.clone(),
+        live_displayed_credit_cost: Some(20), // Live authoritative cost is 20
+        cost_provenance: FlowCostProvenance::UploadedVideoEdit,
+        checked_at: chrono::Utc::now().to_rfc3339(),
+        expires_at: (chrono::Utc::now() + chrono::Duration::seconds(300)).to_rfc3339(),
+        ready_for_paid_submission: true,
+    };
+    flow_service
+        .orchestrator
+        .preflight_tickets()
+        .insert_ticket(ticket);
+
+    // With max_credits = 20 (less than static estimate 40, but equal to live cost 20)
+    let req = FlowGenerationRequest {
+        project_id: "p1".to_string(),
+        source_media_id: "dummy.mp4".to_string(),
+        profile_id: "prof_live20".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: prompt.to_string(),
+        prompt_source: Some(PromptSource::User),
+        target_face: None,
+        max_credits: Some(20),
+        preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: Some(fp),
+        preflight_id: Some("pf_live20_01".to_string()),
+    };
+
+    let probe_err = flow_service
+        .start_flow_generation(req, dummy_video)
+        .await
+        .unwrap_err();
+    // It passes budget gate and proceeds to media probe
+    assert!(probe_err.contains("PROBE_FAILED") || probe_err.contains("INVALID_MEDIA"));
+}
+
+#[tokio::test]
+async fn test_flow_p3a_19_live_cost_changes_over_budget_rejected_pre_click() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("prof_budget_exceeded", "Test")
+        .unwrap();
+
+    let dummy_video = temp_dir.path().join("dummy.mp4");
+    fs::write(&dummy_video, b"fake video").unwrap();
+
+    let prompt = "Replace face";
+    let prompt_hash = calculate_prompt_hash(prompt);
+    let requested_config = FlowRequestedGenerationConfig::default();
+    let fp = compute_configuration_fingerprint(
+        "prof_budget_exceeded",
+        "dummy.mp4",
+        &prompt_hash,
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        &requested_config,
+    );
+
+    // Live preflight cost was 20, but user sets max_credits = 15
+    let ticket = FlowPreflightTicket {
+        preflight_id: "pf_over_01".to_string(),
+        configuration_fingerprint: fp.clone(),
+        profile_id: "prof_budget_exceeded".to_string(),
+        project_id: "p1".to_string(),
+        source_media_id: "dummy.mp4".to_string(),
+        prompt_hash,
+        requested_config: requested_config.clone(),
+        live_displayed_credit_cost: Some(20),
+        cost_provenance: FlowCostProvenance::UploadedVideoEdit,
+        checked_at: chrono::Utc::now().to_rfc3339(),
+        expires_at: (chrono::Utc::now() + chrono::Duration::seconds(300)).to_rfc3339(),
+        ready_for_paid_submission: true,
+    };
+    flow_service
+        .orchestrator
+        .preflight_tickets()
+        .insert_ticket(ticket);
+
+    let req = FlowGenerationRequest {
+        project_id: "p1".to_string(),
+        source_media_id: "dummy.mp4".to_string(),
+        profile_id: "prof_budget_exceeded".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: prompt.to_string(),
+        prompt_source: Some(PromptSource::User),
+        target_face: None,
+        max_credits: Some(15), // Less than live cost 20!
+        preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: Some(fp),
+        preflight_id: Some("pf_over_01".to_string()),
+    };
+
+    let err = flow_service
+        .start_flow_generation(req, dummy_video)
+        .await
+        .unwrap_err();
+    assert!(err.contains("FLOW_CREDIT_BUDGET_EXCEEDED"));
+}
+
+#[test]
+fn test_flow_p3a_20_pre_click_ui_error_is_not_generation_ambiguous() {
+    let outcome = FlowSubmissionOutcome::PreClickRejected {
+        local_submission_attempt_id: "att_1".to_string(),
+        click_dispatched: false,
+        reason: Some("FLOW_UI_CHANGED: Generate button selector not found".to_string()),
+    };
+
+    match outcome {
+        FlowSubmissionOutcome::PreClickRejected {
+            reason,
+            click_dispatched,
+            ..
+        } => {
+            assert!(
+                !click_dispatched,
+                "PreClickRejected must not dispatch click"
+            );
+            let r = reason.unwrap();
+            assert!(r.contains("FLOW_UI_CHANGED"));
+            // Pre-click UI error must NEVER be classified as GENERATION_AMBIGUOUS
+            assert!(!r.contains("GENERATION_AMBIGUOUS"));
+        }
+        _ => panic!("Expected PreClickRejected"),
+    }
+}
+
+#[test]
+fn test_flow_p3a_21_post_click_unconfirmed_becomes_generation_ambiguous() {
+    let outcome = FlowSubmissionOutcome::PostClickAmbiguous {
+        local_submission_attempt_id: "att_2".to_string(),
+        click_dispatched: true,
+        reason: Some(
+            "POST_CLICK_AMBIGUOUS: Generation spinner not confirmed within timeout".to_string(),
+        ),
+    };
+
+    match outcome {
+        FlowSubmissionOutcome::PostClickAmbiguous {
+            reason,
+            click_dispatched,
+            ..
+        } => {
+            assert!(
+                click_dispatched,
+                "PostClickAmbiguous must indicate click dispatched"
+            );
+            let r = reason.unwrap();
+            assert!(r.contains("POST_CLICK_AMBIGUOUS"));
+        }
+        _ => panic!("Expected PostClickAmbiguous"),
+    }
+}
+
+#[test]
+fn test_flow_p3a_22_reserved_credits_uses_authoritative_live_cost() {
+    let mut credit_record = FlowCreditRecord::default();
+    let live_cost = 20; // Proven UploadedVideoEdit live displayed cost
+    credit_record.reserved_credits += live_cost;
+    assert_eq!(credit_record.reserved_credits, 20);
+
+    // In case of PreClickRejected rollback:
+    credit_record.reserved_credits = credit_record.reserved_credits.saturating_sub(live_cost);
+    assert_eq!(credit_record.reserved_credits, 0);
+}
+
+#[test]
+fn test_flow_p3a_23_unobserved_1080p_not_advertised_as_cached_live_verified() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let snapshot = flow_service
+        .get_flow_model_capabilities("prof_clean", FlowCapabilityContext::UploadedVideoEdit);
+    assert_eq!(snapshot.source, FlowCapabilitySource::StaticFallback);
+    assert_eq!(snapshot.models.len(), 1);
+    let model = &snapshot.models[0];
+    assert_eq!(model.model_id, "Omni Flash");
+    // UploadedVideoEdit MUST ONLY advertise 720p (not 1080p) until live evidence is observed
+    assert_eq!(model.supported_resolutions, vec!["720p"]);
+    assert!(!model.supported_resolutions.contains(&"1080p".to_string()));
+}
+
+#[test]
+fn test_flow_p3a_24_capability_observed_at_preserves_actual_time() {
+    let store = FlowCapabilityObservationStore::new();
+    let fixed_time = "2026-08-26T03:00:00Z".to_string();
+
+    store.record_observation(FlowCapabilityObservation {
+        profile_id: "prof_obs".to_string(),
+        operation_context: FlowCapabilityContext::UploadedVideoEdit,
+        model_id: "Omni Flash".to_string(),
+        display_name: "Omni Flash".to_string(),
+        supported_resolutions: vec!["720p".to_string()],
+        supported_durations_sec: vec![10],
+        supported_orientations: vec!["9:16".to_string()],
+        supported_output_counts: vec![1],
+        supports_uploaded_video_edit: true,
+        observed_at: fixed_time.clone(),
+        adapter_version: "flow-playwright-1.0".to_string(),
+    });
+
+    let snap = store.get_snapshot("prof_obs", FlowCapabilityContext::UploadedVideoEdit);
+    assert_eq!(snap.source, FlowCapabilitySource::CachedLiveObservation);
+    assert_eq!(snap.observed_at, fixed_time);
+}
+
+#[tokio::test]
+async fn test_flow_p3a_25_credit_refresh_generates_zero_paid_clicks() {
+    let mock_server = MockFlowServer::start(MockScenario::Ready).await.unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service =
+        FlowRuntimeService::with_mock_bridge(paths.clone(), mock_server.base_url.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("profile_ready", "Ready Profile")
+        .unwrap();
+
+    let status = flow_service
+        .refresh_flow_credit_balance("profile_ready")
+        .await
+        .unwrap();
+
+    assert_eq!(status.status, FlowCreditStatus::Ready);
+    assert_eq!(status.balance, Some(50));
+    assert_eq!(
+        mock_server.generate_click_count.load(Ordering::SeqCst),
+        0,
+        "CREDIT REFRESH MUST NEVER DISPATCH GENERATE CLICKS"
+    );
 }

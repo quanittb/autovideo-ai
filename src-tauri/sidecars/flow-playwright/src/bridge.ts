@@ -57,6 +57,14 @@ export class FlowRpcBridge {
           const creditRes = await this.adapter.readCreditBalance();
           return { id: msg.id, result: creditRes };
 
+        case 'prepare_video_edit_submission':
+          const prepRes = await this.adapter.prepareVideoEditSubmission(msg.params);
+          return { id: msg.id, result: prepRes };
+
+        case 'submit_prepared_video_edit':
+          const subRes = await this.adapter.submitPreparedVideoEdit(msg.params);
+          return { id: msg.id, result: subRes };
+
         case 'close_browser':
           await this.adapter.closeBrowser();
           return { id: msg.id, result: { success: true } };

@@ -250,11 +250,12 @@ fn test_flow_p2_03_empty_prompt_and_system_default_preservation() {
         preserve_original_audio: Some(true),
         requested_config: None,
         configuration_fingerprint: None,
+        preflight_id: None,
     };
 
     let probe_err = tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(flow_service.start_flow_generation(req_face_empty, video_file.clone()))
+        .block_on(flow_service.preflight_flow_generation(req_face_empty, video_file.clone()))
         .unwrap_err();
     // It passed prompt check and reached media probe!
     assert!(
@@ -277,11 +278,12 @@ fn test_flow_p2_03_empty_prompt_and_system_default_preservation() {
         preserve_original_audio: Some(true),
         requested_config: None,
         configuration_fingerprint: None,
+        preflight_id: None,
     };
 
     let style_err = tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(flow_service.start_flow_generation(req_style_empty, video_file.clone()))
+        .block_on(flow_service.preflight_flow_generation(req_style_empty, video_file.clone()))
         .unwrap_err();
     assert!(style_err.contains("REQUEST_INVALID"));
 
@@ -299,11 +301,12 @@ fn test_flow_p2_03_empty_prompt_and_system_default_preservation() {
         preserve_original_audio: Some(true),
         requested_config: None,
         configuration_fingerprint: None,
+        preflight_id: None,
     };
 
     let ref_err = tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(flow_service.start_flow_generation(req_ref, video_file))
+        .block_on(flow_service.preflight_flow_generation(req_ref, video_file))
         .unwrap_err();
     assert!(ref_err.contains("FLOW_REFERENCE_IDENTITY_NOT_SUPPORTED"));
 }

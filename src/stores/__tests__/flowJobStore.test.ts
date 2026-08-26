@@ -274,6 +274,8 @@ describe('flowJobStore', () => {
       liveDisplayedCreditCost: 20,
       liveCreditBalance: 100,
       costProvenance: 'UPLOADED_VIDEO_EDIT',
+      preflightId: 'pf_mock_123',
+      expiresAt: '2026-08-25T00:05:00Z',
       readyForPaidSubmission: true,
       checkedAt: '2026-08-25T00:00:00Z',
     });
