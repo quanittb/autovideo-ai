@@ -5,6 +5,9 @@ import {
   FlowJobSnapshot,
   FlowProfileInfo,
   FlowGenerationPreflight,
+  FlowProfileCreditStatus,
+  FlowModelCapabilitiesSnapshot,
+  FlowCapabilityContext,
   GeminiCredentialStatus,
   PromptSource,
   TransformationIntent,
@@ -25,6 +28,10 @@ interface FlowJobStoreState {
   isLoadingProfiles: boolean;
   error: string | null;
 
+  creditStatusByProfile: Record<string, FlowProfileCreditStatus>;
+  isRefreshingCreditByProfile: Record<string, boolean>;
+  capabilitiesByProfileAndContext: Record<string, FlowModelCapabilitiesSnapshot>;
+
   loadProfiles: () => Promise<void>;
   createProfile: (profileId: string, name: string) => Promise<void>;
   selectProfile: (profileId: string) => void;
@@ -32,11 +39,17 @@ interface FlowJobStoreState {
   closeProfileBrowser: (profileId: string) => Promise<void>;
   verifyProfileLogin: (profileId: string) => Promise<string>;
   refreshProfileStatus: (profileId: string) => Promise<string>;
+  refreshCreditBalance: (profileId: string) => Promise<FlowProfileCreditStatus>;
+  fetchModelCapabilities: (
+    profileId: string,
+    context?: FlowCapabilityContext
+  ) => Promise<FlowModelCapabilitiesSnapshot>;
   loadGeminiStatus: () => Promise<void>;
   testGeminiApiKey: () => Promise<GeminiCredentialStatus>;
   loadFlowJobs: (projectId: string) => Promise<void>;
   preflightFlowJob: (request: FlowGenerationRequest) => Promise<FlowGenerationPreflight>;
   clearPreflight: () => void;
+  invalidatePreflight: () => void;
   startFlowJob: (
     projectId: string,
     profileId: string,
@@ -49,6 +62,8 @@ interface FlowJobStoreState {
       targetFace?: TargetFaceSelection;
       maxCredits?: number;
       preserveOriginalAudio?: boolean;
+      requestedConfig?: import('../types/contracts').FlowRequestedGenerationConfig;
+      configurationFingerprint?: string;
     }
   ) => Promise<void>;
   cancelFlowJob: (projectId: string, parentId: string) => Promise<void>;
@@ -70,6 +85,9 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
   isPreflighting: false,
   isLoadingProfiles: false,
   error: null,
+  creditStatusByProfile: {},
+  isRefreshingCreditByProfile: {},
+  capabilitiesByProfileAndContext: {},
 
   loadProfiles: async () => {
     set({ isLoadingProfiles: true, error: null });
@@ -169,6 +187,78 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
     return await get().verifyProfileLogin(profileId);
   },
 
+  refreshCreditBalance: async (profileId: string) => {
+    if (get().isRefreshingCreditByProfile[profileId]) {
+      const existing = get().creditStatusByProfile[profileId];
+      if (existing) return existing;
+    }
+
+    set((state) => ({
+      isRefreshingCreditByProfile: {
+        ...state.isRefreshingCreditByProfile,
+        [profileId]: true,
+      },
+    }));
+
+    try {
+      const status = await flowApi.refreshCreditBalance(profileId);
+      set((state) => ({
+        creditStatusByProfile: {
+          ...state.creditStatusByProfile,
+          [profileId]: status,
+        },
+        isRefreshingCreditByProfile: {
+          ...state.isRefreshingCreditByProfile,
+          [profileId]: false,
+        },
+      }));
+      return status;
+    } catch (err: any) {
+      const fallback: FlowProfileCreditStatus = {
+        profileId,
+        balance: undefined,
+        status: 'ERROR',
+        checkedAt: new Date().toISOString(),
+        source: 'UNKNOWN',
+      };
+      set((state) => ({
+        creditStatusByProfile: {
+          ...state.creditStatusByProfile,
+          [profileId]: fallback,
+        },
+        isRefreshingCreditByProfile: {
+          ...state.isRefreshingCreditByProfile,
+          [profileId]: false,
+        },
+      }));
+      return fallback;
+    }
+  },
+
+  fetchModelCapabilities: async (profileId: string, context: FlowCapabilityContext = 'UPLOADED_VIDEO_EDIT') => {
+    const key = `${profileId}:${context}`;
+    try {
+      const snapshot = await flowApi.getModelCapabilities(profileId, context);
+      set((state) => ({
+        capabilitiesByProfileAndContext: {
+          ...state.capabilitiesByProfileAndContext,
+          [key]: snapshot,
+        },
+      }));
+      return snapshot;
+    } catch (err: any) {
+      const emptySnapshot: FlowModelCapabilitiesSnapshot = {
+        profileId,
+        operationContext: context,
+        models: [],
+        source: 'UNKNOWN',
+        observedAt: new Date().toISOString(),
+        status: 'ERROR',
+      };
+      return emptySnapshot;
+    }
+  },
+
   loadGeminiStatus: async () => {
     try {
       const status = await flowApi.getGeminiStatus();
@@ -214,6 +304,10 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
     set({ preflight: null });
   },
 
+  invalidatePreflight: () => {
+    set({ preflight: null });
+  },
+
   startFlowJob: async (
     projectId,
     profileId,
@@ -235,6 +329,8 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
         targetFace: options?.targetFace,
         maxCredits: options?.maxCredits,
         preserveOriginalAudio: options?.preserveOriginalAudio,
+        requestedConfig: options?.requestedConfig,
+        configurationFingerprint: options?.configurationFingerprint,
       };
       const job = await flowApi.startGeneration(req);
       set((state) => ({

@@ -193,6 +193,8 @@ pub fn run() {
             cancel_flow_generation,
             get_flow_job_status,
             list_flow_jobs,
+            refresh_flow_credit_balance,
+            get_flow_model_capabilities,
             open_flow_output_artifact,
             reveal_flow_output_in_folder,
             use_flow_output_in_project,

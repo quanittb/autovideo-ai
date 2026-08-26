@@ -50,6 +50,38 @@ export interface SubmitResult {
   fingerprint: string;
 }
 
+export function parseLocalizedCreditNumber(text: string): number | null {
+  if (!text) return null;
+  // Match localized patterns such as "1,245 credits", "1 245 credits", "1.245 tín dụng", "125 credits"
+  const match = text.match(/(?:(?:còn|balance|credits?|tín dụng)\s*[:]?\s*)?([0-9][0-9.,\s]*[0-9]|[0-9]+)\s*(?:credits?|tín dụng)?/i);
+  if (!match) return null;
+
+  let rawNum = match[1].trim().replace(/\s+/g, '');
+  if (rawNum.includes(',') && rawNum.includes('.')) {
+    if (rawNum.indexOf(',') < rawNum.indexOf('.')) {
+      rawNum = rawNum.replace(/,/g, '').split('.')[0];
+    } else {
+      rawNum = rawNum.replace(/\./g, '').split(',')[0];
+    }
+  } else if (rawNum.includes(',')) {
+    const parts = rawNum.split(',');
+    if (parts.length > 1 && parts[parts.length - 1].length === 3) {
+      rawNum = rawNum.replace(/,/g, '');
+    } else {
+      rawNum = parts[0];
+    }
+  } else if (rawNum.includes('.')) {
+    const parts = rawNum.split('.');
+    if (parts.length > 1 && parts[parts.length - 1].length === 3) {
+      rawNum = rawNum.replace(/\./g, '');
+    } else {
+      rawNum = parts[0];
+    }
+  }
+  const parsed = parseInt(rawNum, 10);
+  return isNaN(parsed) ? null : parsed;
+}
+
 /**
  * Shared Helper: Locates the active prompt composer input on the Flow workspace.
  * Supports textarea, contenteditable div, [role="textbox"].
@@ -1350,6 +1382,7 @@ export class FlowUiAdapterV1 {
     generateLocated: boolean;
     generateEnabled: boolean;
     model?: string;
+    resolution?: string;
     generationLengthSec?: number;
     orientation?: string;
     outputCount?: number;
@@ -1482,9 +1515,9 @@ export class FlowUiAdapterV1 {
           .locator('header, [role="banner"], [data-testid*="credit"], [class*="header"]')
           .innerText()
           .catch(() => '')) || '';
-      const balanceMatch = headerText.match(/(\d+)\s*(tín dụng|credits)/i);
-      if (balanceMatch) {
-        liveCreditBalance = parseInt(balanceMatch[1], 10);
+      const parsedBalance = parseLocalizedCreditNumber(headerText);
+      if (parsedBalance !== null) {
+        liveCreditBalance = parsedBalance;
       }
     } catch {}
 
@@ -1506,6 +1539,7 @@ export class FlowUiAdapterV1 {
       generateLocated,
       generateEnabled,
       model: isVideoRequest ? videoEditVerification?.model : settingsReadback?.model,
+      resolution: isVideoRequest ? videoEditVerification?.resolution : undefined,
       generationLengthSec: isVideoRequest ? videoEditVerification?.generationLengthSec : settingsReadback?.generationLengthSec,
       orientation: isVideoRequest ? videoEditVerification?.orientation : settingsReadback?.orientation,
       outputCount: isVideoRequest ? (videoEditVerification?.outputCount || 1) : (settingsReadback?.outputCount || 1),
@@ -1516,6 +1550,44 @@ export class FlowUiAdapterV1 {
       liveCreditBalance,
       summaryButtonText: settingsReadback?.summaryButtonText,
       videoEditVerification,
+    };
+  }
+
+  async readCreditBalance(): Promise<{
+    balance: number | null;
+    status: 'READY' | 'LOGIN_REQUIRED' | 'FLOW_UI_CHANGED' | 'UNKNOWN' | 'ERROR';
+    source: 'LIVE_FLOW_UI' | 'UNKNOWN';
+    checkedAt: string;
+  }> {
+    if (!this.page) throw new Error('Browser not launched');
+    const auth = await this.checkAuthStatus();
+    if (auth.status === 'LOGIN_REQUIRED') {
+      return {
+        balance: null,
+        status: 'LOGIN_REQUIRED',
+        source: 'UNKNOWN',
+        checkedAt: new Date().toISOString(),
+      };
+    }
+    if (auth.status !== 'READY') {
+      return {
+        balance: null,
+        status: (auth.status as any) || 'UNKNOWN',
+        source: 'UNKNOWN',
+        checkedAt: new Date().toISOString(),
+      };
+    }
+
+    // Semantic search for account balance indicator
+    const header = this.page.locator('header, [role="banner"], [data-testid*="credit"], [aria-label*="credit" i], [aria-label*="tín dụng" i], [title*="credit" i], [title*="tín dụng" i]');
+    const headerText = ((await header.innerText().catch(() => '')) || '').trim();
+    const balance = parseLocalizedCreditNumber(headerText);
+
+    return {
+      balance,
+      status: 'READY',
+      source: balance !== null ? 'LIVE_FLOW_UI' : 'UNKNOWN',
+      checkedAt: new Date().toISOString(),
     };
   }
 

@@ -14,18 +14,23 @@ pub mod store;
 
 pub use browser_session::{FlowBrowserSessionManager, ManualLoginBrowserSession};
 pub use capability::{
-    FlowCapabilityPolicy, FlowCreditRecord, FlowGenerationMode,
-    OMNI_EDIT_UPLOADED_VIDEO_CREDITS_PER_GENERATION, OMNI_VIDEO_GENERATE_CREDITS_PER_GENERATION,
+    FlowCapabilityContext, FlowCapabilityPolicy, FlowCapabilitySource, FlowCreditRecord,
+    FlowGenerationMode, FlowModelCapabilitiesSnapshot, FlowModelCapability,
+    OMNI_EDIT_UPLOADED_VIDEO_ESTIMATED_CREDITS_PER_GENERATION,
+    OMNI_VIDEO_GENERATE_ESTIMATED_CREDITS_PER_GENERATION,
 };
 pub use manifest::{
     FlowChildSegmentRecord, FlowChildSubmissionState, FlowFinalAudioPolicy, FlowGenerationManifest,
-    FlowJobEventPayload, FlowJobSnapshot, FlowJobState, FlowOutputArtifactRecord, FlowSegmentPlan,
+    FlowJobEventPayload, FlowJobSnapshot, FlowJobState, FlowObservedGenerationConfig,
+    FlowOutputArtifactRecord, FlowRequestedGenerationConfig, FlowSegmentPlan,
+    CURRENT_FLOW_MANIFEST_SCHEMA_VERSION,
 };
 pub use manual_chrome::{ManualChromeProcess, SystemChromeLauncher};
 pub use mock_flow_server::{MockFlowServer, MockFlowServerHandle, MockScenario};
 pub use orchestrator::{
-    FlowCancellationRegistry, FlowCostProvenance, FlowGenerationPreflight, FlowGenerationRequest,
-    FlowOrchestrator, FlowRuntimeService,
+    compute_configuration_fingerprint, FlowCancellationRegistry, FlowCostProvenance,
+    FlowCreditSource, FlowCreditStatus, FlowGenerationPreflight, FlowGenerationRequest,
+    FlowOrchestrator, FlowProfileCreditStatus, FlowRuntimeService,
 };
 pub use output_validator::FlowOutputValidator;
 pub use playwright_bridge::{

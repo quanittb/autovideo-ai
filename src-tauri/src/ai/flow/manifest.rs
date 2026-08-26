@@ -7,7 +7,53 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const CURRENT_FLOW_MANIFEST_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_FLOW_MANIFEST_SCHEMA_VERSION: u32 = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowRequestedGenerationConfig {
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub duration_sec: Option<u32>,
+    #[serde(default)]
+    pub orientation: Option<String>,
+    #[serde(default = "default_output_count")]
+    pub output_count: u32,
+}
+
+fn default_output_count() -> u32 {
+    1
+}
+
+impl Default for FlowRequestedGenerationConfig {
+    fn default() -> Self {
+        Self {
+            model_id: Some("Omni Flash".to_string()),
+            resolution: Some("720p".to_string()),
+            duration_sec: Some(10),
+            orientation: Some("PORTRAIT".to_string()),
+            output_count: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowObservedGenerationConfig {
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub duration_sec: Option<u32>,
+    #[serde(default)]
+    pub orientation: Option<String>,
+    #[serde(default)]
+    pub output_count: Option<u32>,
+}
 
 // -----------------------------------------------------------------------------
 // 1. 21-State Flow Machine
@@ -200,6 +246,10 @@ pub struct FlowGenerationManifest {
     pub identity_mode: crate::ai::transformation::IdentityMode,
     #[serde(default)]
     pub target_face: Option<crate::ai::transformation::TargetFaceSelection>,
+    #[serde(default)]
+    pub requested_generation_config: FlowRequestedGenerationConfig,
+    #[serde(default)]
+    pub observed_generation_config_at_submission: Option<FlowObservedGenerationConfig>,
     pub submitted_prompt: String,
     pub prompt_hash: String,
     pub prompt_source: PromptSource,
@@ -231,6 +281,7 @@ impl FlowGenerationManifest {
         transformation_intent: crate::ai::transformation::TransformationIntent,
         identity_mode: crate::ai::transformation::IdentityMode,
         target_face: Option<crate::ai::transformation::TargetFaceSelection>,
+        requested_generation_config: FlowRequestedGenerationConfig,
         submitted_prompt: String,
         prompt_hash: String,
         prompt_source: PromptSource,
@@ -256,6 +307,8 @@ impl FlowGenerationManifest {
             transformation_intent,
             identity_mode,
             target_face,
+            requested_generation_config,
+            observed_generation_config_at_submission: None,
             submitted_prompt,
             prompt_hash,
             prompt_source,
@@ -294,6 +347,8 @@ impl FlowGenerationManifest {
             transformation_intent: Some(self.transformation_intent),
             identity_mode: Some(self.identity_mode),
             target_face: self.target_face.clone(),
+            requested_generation_config: self.requested_generation_config.clone(),
+            observed_generation_config: self.observed_generation_config_at_submission.clone(),
             state: self.state,
             state_revision: self.state_revision,
             active_segment_index: self.active_segment_index,
@@ -334,6 +389,10 @@ pub struct FlowJobSnapshot {
     pub identity_mode: Option<crate::ai::transformation::IdentityMode>,
     #[serde(default)]
     pub target_face: Option<crate::ai::transformation::TargetFaceSelection>,
+    #[serde(default)]
+    pub requested_generation_config: FlowRequestedGenerationConfig,
+    #[serde(default)]
+    pub observed_generation_config: Option<FlowObservedGenerationConfig>,
     pub state: FlowJobState,
     pub state_revision: u64,
     pub active_segment_index: usize,

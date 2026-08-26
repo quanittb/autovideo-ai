@@ -1,8 +1,8 @@
-# Phase FLOW-P3-A Report: Real Google Flow Production Preflight & Live Credit Readback
+# Phase FLOW-P3-A Report: Real Google Flow Production Preflight, Capability Contracts & Live Credit Readback
 
 ## 1. Executive Summary & Zero-Spend Confirmation
 
-Phase **FLOW-P3-A** establishes and validates the **dedicated production preflight inspection** for Google Flow generative video editing.
+Phase **FLOW-P3-A** establishes and validates the **dedicated production preflight inspection, capability provenance contract, Manifest Schema v4, and profile-scoped credit management** for Google Flow generative video editing.
 
 - **Total Accounting for Phase FLOW-P3-A**:
   - `FLOW_REAL_PREFLIGHTS`: `1` (Live inspection executed on `flow_acceptance_01.mp4` via authenticated profile `profile_2`)
@@ -12,9 +12,11 @@ Phase **FLOW-P3-A** establishes and validates the **dedicated production preflig
   - `PRUNA_CALLS`: `0` (`DEFERRED_NOT_CONFIGURED`)
   - `BRIA_CALLS`: `0` (`DEFERRED_NOT_CONFIGURED`)
 - **Phase Decision**: **`PHASE_FLOW_P3A_FREEZE_STATUS = PASSED`**
-  - Production preflight API (`preflight_flow_generation`) successfully validates requests, resolves project media via canonical `mediaId`, verifies browser session state, inspects live cost estimates, and halts before the paid Generate click.
+  - Production preflight API (`preflight_flow_generation`) successfully validates requests, resolves project media via canonical `mediaId`, verifies browser session state, inspects live cost estimates, reads live profile credit balance, and halts before the paid Generate click.
+  - Manifest Schema version upgraded to `4` with full backward compatibility for v1/v2/v3, persisting `requested_generation_config` and `observed_generation_config_at_submission`.
+  - Deterministic configuration fingerprinting (`sha256`) guarantees that any change in prompt, profile, media, model, resolution, duration, orientation, or output count invalidates preflight authorization (`FLOW_PREFLIGHT_STALE`).
   - Zero mock status returned in live environment; real Flow session communication confirmed.
-  - Full automated regression test suite (`220 / 220` tests) passing with zero errors.
+  - Full automated regression test suite (`227 / 227` tests) passing with zero errors.
 
 ---
 
@@ -25,10 +27,11 @@ Unlike `start_flow_generation` which creates a persistent `FlowGenerationManifes
 1. **Canonical Media Resolution**: Securely resolves `sourceMediaId` (or fallback active media) within the project boundary without accepting unconfined absolute paths from the client.
 2. **Intent & Mode Validation**: Strictly validates transformation intent and identity mode, resolving empty prompts for `FACE_REPLACE` + `GENERATED` to the system-default deterministic preservation prompt.
 3. **Non-Submitting Sidecar Inspection**: Connects to the authenticated Playwright sidecar (`dryRunPreflight`), opens the project workspace, verifies true video edit mode (`/edit/`), attaches the video, applies settings, and inspects the live credit tooltip and credit balance.
-4. **Hard Stop Invariant**: Closes the inspection session immediately without generating a submission attempt ID, mutating the job store, or clicking Generate.
+4. **Configuration Fingerprinting**: Computes a deterministic SHA-256 fingerprint over all generation parameters; submission checks this fingerprint and rejects if stale.
+5. **Hard Stop Invariant**: Closes the inspection session immediately without generating a submission attempt ID, mutating the job store, or clicking Generate.
 
 ```
-[UI / IPC Request] (projectId, sourceMediaId, profileId, intent, identityMode)
+[UI / IPC Request] (projectId, sourceMediaId, profileId, requestedConfig, fingerprint)
        │
        ▼
 [Backend Canonical Media Resolver] (Validates project path confinement & probes facts)
@@ -40,37 +43,33 @@ Unlike `start_flow_generation` which creates a persistent `FlowGenerationManifes
 [Playwright Sidecar: dryRunPreflight]
    ├── Workspace verification
    ├── Video attach & True /edit/ mode activation
-   ├── Prompt entry & Settings configuration
+   ├── Model, Resolution, Duration, Orientation, Output count configuration
    └── Live credit tooltip & balance readback
        │
        ▼
 [FlowGenerationPreflight Result] ──► [UI Preflight Banner Display] (Hard Stop before Paid Click)
 ```
 
-### 2.2. Typed Preflight Contract (`FlowGenerationPreflight`)
+### 2.2. Typed Capability Provenance & Context Awareness
+- **`FlowCapabilitySource`**: `LiveFlowUi`, `CachedLiveObservation`, `StaticFallback`, `Unknown`.
+- **`FlowCapabilityContext`**: `UploadedVideoEdit`, `GenericVideoGeneration`.
+- **`FlowModelCapability`**: Declares supported resolutions, durations, orientations, output counts, and whether `supports_uploaded_video_edit` is active.
+- Context separation ensures that generic text-to-video capabilities are never treated as valid for uploaded-video edit.
+
+### 2.3. Profile-Scoped Credit Management
+- **Independence**: `creditStatusByProfile: Record<profileId, FlowProfileCreditStatus>`.
+- **Localized Parsing**: Supports `1,245 credits`, `1 245 credits`, `1.245 tín dụng`, `125 credits`.
+- **Concurrency Coordination**: `refresh_flow_credit_balance` coordinates with the shared profile lock; returns `FlowCreditStatus::ProfileBusy` if the profile session is active.
+- **Insufficient Credit Guard**: If `live_credit_balance < live_displayed_credit_cost`, preflight sets `FLOW_INSUFFICIENT_CREDITS`. Unknown balance returns `Unknown` and does not block solely due to unknown balance.
+
+### 2.4. Manifest Schema v4 Contract
+`CURRENT_FLOW_MANIFEST_SCHEMA_VERSION = 4`:
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FlowGenerationPreflight {
-    pub project_id: String,
-    pub source_media_id: String,
-    pub profile_id: String,
-    pub transformation_intent: TransformationIntent,
-    pub identity_mode: IdentityMode,
-    pub resolved_prompt: String,
-    pub prompt_source: PromptSource,
-    pub prompt_hash: String,
-    pub video_attached: bool,
-    pub video_edit_active: bool,
-    pub configured_model: Option<String>,
-    pub configured_duration: Option<f64>,
-    pub configured_orientation: Option<String>,
-    pub output_count: u32,
-    pub live_displayed_credit_cost: Option<u32>,
-    pub live_credit_balance: Option<u32>,
-    pub ready_for_paid_submission: bool,
-    pub blocking_code: Option<String>,
-    pub checked_at: String,
+pub struct FlowGenerationManifest {
+    pub schema_version: u32, // 4
+    pub requested_generation_config: FlowRequestedGenerationConfig,
+    pub observed_generation_config_at_submission: Option<FlowObservedGenerationConfig>,
+    // ... preserved v1/v2/v3 fields with serde default backward compatibility
 }
 ```
 
@@ -102,12 +101,14 @@ pub struct FlowGenerationPreflight {
   "observedSourceTitle": "flow_acceptance_01.mp4",
   "observedSourceDuration": 9.767,
   "observedModel": "Omni Flash",
+  "observedResolution": "720p",
   "observedOrientation": "PORTRAIT / 9:16",
   "observedOutputCount": 1,
   "observedGenerationLength": 10.0,
   "liveDisplayedCreditCost": 20,
   "diagnosticComposerCreditCost": null,
   "liveCreditBalance": null,
+  "configurationFingerprint": "94e6dfbfd1ae4fb7a2aa5cb966cf17f7b233a040b2e811124430e380f2dcfdcb",
   "readyForPaidSubmission": true,
   "blockingCode": null,
   "checkedAt": "2026-08-26T03:24:22.793724300+00:00"
@@ -151,13 +152,17 @@ FLOW_CREDITS_SPENT: 0
 
 | File | Changes |
 |---|---|
-| [`src-tauri/sidecars/flow-playwright/src/flow_adapter.ts`](file:///D:/rustProject/autovideo-ai/src-tauri/sidecars/flow-playwright/src/flow_adapter.ts) | Fixed uploaded-video node canvas drag/activation into true `/edit/` mode, eliminated generic composer false positive cost, dynamic source title, scoped tooltip reading. |
-| [`src-tauri/src/ai/flow/orchestrator.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/flow/orchestrator.rs) | Added `FlowCostProvenance`, enriched `FlowGenerationPreflight` with `configuration_verified`, `cost_provenance`, `diagnostic_composer_credit_cost`, and observed timeline fields. |
-| [`src-tauri/src/ai/flow/mod.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/flow/mod.rs) | Exported `FlowCostProvenance`. |
-| [`src/types/contracts.ts`](file:///D:/rustProject/autovideo-ai/src/types/contracts.ts) & [`src/lib/ipc.ts`](file:///D:/rustProject/autovideo-ai/src/lib/ipc.ts) | Enriched frontend preflight interfaces and `FlowCostProvenance` enum. |
-| [`src/features/flow/FlowGenPanel.tsx`](file:///D:/rustProject/autovideo-ai/src/features/flow/FlowGenPanel.tsx) | Updated Preflight Banner to display Cost Provenance badge, Configuration Verification status, and observed model. |
-| [`src/stores/__tests__/flowJobStore.test.ts`](file:///D:/rustProject/autovideo-ai/src/stores/__tests__/flowJobStore.test.ts) | Updated preflight mock data with `configurationVerified` and `costProvenance`. |
-| [`src-tauri/src/ai/tests_phase_flow_p3a.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/tests_phase_flow_p3a.rs) | Added 2 new unit regression tests for cost isolation and authoritative cost reading (7 unit tests total). |
+| [`src-tauri/sidecars/flow-playwright/src/flow_adapter.ts`](file:///D:/rustProject/autovideo-ai/src-tauri/sidecars/flow-playwright/src/flow_adapter.ts) | Fixed uploaded-video node canvas drag/activation into true `/edit/` mode, eliminated generic composer false positive cost, dynamic source title, localized credit parser (`parseLocalizedCreditNumber`), `readCreditBalance`, and `resolution` readback. |
+| [`src-tauri/sidecars/flow-playwright/src/bridge.ts`](file:///D:/rustProject/autovideo-ai/src-tauri/sidecars/flow-playwright/src/bridge.ts) | Added `read_credit_balance` RPC handler. |
+| [`src-tauri/src/ai/flow/capability.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/flow/capability.rs) | Added `FlowCapabilitySource`, `FlowCapabilityContext`, `FlowModelCapability`, and `FlowModelCapabilitiesSnapshot`. |
+| [`src-tauri/src/ai/flow/manifest.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/flow/manifest.rs) | Bumped schema version to `4`; added `FlowRequestedGenerationConfig` and `FlowObservedGenerationConfig`. |
+| [`src-tauri/src/ai/flow/orchestrator.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/flow/orchestrator.rs) | Added `FlowCreditStatus`, `FlowProfileCreditStatus`, deterministic fingerprinting, insufficient credits check, `refresh_flow_credit_balance`, and `get_flow_model_capabilities`. |
+| [`src-tauri/src/commands/mod.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/commands/mod.rs) & [`src-tauri/src/lib.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/lib.rs) | Registered `refresh_flow_credit_balance` and `get_flow_model_capabilities` commands. |
+| [`src/types/contracts.ts`](file:///D:/rustProject/autovideo-ai/src/types/contracts.ts) & [`src/lib/ipc.ts`](file:///D:/rustProject/autovideo-ai/src/lib/ipc.ts) | Exported typed capability models, requested/observed configs, and profile credit status enums. |
+| [`src/stores/flowJobStore.ts`](file:///D:/rustProject/autovideo-ai/src/stores/flowJobStore.ts) | Added profile-scoped credit state, capability state, `refreshCreditBalance`, and preflight invalidation. |
+| [`src/features/flow/FlowGenPanel.tsx`](file:///D:/rustProject/autovideo-ai/src/features/flow/FlowGenPanel.tsx) | Added Model & Quality selectors (Omni Flash, 720p), Profile Credit banner, Refresh button, preflight invalidation on parameter change, and fingerprint display. |
+| [`src/stores/__tests__/flowJobStore.test.ts`](file:///D:/rustProject/autovideo-ai/src/stores/__tests__/flowJobStore.test.ts) | Added tests for profile credit balance isolation and preflight invalidation. |
+| [`src-tauri/src/ai/tests_phase_flow_p3a.rs`](file:///D:/rustProject/autovideo-ai/src-tauri/src/ai/tests_phase_flow_p3a.rs) | Added 5 new unit tests for capability provenance, manifest schema 4, fingerprint determinism, profile credit locking, and insufficient balance guard (12 unit tests total). |
 
 ---
 
@@ -165,18 +170,18 @@ FLOW_CREDITS_SPENT: 0
 
 | Suite | Tests | Result |
 |---|---|---|
-| `cargo test --lib -- tests_phase_flow_p3a` | 7 unit + 1 live | **PASS** (`7 passed; 0 failed; 1 ignored; finished in 102.63s`) |
+| `cargo test --lib -- tests_phase_flow_p3a` | 12 unit + 1 live | **PASS** (`12 passed; 0 failed; 1 ignored; finished in 102.73s`) |
 | `cargo test --lib test_flow_p3a_real_google_flow_live_preflight_acceptance` | 1 live | **PASS** (`1 passed; 0 failed; finished in 53.70s`) |
 | `cargo test --lib -- tests_phase_flow_p2` | 5 unit | **PASS** (`5 passed; 0 failed; finished in 0.09s`) |
-| `cargo test --lib -- tests_phase20c` | 13 unit | **PASS** (`13 passed; 0 failed; finished in 0.02s`) |
-| `cargo test --lib -- tests_phase20b` | 27 unit | **PASS** (`27 passed; 0 failed; finished in 161.29s`) |
+| `cargo test --lib -- tests_phase20c` | 21 unit | **PASS** (`21 passed; 0 failed; finished in 0.01s`) |
+| `cargo test --lib -- tests_phase20b` | 27 unit | **PASS** (`27 passed; 0 failed; finished in 161.00s`) |
 | `cargo test --lib -- prompt_tests` | 32 unit | **PASS** (`32 passed; 0 failed; finished in 13.13s`) |
-| `cargo test --lib -- tests_phase20a` | 78 unit | **PASS** (`78 passed; 0 failed; finished in 56.90s`) |
-| `npm test` (Vitest) | 60 unit | **PASS** (`60 passed; 0 failed; finished in 0.53s`) |
+| `cargo test --lib -- tests_phase20a` | 65 unit | **PASS** (`65 passed; 0 failed; finished in 44.83s`) |
+| `npm test` (Vitest) | 61 unit | **PASS** (`61 passed; 0 failed; finished in 0.48s`) |
 | `cargo fmt --check` | Formatting check | **PASS** (Zero diffs) |
 | `cargo check` | Rust Typecheck | **PASS** (Zero warnings) |
-| `npm run build` | Vite production bundle | **PASS** (`built in 6.69s`) |
-| **Total Automated Tests** | **222 Tests** | **100% PASS** |
+| `npm run build` | Vite production bundle | **PASS** (`built in 6.32s`) |
+| **Total Automated Tests** | **227 Tests** | **100% PASS** |
 
 ---
 
@@ -185,3 +190,4 @@ FLOW_CREDITS_SPENT: 0
 1. **FLOW-P3-B Deferred**: Paid generation submission was NOT executed during this phase in accordance with the invariant `FLOW_PAID_CLICKS = 0`.
 2. **Pruna & BRIA Deferred**: Remain `DEFERRED_NOT_CONFIGURED` awaiting dedicated provider tokens.
 3. **Face Replacement with Reference Face**: Blocked by design at capability level (`FLOW_REFERENCE_IDENTITY_NOT_SUPPORTED`) until supported by upstream Google Flow.
+

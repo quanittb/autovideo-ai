@@ -347,6 +347,89 @@ export interface TargetFaceSelection {
   normalizedBoundingBox?: [number, number, number, number];
 }
 
+export type FlowCapabilitySource =
+  | 'LIVE_FLOW_UI'
+  | 'CACHED_LIVE_OBSERVATION'
+  | 'STATIC_FALLBACK'
+  | 'UNKNOWN';
+
+export type FlowCapabilityContext =
+  | 'UPLOADED_VIDEO_EDIT'
+  | 'GENERIC_VIDEO_GENERATION';
+
+export interface FlowModelCapability {
+  modelId: string;
+  displayName: string;
+  supportedResolutions: string[];
+  supportedDurationsSec: number[];
+  supportedOrientations: string[];
+  supportedOutputCounts: number[];
+  supportsUploadedVideoEdit: boolean;
+  source: FlowCapabilitySource;
+  context: FlowCapabilityContext;
+  observedAt: string;
+}
+
+export interface FlowModelCapabilitiesSnapshot {
+  profileId: string;
+  operationContext: FlowCapabilityContext;
+  models: FlowModelCapability[];
+  source: FlowCapabilitySource;
+  observedAt: string;
+  status: string;
+}
+
+export interface FlowRequestedGenerationConfig {
+  modelId?: string;
+  resolution?: string;
+  durationSec?: number;
+  orientation?: string;
+  outputCount: number;
+}
+
+export interface FlowObservedGenerationConfig {
+  modelId?: string;
+  resolution?: string;
+  durationSec?: number;
+  orientation?: string;
+  outputCount?: number;
+}
+
+export type FlowCreditStatus =
+  | 'READY'
+  | 'LOGIN_REQUIRED'
+  | 'FLOW_UI_CHANGED'
+  | 'PROFILE_BUSY'
+  | 'UNKNOWN'
+  | 'ERROR';
+
+export type FlowCreditSource =
+  | 'LIVE_FLOW_UI'
+  | 'UNKNOWN';
+
+export interface FlowProfileCreditStatus {
+  profileId: string;
+  balance?: number;
+  status: FlowCreditStatus;
+  checkedAt: string;
+  source: FlowCreditSource;
+}
+
+export interface FlowGenerationRequest {
+  projectId: string;
+  sourceMediaId: string;
+  profileId: string;
+  transformationIntent?: TransformationIntent;
+  identityMode?: IdentityMode;
+  prompt: string;
+  promptSource?: PromptSource;
+  targetFace?: TargetFaceSelection;
+  maxCredits?: number;
+  preserveOriginalAudio?: boolean;
+  requestedConfig?: FlowRequestedGenerationConfig;
+  configurationFingerprint?: string;
+}
+
 export type FlowCostProvenance =
   | 'UPLOADED_VIDEO_EDIT'
   | 'GENERIC_COMPOSER_DIAGNOSTIC'
@@ -364,6 +447,9 @@ export interface FlowGenerationPreflight {
   videoAttached: boolean;
   videoEditActive: boolean;
   configurationVerified: boolean;
+  requestedConfig: FlowRequestedGenerationConfig;
+  observedConfig: FlowObservedGenerationConfig;
+  configurationFingerprint: string;
   configuredModel?: string;
   configuredDuration?: number;
   configuredOrientation?: string;
@@ -378,9 +464,68 @@ export interface FlowGenerationPreflight {
   observedOrientation?: string;
   observedOutputCount?: number;
   observedGenerationLength?: number;
+  observedResolution?: string;
   readyForPaidSubmission: boolean;
   blockingCode?: string;
   checkedAt: string;
+}
+
+export type FlowJobState =
+  | 'PLANNING'
+  | 'SPLITTING'
+  | 'READY'
+  | 'QUEUED'
+  | 'PREPARING_SEGMENTS'
+  | 'WAITING_FOR_BROWSER'
+  | 'LOGIN_REQUIRED'
+  | 'UPLOADING'
+  | 'READY_TO_SUBMIT'
+  | 'SUBMITTING'
+  | 'GENERATION_AMBIGUOUS'
+  | 'GENERATING'
+  | 'DOWNLOADING'
+  | 'VALIDATING_SEGMENT'
+  | 'STITCHING'
+  | 'VALIDATING_FINAL'
+  | 'COMPLETED'
+  | 'CREDITS_REQUIRED'
+  | 'USER_ACTION_REQUIRED'
+  | 'FLOW_UI_CHANGED'
+  | 'BLOCKED'
+  | 'FAILED'
+  | 'CANCELLED';
+
+export interface FlowJobSnapshot {
+  parentId: string;
+  projectId: string;
+  profileId: string;
+  submittedPrompt: string;
+  promptHash: string;
+  promptSource: PromptSource;
+  transformationIntent?: TransformationIntent;
+  identityMode?: IdentityMode;
+  targetFace?: TargetFaceSelection;
+  requestedGenerationConfig?: FlowRequestedGenerationConfig;
+  observedGenerationConfig?: FlowObservedGenerationConfig;
+  state: FlowJobState;
+  stateRevision: number;
+  activeSegmentIndex: number;
+  totalSegments: number;
+  estimatedCredits: number;
+  observedCreditBalance?: number;
+  creditBudgetLimit?: number;
+  reservedCredits?: number;
+  completedGenerations: number;
+  finalOutputReady: boolean;
+  finalOutputPath?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  timestamps: {
+    createdAt: string;
+    updatedAt: string;
+    submittedAt?: string | null;
+    completedAt?: string | null;
+  };
 }
 
 export interface DerivedMediaProvenance {

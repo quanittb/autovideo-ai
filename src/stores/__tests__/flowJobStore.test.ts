@@ -18,6 +18,8 @@ vi.mock('../../lib/ipc', () => ({
     listFlowJobs: vi.fn(),
     useOutputInProject: vi.fn(),
     getFlowJobStatus: vi.fn(),
+    refreshCreditBalance: vi.fn(),
+    getModelCapabilities: vi.fn(),
   },
 }));
 
@@ -262,6 +264,9 @@ describe('flowJobStore', () => {
       videoAttached: true,
       videoEditActive: true,
       configurationVerified: true,
+      requestedConfig: { modelId: 'Omni Flash', resolution: '720p', durationSec: 10, orientation: '9:16', outputCount: 1 },
+      observedConfig: { modelId: 'Omni Flash', resolution: '720p', durationSec: 10, orientation: '9:16', outputCount: 1 },
+      configurationFingerprint: 'mock_fingerprint_123',
       configuredModel: 'Omni Flash',
       configuredDuration: 10,
       configuredOrientation: 'PORTRAIT',
@@ -283,11 +288,46 @@ describe('flowJobStore', () => {
     const state = useFlowJobStore.getState();
     expect(state.preflight).not.toBeNull();
     expect(state.preflight?.liveDisplayedCreditCost).toBe(20);
+    expect(res.liveDisplayedCreditCost).toBe(20);
     expect(state.preflight?.readyForPaidSubmission).toBe(true);
     expect(state.isPreflighting).toBe(false);
-    expect(res.liveDisplayedCreditCost).toBe(20);
-
     useFlowJobStore.getState().clearPreflight();
+    expect(useFlowJobStore.getState().preflight).toBeNull();
+  });
+
+  it('manages profile-scoped credit balances independently and handles invalidation', async () => {
+    vi.mocked(flowApi.refreshCreditBalance).mockImplementation(async (profileId: string) => {
+      if (profileId === 'prof_1') {
+        return {
+          profileId: 'prof_1',
+          balance: 100,
+          status: 'READY',
+          checkedAt: '2026-08-26T00:00:00Z',
+          source: 'LIVE_FLOW_UI',
+        };
+      } else {
+        return {
+          profileId: 'prof_2',
+          balance: 20,
+          status: 'READY',
+          checkedAt: '2026-08-26T00:00:00Z',
+          source: 'LIVE_FLOW_UI',
+        };
+      }
+    });
+
+    const status1 = await useFlowJobStore.getState().refreshCreditBalance('prof_1');
+    const status2 = await useFlowJobStore.getState().refreshCreditBalance('prof_2');
+
+    expect(status1.balance).toBe(100);
+    expect(status2.balance).toBe(20);
+
+    const store = useFlowJobStore.getState();
+    expect(store.creditStatusByProfile['prof_1']?.balance).toBe(100);
+    expect(store.creditStatusByProfile['prof_2']?.balance).toBe(20);
+
+    // Invalidate preflight
+    useFlowJobStore.getState().invalidatePreflight();
     expect(useFlowJobStore.getState().preflight).toBeNull();
   });
 });

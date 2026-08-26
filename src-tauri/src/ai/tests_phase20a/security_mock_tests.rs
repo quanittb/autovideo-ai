@@ -197,6 +197,7 @@ fn test_phase20a_34_restart_recovery_zero_additional_generate_clicks() {
         crate::ai::transformation::TransformationIntent::FaceReplace,
         crate::ai::transformation::IdentityMode::Generated,
         None,
+        FlowRequestedGenerationConfig::default(),
         "A crashed prompt".to_string(),
         calculate_prompt_hash("A crashed prompt"),
         PromptSource::User,

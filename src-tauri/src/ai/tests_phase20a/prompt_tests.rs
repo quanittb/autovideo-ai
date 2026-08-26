@@ -834,6 +834,8 @@ fn test_phase_flow_p1_03_flow_production_request_e2e_acceptance() {
             target_face: None,
             max_credits: Some(40),
             preserve_original_audio: Some(true),
+            requested_config: None,
+            configuration_fingerprint: None,
         };
 
         let start_snapshot = flow_service
@@ -932,6 +934,8 @@ fn test_phase_flow_p1_04_pre_click_budget_exceeded_rejects_before_click() {
         target_face: None,
         max_credits: Some(10), // Insufficient budget!
         preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: None,
     };
 
     let start_result =
@@ -1010,6 +1014,8 @@ fn test_phase_flow_p1_05_flow_cancellation_stops_worker() {
             target_face: None,
             max_credits: Some(40),
             preserve_original_audio: Some(true),
+            requested_config: None,
+            configuration_fingerprint: None,
         };
 
         let start_snapshot = flow_service

@@ -19,14 +19,18 @@ export const FlowGenPanel: React.FC = () => {
     isPreflighting,
     isLoadingProfiles,
     error: storeError,
+    creditStatusByProfile,
+    isRefreshingCreditByProfile,
     loadProfiles,
     createProfile,
     selectProfile,
     openProfileBrowser,
+    refreshCreditBalance,
+    fetchModelCapabilities,
     loadGeminiStatus,
     loadFlowJobs,
     preflightFlowJob,
-    clearPreflight,
+    invalidatePreflight,
     startFlowJob,
     pollJobStatus,
   } = useFlowJobStore();
@@ -38,6 +42,13 @@ export const FlowGenPanel: React.FC = () => {
   const [transformationIntent, setTransformationIntent] =
     useState<TransformationIntent>('FACE_REPLACE');
   const [maxCreditsInput, setMaxCreditsInput] = useState<string>('');
+
+  // Generation Settings State
+  const [selectedModel, setSelectedModel] = useState<string>('Omni Flash');
+  const [selectedResolution, setSelectedResolution] = useState<string>('720p');
+  const [selectedDuration, setSelectedDuration] = useState<number>(10);
+  const [selectedOrientation, setSelectedOrientation] = useState<string>('9:16');
+  const [selectedOutputCount, setSelectedOutputCount] = useState<number>(1);
 
   const {
     prompt,
@@ -64,6 +75,13 @@ export const FlowGenPanel: React.FC = () => {
     loadProfiles();
     loadGeminiStatus();
   }, [loadProfiles, loadGeminiStatus]);
+
+  useEffect(() => {
+    if (selectedProfileId) {
+      refreshCreditBalance(selectedProfileId).catch(() => {});
+      fetchModelCapabilities(selectedProfileId, 'UPLOADED_VIDEO_EDIT').catch(() => {});
+    }
+  }, [selectedProfileId, refreshCreditBalance, fetchModelCapabilities]);
 
   useEffect(() => {
     if (projectId) {
@@ -127,12 +145,33 @@ export const FlowGenPanel: React.FC = () => {
     return () => clearInterval(timer);
   }, [activeJob, projectId, pollJobStatus]);
 
+  // Invalidate preflight on any parameter change
   useEffect(() => {
-    clearPreflight();
-  }, [projectId, selectedProfileId, selectedMediaId, transformationIntent, prompt, clearPreflight]);
+    invalidatePreflight();
+  }, [
+    projectId,
+    selectedProfileId,
+    selectedMediaId,
+    transformationIntent,
+    prompt,
+    selectedModel,
+    selectedResolution,
+    selectedDuration,
+    selectedOrientation,
+    selectedOutputCount,
+    invalidatePreflight,
+  ]);
 
   const isPromptValid =
     transformationIntent === 'FACE_REPLACE' ? true : prompt.trim().length > 0;
+
+  const currentRequestedConfig = {
+    modelId: selectedModel,
+    resolution: selectedResolution,
+    durationSec: selectedDuration,
+    orientation: selectedOrientation,
+    outputCount: selectedOutputCount,
+  };
 
   const handleCheckCost = async () => {
     if (!projectId || !selectedProfileId || !selectedMediaId.trim() || !isPromptValid) return;
@@ -146,6 +185,7 @@ export const FlowGenPanel: React.FC = () => {
         prompt: prompt.trim(),
         promptSource,
         preserveOriginalAudio: true,
+        requestedConfig: currentRequestedConfig,
       });
     } catch {
       // Handled by store
@@ -168,6 +208,8 @@ export const FlowGenPanel: React.FC = () => {
         identityMode: 'GENERATED',
         maxCredits: isNaN(maxCredits as number) ? undefined : maxCredits,
         preserveOriginalAudio: true,
+        requestedConfig: currentRequestedConfig,
+        configurationFingerprint: preflight?.configurationFingerprint,
       }
     );
   };
@@ -178,6 +220,9 @@ export const FlowGenPanel: React.FC = () => {
     selectedProfile?.manualBrowserOpen || selectedProfile?.browserSessionOpen || false;
   const isProfileReady = selectedProfile?.status === 'READY';
   const isLoginRequired = selectedProfile?.status === 'LOGIN_REQUIRED';
+
+  const currentProfileCredit = selectedProfileId ? creditStatusByProfile[selectedProfileId] : undefined;
+  const isRefreshingCredit = selectedProfileId ? !!isRefreshingCreditByProfile[selectedProfileId] : false;
 
   return (
     <div className="flex flex-col gap-6 max-w-5xl mx-auto p-6 text-slate-100">
@@ -215,15 +260,52 @@ export const FlowGenPanel: React.FC = () => {
         </div>
       )}
 
-      {/* Profile Selector */}
-      <FlowProfileSelector
-        profiles={profiles}
-        selectedProfileId={selectedProfileId}
-        isLoading={isLoadingProfiles}
-        onSelectProfile={selectProfile}
-        onCreateProfile={createProfile}
-        onRefreshProfiles={loadProfiles}
-      />
+      {/* Profile Selector & Credit Balance Banner */}
+      <div className="flex flex-col gap-3">
+        <FlowProfileSelector
+          profiles={profiles}
+          selectedProfileId={selectedProfileId}
+          isLoading={isLoadingProfiles}
+          onSelectProfile={selectProfile}
+          onCreateProfile={createProfile}
+          onRefreshProfiles={loadProfiles}
+        />
+
+        {selectedProfile && (
+          <div className="flex items-center justify-between px-4 py-2.5 bg-slate-900/80 border border-slate-800 rounded-xl text-xs">
+            <div className="flex items-center gap-3">
+              <span className="text-slate-400">Profile Balance ({selectedProfile.name}):</span>
+              {currentProfileCredit?.balance !== undefined ? (
+                <span className="font-bold text-emerald-400 text-sm">
+                  {currentProfileCredit.balance.toLocaleString()} credits
+                </span>
+              ) : currentProfileCredit?.status === 'LOGIN_REQUIRED' ? (
+                <span className="text-amber-400 font-medium">Login Required</span>
+              ) : currentProfileCredit?.status === 'PROFILE_BUSY' ? (
+                <span className="text-amber-400 font-medium">Profile Busy / In Use</span>
+              ) : (
+                <span className="text-slate-400 italic">Unknown (Not yet read from Flow)</span>
+              )}
+              {currentProfileCredit?.checkedAt && (
+                <span className="text-[10px] text-slate-500">
+                  (checked {new Date(currentProfileCredit.checkedAt).toLocaleTimeString()})
+                </span>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => selectedProfileId && refreshCreditBalance(selectedProfileId)}
+              disabled={isRefreshingCredit || isProfileLocked || isManualBrowserOpen}
+              className="flex items-center gap-1 px-2.5 py-1 text-xs text-indigo-300 hover:text-white bg-indigo-950/50 hover:bg-indigo-900 border border-indigo-700/40 rounded-lg transition disabled:opacity-40 cursor-pointer"
+              title="Refresh live credit balance for this profile"
+            >
+              <RefreshCw className={`w-3 h-3 ${isRefreshingCredit ? 'animate-spin' : ''}`} />
+              {isRefreshingCredit ? 'Reading...' : 'Refresh Balance'}
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* Login Required Notice */}
       {isLoginRequired && selectedProfileId && (
@@ -242,7 +324,7 @@ export const FlowGenPanel: React.FC = () => {
         </div>
       )}
 
-      {/* Project Source Media & Transformation Intent Section */}
+      {/* Project Source Media, Transformation Intent & Generation Settings */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="flex flex-col gap-2 p-4 bg-slate-900/60 border border-slate-800 rounded-xl">
           <div className="flex items-center gap-2">
@@ -344,6 +426,76 @@ export const FlowGenPanel: React.FC = () => {
         </div>
       </div>
 
+      {/* Model & Quality Configuration */}
+      <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-xl flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-purple-400" />
+            <span className="text-sm font-semibold text-slate-200">Model & Quality Settings</span>
+          </div>
+          <span className="text-[11px] text-slate-400">Production Defaults Applied</span>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-slate-400 font-medium">Model</label>
+            <select
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value)}
+              className="px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-indigo-500"
+            >
+              <option value="Omni Flash">Omni Flash (Default)</option>
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-slate-400 font-medium">Resolution</label>
+            <select
+              value={selectedResolution}
+              onChange={(e) => setSelectedResolution(e.target.value)}
+              className="px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-indigo-500"
+            >
+              <option value="720p">720p (Lowest Cost)</option>
+              <option value="1080p">1080p (HD)</option>
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-slate-400 font-medium">Duration</label>
+            <select
+              value={selectedDuration}
+              onChange={(e) => setSelectedDuration(parseInt(e.target.value, 10))}
+              className="px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-indigo-500"
+            >
+              <option value={10}>10s (Edit Standard)</option>
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-slate-400 font-medium">Orientation</label>
+            <select
+              value={selectedOrientation}
+              onChange={(e) => setSelectedOrientation(e.target.value)}
+              className="px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-indigo-500"
+            >
+              <option value="9:16">9:16 (Portrait)</option>
+              <option value="16:9">16:9 (Landscape)</option>
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-slate-400 font-medium">Outputs</label>
+            <select
+              value={selectedOutputCount}
+              onChange={(e) => setSelectedOutputCount(parseInt(e.target.value, 10))}
+              className="px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-indigo-500"
+            >
+              <option value={1}>1 Output</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
       {/* Prompt Editor */}
       <FlowPromptEditor
         prompt={prompt}
@@ -395,10 +547,18 @@ export const FlowGenPanel: React.FC = () => {
             {preflight.observedModel && (
               <span>Model: {preflight.observedModel}</span>
             )}
+            {preflight.observedResolution && (
+              <span>Resolution: {preflight.observedResolution}</span>
+            )}
             {preflight.configuredOrientation && (
               <span>Orientation: {preflight.configuredOrientation}</span>
             )}
             <span>Outputs: x{preflight.outputCount}</span>
+            {preflight.configurationFingerprint && (
+              <span className="font-mono text-[10px] text-slate-500">
+                sig:{preflight.configurationFingerprint.substring(0, 8)}
+              </span>
+            )}
           </div>
 
           {preflight.blockingCode && (

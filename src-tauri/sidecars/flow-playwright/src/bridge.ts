@@ -53,6 +53,10 @@ export class FlowRpcBridge {
           const editVerif = await this.adapter.ensureUploadedVideoEditActive(msg.params);
           return { id: msg.id, result: editVerif };
 
+        case 'read_credit_balance':
+          const creditRes = await this.adapter.readCreditBalance();
+          return { id: msg.id, result: creditRes };
+
         case 'close_browser':
           await this.adapter.closeBrowser();
           return { id: msg.id, result: { success: true } };

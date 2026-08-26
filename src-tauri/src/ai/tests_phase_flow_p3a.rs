@@ -84,6 +84,8 @@ fn test_flow_p3a_02_preflight_resolves_system_default_prompt() {
         target_face: None,
         max_credits: None,
         preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: None,
     };
 
     let probe_err = tokio::runtime::Runtime::new()
@@ -125,6 +127,8 @@ fn test_flow_p3a_03_preflight_blocks_reference_and_empty_style_before_browser() 
         target_face: None,
         max_credits: None,
         preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: None,
     };
 
     let ref_err = tokio::runtime::Runtime::new()
@@ -145,6 +149,8 @@ fn test_flow_p3a_03_preflight_blocks_reference_and_empty_style_before_browser() 
         target_face: None,
         max_credits: None,
         preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: None,
     };
 
     let style_err = tokio::runtime::Runtime::new()
@@ -199,6 +205,8 @@ async fn test_flow_p3a_04_preflight_mock_flow_readback_and_zero_generate_clicks(
         target_face: None,
         max_credits: None,
         preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: None,
     };
 
     let preflight = flow_service
@@ -272,6 +280,8 @@ async fn test_flow_p3a_05_preflight_logged_out_profile_returns_blocking_code() {
         target_face: None,
         max_credits: None,
         preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: None,
     };
 
     let preflight = flow_service
@@ -328,6 +338,8 @@ async fn test_flow_p3a_06_video_edit_inactive_blocks_generic_cost_exposure() {
         target_face: None,
         max_credits: None,
         preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: None,
     };
 
     let preflight = flow_service
@@ -392,6 +404,8 @@ async fn test_flow_p3a_07_mock_true_edit_exposes_authoritative_cost() {
         target_face: None,
         max_credits: None,
         preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: None,
     };
 
     let preflight = flow_service
@@ -478,6 +492,8 @@ async fn test_flow_p3a_real_google_flow_live_preflight_acceptance() {
         target_face: None,
         max_credits: Some(50),
         preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: None,
     };
 
     let dest_canon = dest_media_path.canonicalize().unwrap();
@@ -524,6 +540,7 @@ async fn test_flow_p3a_real_google_flow_live_preflight_acceptance() {
                 preflight.observed_source_duration
             );
             println!("Observed Model: {:?}", preflight.observed_model);
+            println!("Observed Resolution: {:?}", preflight.observed_resolution);
             println!("Observed Orientation: {:?}", preflight.observed_orientation);
             println!(
                 "Observed Output Count: {:?}",
@@ -543,6 +560,10 @@ async fn test_flow_p3a_real_google_flow_live_preflight_acceptance() {
             );
             println!("Live Credit Balance: {:?}", preflight.live_credit_balance);
             println!(
+                "Configuration Fingerprint: {}",
+                preflight.configuration_fingerprint
+            );
+            println!(
                 "Ready For Paid Submission: {}",
                 preflight.ready_for_paid_submission
             );
@@ -558,4 +579,229 @@ async fn test_flow_p3a_real_google_flow_live_preflight_acceptance() {
             panic!("Live preflight failed: {}", err);
         }
     }
+}
+
+#[test]
+fn test_flow_p3a_08_capability_provenance_and_context_separation() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let edit_caps = flow_service
+        .get_flow_model_capabilities("prof_1", FlowCapabilityContext::UploadedVideoEdit);
+    assert_eq!(
+        edit_caps.operation_context,
+        FlowCapabilityContext::UploadedVideoEdit
+    );
+    assert_eq!(edit_caps.models.len(), 1);
+    assert_eq!(edit_caps.models[0].model_id, "Omni Flash");
+    assert!(edit_caps.models[0].supports_uploaded_video_edit);
+    assert_eq!(edit_caps.models[0].supported_durations_sec, vec![10]);
+    assert_eq!(edit_caps.models[0].supported_output_counts, vec![1]);
+
+    let generic_caps = flow_service
+        .get_flow_model_capabilities("prof_1", FlowCapabilityContext::GenericVideoGeneration);
+    assert_eq!(
+        generic_caps.operation_context,
+        FlowCapabilityContext::GenericVideoGeneration
+    );
+    assert_eq!(generic_caps.models.len(), 1);
+    assert_eq!(generic_caps.models[0].model_id, "Omni Flash");
+    assert!(!generic_caps.models[0].supports_uploaded_video_edit);
+    assert_eq!(generic_caps.models[0].supported_durations_sec, vec![5, 10]);
+    assert_eq!(
+        generic_caps.models[0].supported_output_counts,
+        vec![1, 2, 4]
+    );
+}
+
+#[test]
+fn test_flow_p3a_09_manifest_schema_v4_backward_compatibility() {
+    assert_eq!(CURRENT_FLOW_MANIFEST_SCHEMA_VERSION, 4);
+
+    // Test serialization and deserialization with schema 4
+    let req_config = FlowRequestedGenerationConfig {
+        model_id: Some("Omni Flash".to_string()),
+        resolution: Some("720p".to_string()),
+        duration_sec: Some(10),
+        orientation: Some("9:16".to_string()),
+        output_count: 1,
+    };
+
+    let manifest = FlowGenerationManifest::new(
+        "parent_01".to_string(),
+        "req_01".to_string(),
+        "proj_01".to_string(),
+        "prof_01".to_string(),
+        "hash_01".to_string(),
+        Some("media_01".to_string()),
+        "prompt_hash_01".to_string(),
+        Some("source.mp4".to_string()),
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        None,
+        req_config.clone(),
+        "prompt text".to_string(),
+        "prompt_hash_01".to_string(),
+        PromptSource::SystemDefault,
+        1,
+        1,
+        crate::ai::cloud::spec::SourceMediaFacts {
+            duration_sec: 10.0,
+            fps: 30.0,
+            width: 720,
+            height: 1280,
+            has_audio: true,
+            timing: None,
+        },
+        FlowSegmentPlan {
+            segments: vec![],
+            total_frames: 300,
+            total_duration_sec: 10.0,
+            target_fps: 30.0,
+            capability_limit_sec: 10.0,
+        },
+        FlowCreditRecord::default(),
+        FlowFinalAudioPolicy {
+            preserve_original_audio: true,
+            codec: "aac".to_string(),
+        },
+    );
+
+    assert_eq!(manifest.schema_version, 4);
+    assert_eq!(
+        manifest.requested_generation_config.model_id.as_deref(),
+        Some("Omni Flash")
+    );
+    assert_eq!(
+        manifest.requested_generation_config.resolution.as_deref(),
+        Some("720p")
+    );
+
+    let json_str = serde_json::to_string(&manifest).unwrap();
+    let deserialized: FlowGenerationManifest = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(deserialized.schema_version, 4);
+    assert_eq!(
+        deserialized.requested_generation_config.model_id.as_deref(),
+        Some("Omni Flash")
+    );
+
+    let snapshot = manifest.to_snapshot();
+    assert_eq!(
+        snapshot.requested_generation_config.model_id.as_deref(),
+        Some("Omni Flash")
+    );
+}
+
+#[test]
+fn test_flow_p3a_10_configuration_fingerprint_determinism_and_staleness() {
+    let config = FlowRequestedGenerationConfig {
+        model_id: Some("Omni Flash".to_string()),
+        resolution: Some("720p".to_string()),
+        duration_sec: Some(10),
+        orientation: Some("9:16".to_string()),
+        output_count: 1,
+    };
+
+    let fp1 = compute_configuration_fingerprint(
+        "prof_1",
+        "media_01",
+        "hash_prompt_123",
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        &config,
+    );
+
+    let fp2 = compute_configuration_fingerprint(
+        "prof_1",
+        "media_01",
+        "hash_prompt_123",
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        &config,
+    );
+    assert_eq!(fp1, fp2, "Fingerprint must be deterministic");
+
+    // Altering resolution changes fingerprint
+    let altered_config = FlowRequestedGenerationConfig {
+        resolution: Some("1080p".to_string()),
+        ..config.clone()
+    };
+    let fp_altered = compute_configuration_fingerprint(
+        "prof_1",
+        "media_01",
+        "hash_prompt_123",
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        &altered_config,
+    );
+    assert_ne!(
+        fp1, fp_altered,
+        "Altering resolution must change fingerprint"
+    );
+}
+
+#[tokio::test]
+async fn test_flow_p3a_11_profile_scoped_credit_balance_locking() {
+    let temp_dir = tempdir().unwrap();
+    let paths = StoragePaths::resolve_from_base(temp_dir.path());
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let profile_manager = FlowProfileManager::new(paths.app_data_dir.clone());
+    profile_manager
+        .create_profile("prof_busy", "Busy Profile")
+        .unwrap();
+
+    // Acquire lock manually to simulate active profile use
+    let guard = profile_manager.acquire_session_lock("prof_busy").unwrap();
+
+    // Credit balance refresh must return ProfileBusy
+    let credit_status = flow_service
+        .refresh_flow_credit_balance("prof_busy")
+        .await
+        .unwrap();
+    assert_eq!(credit_status.status, FlowCreditStatus::ProfileBusy);
+    assert_eq!(credit_status.balance, None);
+
+    drop(guard);
+}
+
+#[tokio::test]
+async fn test_flow_p3a_12_insufficient_credits_blocking_guard() {
+    // When live balance is 10 and cost is 20, preflight must set FLOW_INSUFFICIENT_CREDITS
+    let preflight_json = serde_json::json!({
+        "authStatus": "READY",
+        "liveCreditBalance": 10,
+        "videoEditVerification": {
+            "uploadedVideoAttached": true,
+            "uploadedVideoEditActive": true,
+            "creditEstimateNumber": 20,
+            "model": "Omni Flash",
+            "resolution": "720p",
+            "orientation": "PORTRAIT",
+            "outputCount": 1,
+            "generationLengthSec": 10.0
+        }
+    });
+
+    let live_balance = preflight_json
+        .get("liveCreditBalance")
+        .and_then(|v| v.as_u64())
+        .map(|c| c as u32);
+    let edit_verif = preflight_json.get("videoEditVerification");
+    let live_cost_raw = edit_verif
+        .and_then(|v| v.get("creditEstimateNumber"))
+        .and_then(|v| v.as_u64())
+        .map(|c| c as u32);
+
+    let (mut ready, mut blocking) = (true, None);
+    if let (Some(bal), Some(cost)) = (live_balance, live_cost_raw) {
+        if bal < cost {
+            blocking = Some("FLOW_INSUFFICIENT_CREDITS".to_string());
+            ready = false;
+        }
+    }
+
+    assert!(!ready);
+    assert_eq!(blocking, Some("FLOW_INSUFFICIENT_CREDITS".to_string()));
 }

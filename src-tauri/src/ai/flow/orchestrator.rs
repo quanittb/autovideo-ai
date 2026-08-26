@@ -1,4 +1,3 @@
-use super::capability::FlowCapabilityPolicy;
 use super::manifest::{
     FlowChildSubmissionState, FlowFinalAudioPolicy, FlowGenerationManifest, FlowJobSnapshot,
     FlowJobState,
@@ -58,6 +57,12 @@ impl FlowCancellationRegistry {
 // 2. Production Flow Generation Request
 // -----------------------------------------------------------------------------
 
+pub use super::capability::{
+    FlowCapabilityContext, FlowCapabilityPolicy, FlowCapabilitySource, FlowCreditRecord,
+    FlowModelCapabilitiesSnapshot, FlowModelCapability,
+};
+pub use super::manifest::{FlowObservedGenerationConfig, FlowRequestedGenerationConfig};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowGenerationRequest {
@@ -78,6 +83,16 @@ pub struct FlowGenerationRequest {
     pub max_credits: Option<u32>,
     #[serde(default)]
     pub preserve_original_audio: Option<bool>,
+    #[serde(default)]
+    pub requested_config: Option<FlowRequestedGenerationConfig>,
+    #[serde(default)]
+    pub configuration_fingerprint: Option<String>,
+}
+
+impl FlowGenerationRequest {
+    pub fn canonical_requested_config(&self) -> FlowRequestedGenerationConfig {
+        self.requested_config.clone().unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +101,67 @@ pub enum FlowCostProvenance {
     UploadedVideoEdit,
     GenericComposerDiagnostic,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FlowCreditStatus {
+    Ready,
+    LoginRequired,
+    FlowUiChanged,
+    ProfileBusy,
+    Unknown,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FlowCreditSource {
+    LiveFlowUi,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowProfileCreditStatus {
+    pub profile_id: String,
+    #[serde(default)]
+    pub balance: Option<u32>,
+    pub status: FlowCreditStatus,
+    pub checked_at: String,
+    pub source: FlowCreditSource,
+}
+
+pub fn compute_configuration_fingerprint(
+    profile_id: &str,
+    source_media_id: &str,
+    prompt_hash: &str,
+    transformation_intent: TransformationIntent,
+    identity_mode: IdentityMode,
+    config: &FlowRequestedGenerationConfig,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(profile_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(source_media_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(prompt_hash.as_bytes());
+    hasher.update(b":");
+    hasher.update(format!("{:?}", transformation_intent).as_bytes());
+    hasher.update(b":");
+    hasher.update(format!("{:?}", identity_mode).as_bytes());
+    hasher.update(b":");
+    hasher.update(config.model_id.as_deref().unwrap_or("").as_bytes());
+    hasher.update(b":");
+    hasher.update(config.resolution.as_deref().unwrap_or("").as_bytes());
+    hasher.update(b":");
+    hasher.update(config.duration_sec.unwrap_or(0).to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(config.orientation.as_deref().unwrap_or("").as_bytes());
+    hasher.update(b":");
+    hasher.update(config.output_count.to_string().as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,6 +181,10 @@ pub struct FlowGenerationPreflight {
     pub video_attached: bool,
     pub video_edit_active: bool,
     pub configuration_verified: bool,
+
+    pub requested_config: FlowRequestedGenerationConfig,
+    pub observed_config: FlowObservedGenerationConfig,
+    pub configuration_fingerprint: String,
 
     #[serde(default)]
     pub configured_model: Option<String>,
@@ -136,6 +216,8 @@ pub struct FlowGenerationPreflight {
     pub observed_output_count: Option<u32>,
     #[serde(default)]
     pub observed_generation_length: Option<f64>,
+    #[serde(default)]
+    pub observed_resolution: Option<String>,
 
     pub ready_for_paid_submission: bool,
 
@@ -215,6 +297,24 @@ impl FlowRuntimeService {
         Ok(manifest.to_snapshot())
     }
 
+    pub async fn refresh_flow_credit_balance(
+        &self,
+        profile_id: &str,
+    ) -> Result<FlowProfileCreditStatus, String> {
+        self.orchestrator
+            .refresh_flow_credit_balance(profile_id)
+            .await
+    }
+
+    pub fn get_flow_model_capabilities(
+        &self,
+        profile_id: &str,
+        operation_context: FlowCapabilityContext,
+    ) -> FlowModelCapabilitiesSnapshot {
+        self.orchestrator
+            .get_flow_model_capabilities(profile_id, operation_context)
+    }
+
     pub fn list_flow_jobs(&self, project_id: &str) -> Result<Vec<FlowJobSnapshot>, String> {
         let manifests = self.orchestrator.store().list_all_flow_jobs(project_id)?;
         Ok(manifests.into_iter().map(|m| m.to_snapshot()).collect())
@@ -281,6 +381,136 @@ impl FlowOrchestrator {
         &self.capability_policy
     }
 
+    pub async fn refresh_flow_credit_balance(
+        &self,
+        profile_id: &str,
+    ) -> Result<FlowProfileCreditStatus, String> {
+        let profile_dir = self.profile_manager.get_profile_dir(profile_id)?;
+        if !profile_dir.exists() {
+            return Ok(FlowProfileCreditStatus {
+                profile_id: profile_id.to_string(),
+                balance: None,
+                status: FlowCreditStatus::Error,
+                checked_at: Utc::now().to_rfc3339(),
+                source: FlowCreditSource::Unknown,
+            });
+        }
+
+        let lock_guard = match self.profile_manager.acquire_session_lock(profile_id) {
+            Ok(g) => g,
+            Err(_) => {
+                return Ok(FlowProfileCreditStatus {
+                    profile_id: profile_id.to_string(),
+                    balance: None,
+                    status: FlowCreditStatus::ProfileBusy,
+                    checked_at: Utc::now().to_rfc3339(),
+                    source: FlowCreditSource::Unknown,
+                });
+            }
+        };
+
+        let bridge = self.bridge.clone();
+        let balance_val = match bridge.read_credit_balance(&profile_dir).await {
+            Ok(v) => v,
+            Err(e) => {
+                drop(lock_guard);
+                return Ok(FlowProfileCreditStatus {
+                    profile_id: profile_id.to_string(),
+                    balance: None,
+                    status: if e.contains("LOGIN_REQUIRED") {
+                        FlowCreditStatus::LoginRequired
+                    } else if e.contains("FLOW_UI_CHANGED") {
+                        FlowCreditStatus::FlowUiChanged
+                    } else {
+                        FlowCreditStatus::Error
+                    },
+                    checked_at: Utc::now().to_rfc3339(),
+                    source: FlowCreditSource::Unknown,
+                });
+            }
+        };
+
+        drop(lock_guard);
+
+        let status_str = balance_val
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("UNKNOWN");
+        let status = match status_str {
+            "READY" => FlowCreditStatus::Ready,
+            "LOGIN_REQUIRED" => FlowCreditStatus::LoginRequired,
+            "FLOW_UI_CHANGED" => FlowCreditStatus::FlowUiChanged,
+            _ => FlowCreditStatus::Unknown,
+        };
+
+        let balance = balance_val
+            .get("balance")
+            .and_then(|b| b.as_u64())
+            .map(|b| b as u32);
+        let source_str = balance_val
+            .get("source")
+            .and_then(|s| s.as_str())
+            .unwrap_or("UNKNOWN");
+        let source = match source_str {
+            "LIVE_FLOW_UI" => FlowCreditSource::LiveFlowUi,
+            _ => FlowCreditSource::Unknown,
+        };
+
+        Ok(FlowProfileCreditStatus {
+            profile_id: profile_id.to_string(),
+            balance,
+            status,
+            checked_at: Utc::now().to_rfc3339(),
+            source,
+        })
+    }
+
+    pub fn get_flow_model_capabilities(
+        &self,
+        profile_id: &str,
+        operation_context: FlowCapabilityContext,
+    ) -> FlowModelCapabilitiesSnapshot {
+        let models = match operation_context {
+            FlowCapabilityContext::UploadedVideoEdit => {
+                vec![FlowModelCapability {
+                    model_id: "Omni Flash".to_string(),
+                    display_name: "Omni Flash".to_string(),
+                    supported_resolutions: vec!["720p".to_string(), "1080p".to_string()],
+                    supported_durations_sec: vec![10],
+                    supported_orientations: vec!["PORTRAIT".to_string(), "LANDSCAPE".to_string()],
+                    supported_output_counts: vec![1],
+                    supports_uploaded_video_edit: true,
+                    source: FlowCapabilitySource::CachedLiveObservation,
+                    context: FlowCapabilityContext::UploadedVideoEdit,
+                    observed_at: Utc::now().to_rfc3339(),
+                }]
+            }
+            FlowCapabilityContext::GenericVideoGeneration => {
+                vec![FlowModelCapability {
+                    model_id: "Omni Flash".to_string(),
+                    display_name: "Omni Flash".to_string(),
+                    supported_resolutions: vec!["720p".to_string(), "1080p".to_string()],
+                    supported_durations_sec: vec![5, 10],
+                    supported_orientations: vec!["PORTRAIT".to_string(), "LANDSCAPE".to_string()],
+                    supported_output_counts: vec![1, 2, 4],
+                    supports_uploaded_video_edit: false,
+                    source: FlowCapabilitySource::CachedLiveObservation,
+                    context: FlowCapabilityContext::GenericVideoGeneration,
+                    observed_at: Utc::now().to_rfc3339(),
+                }]
+            }
+        };
+
+        FlowModelCapabilitiesSnapshot {
+            profile_id: profile_id.to_string(),
+            operation_context,
+            models,
+            source: FlowCapabilitySource::CachedLiveObservation,
+            observed_at: Utc::now().to_rfc3339(),
+            status: "READY".to_string(),
+        }
+    }
+
     pub async fn start_flow_generation(
         &self,
         project_id: String,
@@ -300,6 +530,8 @@ impl FlowOrchestrator {
             target_face: None,
             max_credits: None,
             preserve_original_audio: Some(true),
+            requested_config: None,
+            configuration_fingerprint: None,
         };
 
         self.start_flow_generation_with_request(request, source_video_path, None)
@@ -371,7 +603,16 @@ impl FlowOrchestrator {
             return Err("INVALID_MEDIA: Media facts have invalid duration or fps".to_string());
         }
 
+        let requested_config = request.canonical_requested_config();
         let prompt_hash = calculate_prompt_hash(&clean_prompt);
+        let configuration_fingerprint = compute_configuration_fingerprint(
+            &request.profile_id,
+            &request.source_media_id,
+            &prompt_hash,
+            intent,
+            identity_mode,
+            &requested_config,
+        );
 
         // Perform browser preflight with sidecar
         let mut session = self.bridge.open_active_session(&profile_dir).await?;
@@ -399,6 +640,9 @@ impl FlowOrchestrator {
                 video_attached: false,
                 video_edit_active: false,
                 configuration_verified: false,
+                requested_config: requested_config.clone(),
+                observed_config: FlowObservedGenerationConfig::default(),
+                configuration_fingerprint,
                 configured_model: None,
                 configured_duration: None,
                 configured_orientation: None,
@@ -413,6 +657,7 @@ impl FlowOrchestrator {
                 observed_orientation: None,
                 observed_output_count: None,
                 observed_generation_length: None,
+                observed_resolution: None,
                 ready_for_paid_submission: false,
                 blocking_code: Some(auth_status.to_string()),
                 checked_at: Utc::now().to_rfc3339(),
@@ -441,6 +686,10 @@ impl FlowOrchestrator {
             .and_then(|v| v.get("model"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let observed_resolution = edit_verif
+            .and_then(|v| v.get("resolution"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let observed_orientation = edit_verif
             .and_then(|v| v.get("orientation"))
             .and_then(|v| v.as_str())
@@ -458,6 +707,14 @@ impl FlowOrchestrator {
         let orientation = observed_orientation.clone();
         let output_count = observed_output_count.unwrap_or(1);
 
+        let observed_config = FlowObservedGenerationConfig {
+            model_id: observed_model.clone(),
+            resolution: observed_resolution.clone(),
+            duration_sec: observed_generation_length.map(|d| d.round() as u32),
+            orientation: observed_orientation.clone(),
+            output_count: observed_output_count,
+        };
+
         let live_cost_raw = edit_verif
             .and_then(|v| v.get("creditEstimateNumber"))
             .and_then(|v| v.as_u64())
@@ -473,43 +730,76 @@ impl FlowOrchestrator {
             .and_then(|v| v.as_u64())
             .map(|c| c as u32);
 
+        let model_matches = match (
+            requested_config.model_id.as_deref(),
+            observed_model.as_deref(),
+        ) {
+            (Some(req), Some(obs)) => req.eq_ignore_ascii_case(obs),
+            (None, Some(obs)) => obs.eq_ignore_ascii_case("Omni Flash"),
+            _ => false,
+        };
+
+        let resolution_matches = match (
+            requested_config.resolution.as_deref(),
+            observed_resolution.as_deref(),
+        ) {
+            (Some(req), Some(obs)) => req.eq_ignore_ascii_case(obs),
+            (Some(req), None) => req == "720p",
+            (None, _) => true,
+        };
+
+        let output_count_matches = output_count == requested_config.output_count;
+
         let configuration_verified = video_attached
             && video_edit_active
-            && observed_model.as_deref() == Some("Omni Flash")
-            && output_count == 1;
+            && model_matches
+            && resolution_matches
+            && output_count_matches;
 
-        let (cost_provenance, live_displayed_credit_cost, ready_for_paid_submission, blocking_code) =
-            if video_attached && video_edit_active && configuration_verified {
-                if let Some(cost) = live_cost_raw {
-                    (
-                        FlowCostProvenance::UploadedVideoEdit,
-                        Some(cost),
-                        true,
-                        None,
-                    )
-                } else {
-                    (
-                        FlowCostProvenance::Unknown,
-                        None,
-                        false,
-                        Some("FLOW_CONFIGURATION_UNVERIFIED".to_string()),
-                    )
-                }
+        let (
+            cost_provenance,
+            live_displayed_credit_cost,
+            mut ready_for_paid_submission,
+            mut blocking_code,
+        ) = if video_attached && video_edit_active && configuration_verified {
+            if let Some(cost) = live_cost_raw {
+                (
+                    FlowCostProvenance::UploadedVideoEdit,
+                    Some(cost),
+                    true,
+                    None,
+                )
             } else {
-                let code = if !video_attached {
-                    "FLOW_VIDEO_NOT_ATTACHED"
-                } else if !video_edit_active {
-                    "FLOW_VIDEO_EDIT_NOT_ACTIVE"
-                } else {
-                    "FLOW_CONFIGURATION_UNVERIFIED"
-                };
                 (
                     FlowCostProvenance::Unknown,
                     None,
                     false,
-                    Some(code.to_string()),
+                    Some("FLOW_CONFIGURATION_UNVERIFIED".to_string()),
                 )
+            }
+        } else {
+            let code = if !video_attached {
+                "FLOW_VIDEO_NOT_ATTACHED"
+            } else if !video_edit_active {
+                "FLOW_VIDEO_EDIT_NOT_ACTIVE"
+            } else {
+                "FLOW_CONFIGURATION_UNVERIFIED"
             };
+            (
+                FlowCostProvenance::Unknown,
+                None,
+                false,
+                Some(code.to_string()),
+            )
+        };
+
+        // Check insufficient credit balance when both balance and cost are known
+        if let (Some(bal), Some(cost)) = (live_balance, live_displayed_credit_cost) {
+            if bal < cost {
+                blocking_code = Some("FLOW_INSUFFICIENT_CREDITS".to_string());
+                ready_for_paid_submission = false;
+            }
+        }
 
         Ok(FlowGenerationPreflight {
             project_id: request.project_id,
@@ -523,6 +813,9 @@ impl FlowOrchestrator {
             video_attached,
             video_edit_active,
             configuration_verified,
+            requested_config,
+            observed_config,
+            configuration_fingerprint,
             configured_model: model,
             configured_duration: duration,
             configured_orientation: orientation,
@@ -537,6 +830,7 @@ impl FlowOrchestrator {
             observed_orientation,
             observed_output_count,
             observed_generation_length,
+            observed_resolution,
             ready_for_paid_submission,
             blocking_code,
             checked_at: Utc::now().to_rfc3339(),
@@ -601,6 +895,28 @@ impl FlowOrchestrator {
             ));
         }
 
+        let prompt_hash = calculate_prompt_hash(&clean_prompt);
+        let requested_config = request.canonical_requested_config();
+
+        // Validate configuration fingerprint if supplied
+        let expected_fingerprint = compute_configuration_fingerprint(
+            &request.profile_id,
+            &request.source_media_id,
+            &prompt_hash,
+            intent,
+            identity_mode,
+            &requested_config,
+        );
+
+        if let Some(ref fp) = request.configuration_fingerprint {
+            if fp != &expected_fingerprint {
+                return Err(
+                    "FLOW_PREFLIGHT_STALE: Preflight configuration signature is invalid or stale"
+                        .to_string(),
+                );
+            }
+        }
+
         // Probe source video
         let facts = SourceMediaProbe::probe_file(&canonical_source_path)
             .map_err(|e| format!("PROBE_FAILED: {}", e))?;
@@ -615,7 +931,6 @@ impl FlowOrchestrator {
         let parent_id = format!("flow_{}", uuid::Uuid::new_v4());
         let client_request_id = format!("req_{}", Utc::now().timestamp_millis());
         let submitted_prompt = clean_prompt.clone();
-        let prompt_hash = calculate_prompt_hash(&submitted_prompt);
 
         // Derive deterministic config hash
         let mut hasher = Sha256::new();
@@ -666,6 +981,7 @@ impl FlowOrchestrator {
             intent,
             identity_mode,
             request.target_face.clone(),
+            requested_config,
             submitted_prompt,
             prompt_hash,
             resolved_prompt_source,

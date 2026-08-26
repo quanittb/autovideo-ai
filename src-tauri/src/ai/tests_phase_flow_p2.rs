@@ -248,6 +248,8 @@ fn test_flow_p2_03_empty_prompt_and_system_default_preservation() {
         target_face: None,
         max_credits: Some(50),
         preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: None,
     };
 
     let probe_err = tokio::runtime::Runtime::new()
@@ -273,6 +275,8 @@ fn test_flow_p2_03_empty_prompt_and_system_default_preservation() {
         target_face: None,
         max_credits: Some(50),
         preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: None,
     };
 
     let style_err = tokio::runtime::Runtime::new()
@@ -293,6 +297,8 @@ fn test_flow_p2_03_empty_prompt_and_system_default_preservation() {
         target_face: None,
         max_credits: Some(50),
         preserve_original_audio: Some(true),
+        requested_config: None,
+        configuration_fingerprint: None,
     };
 
     let ref_err = tokio::runtime::Runtime::new()
@@ -367,6 +373,7 @@ fn test_flow_p2_05_use_flow_output_and_chained_editing() {
         TransformationIntent::FaceReplace,
         IdentityMode::Generated,
         None,
+        FlowRequestedGenerationConfig::default(),
         "Change face prompt".to_string(),
         "prompt_hash_1".to_string(),
         PromptSource::User,

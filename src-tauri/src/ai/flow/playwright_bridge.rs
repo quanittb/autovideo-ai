@@ -520,6 +520,16 @@ impl PlaywrightBridge {
         res
     }
 
+    pub async fn read_credit_balance(
+        &self,
+        profile_dir: &Path,
+    ) -> Result<serde_json::Value, String> {
+        let mut session = self.open_active_session(profile_dir).await?;
+        let res = session.read_credit_balance().await;
+        session.close().await;
+        res
+    }
+
     pub async fn submit_generation(
         &self,
         profile_dir: &Path,
@@ -609,6 +619,16 @@ impl FlowActiveBrowserSession {
                     "videoPath": video_path_str
                 }),
                 Duration::from_secs(120),
+            )
+            .await
+    }
+
+    pub async fn read_credit_balance(&mut self) -> Result<serde_json::Value, String> {
+        self.sidecar
+            .call_rpc(
+                "read_credit_balance",
+                serde_json::json!({}),
+                Duration::from_secs(45),
             )
             .await
     }

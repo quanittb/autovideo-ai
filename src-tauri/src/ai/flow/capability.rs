@@ -1,14 +1,57 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FlowCapabilitySource {
+    LiveFlowUi,
+    CachedLiveObservation,
+    StaticFallback,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FlowCapabilityContext {
+    UploadedVideoEdit,
+    GenericVideoGeneration,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowModelCapability {
+    pub model_id: String,
+    pub display_name: String,
+    pub supported_resolutions: Vec<String>,
+    pub supported_durations_sec: Vec<u32>,
+    pub supported_orientations: Vec<String>,
+    pub supported_output_counts: Vec<u32>,
+    pub supports_uploaded_video_edit: bool,
+    pub source: FlowCapabilitySource,
+    pub context: FlowCapabilityContext,
+    pub observed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowModelCapabilitiesSnapshot {
+    pub profile_id: String,
+    pub operation_context: FlowCapabilityContext,
+    pub models: Vec<FlowModelCapability>,
+    pub source: FlowCapabilitySource,
+    pub observed_at: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum FlowGenerationMode {
     OmniVideoGenerate,
     OmniEditUploadedVideo,
 }
 
-pub const OMNI_EDIT_UPLOADED_VIDEO_CREDITS_PER_GENERATION: u32 = 40;
-pub const OMNI_VIDEO_GENERATE_CREDITS_PER_GENERATION: u32 = 20;
+/// NOTE: Static planning estimate only. Not an authoritative paid generation cost.
+pub const OMNI_EDIT_UPLOADED_VIDEO_ESTIMATED_CREDITS_PER_GENERATION: u32 = 40;
+pub const OMNI_VIDEO_GENERATE_ESTIMATED_CREDITS_PER_GENERATION: u32 = 20;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,7 +72,7 @@ impl Default for FlowCapabilityPolicy {
             split_policy_version: 1,
             max_edit_segment_duration_sec: 10.0,
             mode: FlowGenerationMode::OmniEditUploadedVideo,
-            credits_per_generation: OMNI_EDIT_UPLOADED_VIDEO_CREDITS_PER_GENERATION,
+            credits_per_generation: OMNI_EDIT_UPLOADED_VIDEO_ESTIMATED_CREDITS_PER_GENERATION,
             outputs_per_generation: 1,
             automatic_generation_retries: 0,
         }
@@ -41,6 +84,7 @@ impl FlowCapabilityPolicy {
         Self::default()
     }
 
+    /// Calculate static planning credit estimate. The authoritative cost must come from live Flow active edit.
     pub fn estimate_credits(&self, segment_count: usize) -> u32 {
         (segment_count as u32) * self.outputs_per_generation * self.credits_per_generation
     }

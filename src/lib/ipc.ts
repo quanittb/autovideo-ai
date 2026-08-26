@@ -987,29 +987,6 @@ export interface SegmentedCloudSubmissionPreflight {
 
 export type PromptSource = 'USER' | 'GEMINI_OPTIMIZED' | 'GEMINI_OPTIMIZED_THEN_EDITED' | 'SYSTEM_DEFAULT';
 
-export type FlowJobState =
-  | 'PLANNING'
-  | 'SPLITTING'
-  | 'READY'
-  | 'WAITING_FOR_BROWSER'
-  | 'LOGIN_REQUIRED'
-  | 'UPLOADING'
-  | 'READY_TO_SUBMIT'
-  | 'SUBMITTING'
-  | 'GENERATION_AMBIGUOUS'
-  | 'GENERATING'
-  | 'DOWNLOADING'
-  | 'VALIDATING_SEGMENT'
-  | 'STITCHING'
-  | 'VALIDATING_FINAL'
-  | 'COMPLETED'
-  | 'CREDITS_REQUIRED'
-  | 'USER_ACTION_REQUIRED'
-  | 'FLOW_UI_CHANGED'
-  | 'BLOCKED'
-  | 'FAILED'
-  | 'CANCELLED';
-
 export interface OptimizePromptRequest {
   prompt: string;
   sourcePromptHash?: string;
@@ -1098,85 +1075,39 @@ export interface TargetFaceSelection {
   normalizedBoundingBox?: [number, number, number, number];
 }
 
-export interface FlowGenerationRequest {
-  projectId: string;
-  sourceMediaId: string;
-  profileId: string;
-  transformationIntent?: TransformationIntent;
-  identityMode?: IdentityMode;
-  prompt: string;
-  promptSource?: PromptSource;
-  targetFace?: TargetFaceSelection;
-  maxCredits?: number;
-  preserveOriginalAudio?: boolean;
-}
+import type {
+  FlowCapabilitySource,
+  FlowCapabilityContext,
+  FlowModelCapability,
+  FlowModelCapabilitiesSnapshot,
+  FlowRequestedGenerationConfig,
+  FlowObservedGenerationConfig,
+  FlowCreditStatus,
+  FlowCreditSource,
+  FlowProfileCreditStatus,
+  FlowCostProvenance,
+  FlowGenerationRequest,
+  FlowGenerationPreflight,
+  FlowJobSnapshot,
+  FlowJobState,
+} from '../types/contracts';
 
-export type FlowCostProvenance =
-  | 'UPLOADED_VIDEO_EDIT'
-  | 'GENERIC_COMPOSER_DIAGNOSTIC'
-  | 'UNKNOWN';
-
-export interface FlowGenerationPreflight {
-  projectId: string;
-  sourceMediaId: string;
-  profileId: string;
-  transformationIntent: TransformationIntent;
-  identityMode: IdentityMode;
-  resolvedPrompt: string;
-  promptSource: PromptSource;
-  promptHash: string;
-  videoAttached: boolean;
-  videoEditActive: boolean;
-  configurationVerified: boolean;
-  configuredModel?: string;
-  configuredDuration?: number;
-  configuredOrientation?: string;
-  outputCount: number;
-  liveDisplayedCreditCost?: number;
-  liveCreditBalance?: number;
-  costProvenance: FlowCostProvenance;
-  diagnosticComposerCreditCost?: number;
-  observedSourceTitle?: string;
-  observedSourceDuration?: number;
-  observedModel?: string;
-  observedOrientation?: string;
-  observedOutputCount?: number;
-  observedGenerationLength?: number;
-  readyForPaidSubmission: boolean;
-  blockingCode?: string;
-  checkedAt: string;
-}
-
-export interface FlowJobSnapshot {
-  parentId: string;
-  projectId: string;
-  profileId: string;
-  submittedPrompt: string;
-  promptHash: string;
-  promptSource: PromptSource;
-  transformationIntent?: TransformationIntent;
-  identityMode?: IdentityMode;
-  targetFace?: TargetFaceSelection;
-  state: FlowJobState;
-  stateRevision: number;
-  activeSegmentIndex: number;
-  totalSegments: number;
-  estimatedCredits: number;
-  observedCreditBalance?: number;
-  creditBudgetLimit?: number;
-  reservedCredits?: number;
-  completedGenerations: number;
-  finalOutputReady: boolean;
-  finalOutputPath?: string;
-  errorCode?: string;
-  errorMessage?: string;
-  timestamps: {
-    createdAt: string;
-    updatedAt: string;
-    submittedAt?: string | null;
-    completedAt?: string | null;
-  };
-}
+export type {
+  FlowCapabilitySource,
+  FlowCapabilityContext,
+  FlowModelCapability,
+  FlowModelCapabilitiesSnapshot,
+  FlowRequestedGenerationConfig,
+  FlowObservedGenerationConfig,
+  FlowCreditStatus,
+  FlowCreditSource,
+  FlowProfileCreditStatus,
+  FlowCostProvenance,
+  FlowGenerationRequest,
+  FlowGenerationPreflight,
+  FlowJobSnapshot,
+  FlowJobState,
+};
 
 export const flowApi = {
   optimizePrompt: (request: OptimizePromptRequest): Promise<OptimizePromptResponse> =>
@@ -1253,6 +1184,15 @@ export const flowApi = {
 
   listFlowJobs: (projectId: string): Promise<FlowJobSnapshot[]> =>
     invoke('list_flow_jobs', { projectId }),
+
+  refreshCreditBalance: (profileId: string): Promise<import('../types/contracts').FlowProfileCreditStatus> =>
+    invoke('refresh_flow_credit_balance', { profileId }),
+
+  getModelCapabilities: (
+    profileId: string,
+    operationContext?: import('../types/contracts').FlowCapabilityContext
+  ): Promise<import('../types/contracts').FlowModelCapabilitiesSnapshot> =>
+    invoke('get_flow_model_capabilities', { profileId, operationContext }),
 
   openOutputArtifact: (projectId: string, parentId: string): Promise<string> =>
     invoke('open_flow_output_artifact', { projectId, parentId }),

@@ -2592,6 +2592,25 @@ pub fn list_flow_jobs(
 }
 
 #[command]
+pub async fn refresh_flow_credit_balance(
+    profile_id: String,
+    flow_service: tauri::State<'_, Arc<crate::ai::flow::FlowRuntimeService>>,
+) -> Result<crate::ai::flow::FlowProfileCreditStatus, String> {
+    flow_service.refresh_flow_credit_balance(&profile_id).await
+}
+
+#[command]
+pub fn get_flow_model_capabilities(
+    profile_id: String,
+    operation_context: Option<crate::ai::flow::FlowCapabilityContext>,
+    flow_service: tauri::State<'_, Arc<crate::ai::flow::FlowRuntimeService>>,
+) -> Result<crate::ai::flow::FlowModelCapabilitiesSnapshot, String> {
+    let ctx =
+        operation_context.unwrap_or(crate::ai::flow::FlowCapabilityContext::UploadedVideoEdit);
+    Ok(flow_service.get_flow_model_capabilities(&profile_id, ctx))
+}
+
+#[command]
 pub fn open_flow_output_artifact(
     project_id: String,
     parent_id: String,
