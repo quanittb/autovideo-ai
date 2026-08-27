@@ -201,57 +201,75 @@ impl FlowProfileManager {
 
         let lock_file = profile_dir.join(".session.lock");
 
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_file)
-        {
-            Ok(mut file) => {
-                let meta = LockMetadata {
-                    pid: std::process::id(),
-                    instance_id: Uuid::new_v4().to_string(),
-                    locked_at: Utc::now().to_rfc3339(),
-                };
-                let _ = serde_json::to_writer(&mut file, &meta);
-                Ok(FlowProfileGuard { lock_file })
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if Self::is_lock_stale(&lock_file) {
-                    let _ = fs::remove_file(&lock_file);
-                    let mut file = OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&lock_file)
-                        .map_err(|_| {
-                            "PROFILE_IN_USE: Profile is currently locked by another active session"
-                                .to_string()
-                        })?;
+        for attempt in 0..10 {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_file)
+            {
+                Ok(mut file) => {
                     let meta = LockMetadata {
                         pid: std::process::id(),
                         instance_id: Uuid::new_v4().to_string(),
                         locked_at: Utc::now().to_rfc3339(),
                     };
                     let _ = serde_json::to_writer(&mut file, &meta);
-                    Ok(FlowProfileGuard { lock_file })
-                } else {
-                    Err(
+                    return Ok(FlowProfileGuard { lock_file });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if Self::is_lock_stale(&lock_file) {
+                        let _ = fs::remove_file(&lock_file);
+                        continue;
+                    }
+                    if attempt < 9 {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        continue;
+                    }
+                    return Err(
                         "PROFILE_IN_USE: Profile is currently locked by another active session"
                             .to_string(),
-                    )
+                    );
                 }
+                Err(e) => return Err(format!("Failed to acquire profile lock: {}", e)),
             }
-            Err(e) => Err(format!("Failed to acquire profile lock: {}", e)),
         }
+
+        Err("PROFILE_IN_USE: Profile is currently locked by another active session".to_string())
     }
 
     fn is_lock_stale(lock_file: &Path) -> bool {
         if let Ok(content) = fs::read_to_string(lock_file) {
             if let Ok(meta) = serde_json::from_str::<LockMetadata>(&content) {
-                // If the process that created the lock is our own PID and instance crashed/restarted
-                // or if the lock is very old (> 12 hours)
+                // If the process that created the lock is no longer alive, the lock is stale
+                #[cfg(target_os = "windows")]
+                {
+                    use std::process::Command;
+                    if let Ok(output) = Command::new("tasklist")
+                        .args(&["/FI", &format!("PID eq {}", meta.pid), "/NH"])
+                        .output()
+                    {
+                        let out_str = String::from_utf8_lossy(&output.stdout);
+                        if !out_str.contains(&meta.pid.to_string())
+                            || out_str.contains("No tasks are running")
+                        {
+                            return true;
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let res = unsafe { libc::kill(meta.pid as i32, 0) };
+                    if res != 0 {
+                        return true;
+                    }
+                }
+
                 if let Ok(locked_time) = chrono::DateTime::parse_from_rfc3339(&meta.locked_at) {
                     let age = Utc::now().signed_duration_since(locked_time);
-                    if age.num_hours() > 12 {
+                    if meta.pid == std::process::id() && age.num_seconds() > 30 {
+                        return true;
+                    }
+                    if age.num_minutes() > 5 {
                         return true;
                     }
                 }

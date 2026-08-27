@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "login:flow": "node src-tauri/sidecars/flow-playwright/login_helper.js",
     "tauri": "tauri"
   },
   "dependencies": {

@@ -26,7 +26,6 @@ export const FlowGenPanel: React.FC = () => {
     selectProfile,
     openProfileBrowser,
     refreshCreditBalance,
-    fetchModelCapabilities,
     loadGeminiStatus,
     loadFlowJobs,
     preflightFlowJob,
@@ -74,20 +73,15 @@ export const FlowGenPanel: React.FC = () => {
   useEffect(() => {
     loadProfiles();
     loadGeminiStatus();
-  }, [loadProfiles, loadGeminiStatus]);
-
-  useEffect(() => {
-    if (selectedProfileId) {
-      refreshCreditBalance(selectedProfileId).catch(() => {});
-      fetchModelCapabilities(selectedProfileId, 'UPLOADED_VIDEO_EDIT').catch(() => {});
-    }
-  }, [selectedProfileId, refreshCreditBalance, fetchModelCapabilities]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (projectId) {
       loadFlowJobs(projectId);
     }
-  }, [projectId, loadFlowJobs]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
 
   const availableMediaList: { id: string; label: string; isDerived: boolean; durationSec: number }[] = [];
   if (activeProject?.sourceMedia) {
@@ -143,11 +137,13 @@ export const FlowGenPanel: React.FC = () => {
     }, 2000);
 
     return () => clearInterval(timer);
-  }, [activeJob, projectId, pollJobStatus]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeJob?.parentId, activeJob?.state, projectId]);
 
   // Invalidate preflight on any parameter change
   useEffect(() => {
     invalidatePreflight();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     projectId,
     selectedProfileId,
@@ -159,7 +155,6 @@ export const FlowGenPanel: React.FC = () => {
     selectedDuration,
     selectedOrientation,
     selectedOutputCount,
-    invalidatePreflight,
   ]);
 
   const isPromptValid =
@@ -226,9 +221,10 @@ export const FlowGenPanel: React.FC = () => {
   const isRefreshingCredit = selectedProfileId ? !!isRefreshingCreditByProfile[selectedProfileId] : false;
 
   return (
-    <div className="flex flex-col gap-6 max-w-5xl mx-auto p-6 text-slate-100">
-      <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-        <div className="flex items-center gap-3">
+    <div className="flex-1 w-full h-full overflow-y-auto p-4 sm:p-6 text-slate-100">
+      <div className="flex flex-col gap-6 max-w-5xl mx-auto pb-16">
+        <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+          <div className="flex items-center gap-3">
           <div className="p-2.5 bg-gradient-to-br from-indigo-500/20 to-purple-500/20 border border-indigo-500/30 rounded-xl">
             <Sparkles className="w-6 h-6 text-indigo-400" />
           </div>
@@ -276,7 +272,7 @@ export const FlowGenPanel: React.FC = () => {
           <div className="flex items-center justify-between px-4 py-2.5 bg-slate-900/80 border border-slate-800 rounded-xl text-xs">
             <div className="flex items-center gap-3">
               <span className="text-slate-400">Profile Balance ({selectedProfile.name}):</span>
-              {currentProfileCredit?.balance !== undefined ? (
+              {typeof currentProfileCredit?.balance === 'number' ? (
                 <span className="font-bold text-emerald-400 text-sm">
                   {currentProfileCredit.balance.toLocaleString()} credits
                 </span>
@@ -639,5 +635,6 @@ export const FlowGenPanel: React.FC = () => {
       {/* Active Job Progress */}
       {activeJob && <FlowJobProgress job={activeJob} />}
     </div>
+  </div>
   );
 };

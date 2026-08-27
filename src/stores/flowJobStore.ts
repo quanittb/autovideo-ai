@@ -306,7 +306,9 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
   },
 
   invalidatePreflight: () => {
-    set({ preflight: null });
+    if (get().preflight !== null) {
+      set({ preflight: null });
+    }
   },
 
   startFlowJob: async (

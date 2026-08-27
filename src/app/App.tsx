@@ -12,6 +12,7 @@ import { HistoryView } from '../features/history/HistoryView';
 import { MediaVerificationRunner } from '../features/media/MediaVerificationRunner';
 import { GenerativeStudioView } from '../features/generation/GenerativeStudioView';
 import { FlowGenPanel } from '../features/flow/FlowGenPanel';
+import { ErrorBoundary } from '../components/common/ErrorBoundary';
 import { useUiStore } from '../stores/uiStore';
 
 export const App: React.FC = () => {
@@ -56,7 +57,11 @@ export const App: React.FC = () => {
     }
   };
 
-  return <Layout>{renderFeatureContent()}</Layout>;
+  return (
+    <Layout>
+      <ErrorBoundary>{renderFeatureContent()}</ErrorBoundary>
+    </Layout>
+  );
 };
 
 export default App;
