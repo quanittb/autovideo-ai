@@ -25,6 +25,7 @@ dist-ssr
 *.sw?
 .autovideo_data
 **/target
+**/target_test
 .venv*
 __pycache__
 *.pyc
