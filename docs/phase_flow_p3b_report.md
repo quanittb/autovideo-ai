@@ -1,4 +1,4 @@
-﻿# Phase FLOW-P3-B Real Production Acceptance Report
+# Phase FLOW-P3-B Real Production Acceptance Report
 
 ## 1. Executive Summary
 
@@ -122,18 +122,20 @@ Representative frames extracted using FFmpeg at timestamps corresponding to 20%,
 ## 6. Financial & Credit Accounting Reconciliation
 
 - **Authorized Total Budget Ceiling**: `50 credits`
-- **Gen #1 Authoritative Cost**: `20 credits`
-- **Gen #2 Authoritative Cost**: `20 credits`
-- **P3B_OPERATION_COST**: `40 credits`
+- **Known Evidence**:
+  - `GEN1 scoped operation cost`: 20 credits
+  - `GEN2 scoped operation cost`: 20 credits
+  - `SUM_OF_AUTHORITATIVE_OPERATION_COSTS`: 40 credits
+- **Observed Account Balance**:
+  - `before`: 1050 credits
+  - `after`: 1030 credits
+  - `ACCOUNT_BALANCE_DELTA`: 20 credits
+  - `ACCOUNT_BALANCE_RECONCILIATION`: `UNRESOLVED`
+  - *Accounting Note*: DO NOT claim the balance proves 40 credits were deducted. Do not speculate why. Authoritative operation cost comes from the scoped live Generate cost observed immediately before each paid click (20 credits per click). Account balance is a separate observation.
 - **Budget Compliance**: **PASSED** (`40 <= 50 credits`, margin: 10 credits remaining)
 - **Dispatched Paid Clicks**: `2` (no accidental double-clicks, no background runaway clicks)
 - **Auto-Retries**: `0`
-- **Account Balance Post-Run Check**:
-  - `CURRENT_BALANCE`: `1050 credits`
-  - `BALANCE_SOURCE`: `LIVE_FLOW_API (/v1/credits via official session)`
-  - `CHECKED_AT`: `2026-08-27T05:40:16.428Z`
-  - `ACCOUNT_BALANCE_RECONCILIATION`: `UNRESOLVED`
-  - *Accounting Note*: Authoritative operation cost is established strictly by the scoped live Generate pre-click cost tooltips displayed and committed (20 credits per click). Account balance reflects provider backend billing/holding cycles and does not invalidate proven generation evidence.
+
 
 ---
 
