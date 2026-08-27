@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Play, Sparkles, AlertCircle, Info, RefreshCw, Folder, LogIn, ExternalLink, Film } from 'lucide-react';
+import { Play, Sparkles, AlertCircle, Info, RefreshCw, Folder, LogIn, ExternalLink, Film, Clock } from 'lucide-react';
 import { useFlowJobStore } from '../../stores/flowJobStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { usePromptOptimization } from './usePromptOptimization';
@@ -365,6 +365,40 @@ export const FlowGenPanel: React.FC = () => {
               <div className="text-[11px] text-slate-500 font-mono">
                 mediaId: {selectedMediaId || 'none'}
               </div>
+
+              {(() => {
+                const currentMedia = availableMediaList.find((m) => m.id === selectedMediaId);
+                if (!currentMedia || currentMedia.durationSec <= 10) return null;
+                const plannedSegments = Math.ceil(currentMedia.durationSec / 10);
+                const estimatedTotal = plannedSegments * 20;
+                return (
+                  <div className="flex flex-col gap-1.5 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-xs mt-1">
+                    <div className="flex items-center justify-between font-semibold text-amber-300">
+                      <span className="flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5 text-amber-400" />
+                        Long Video Multi-Segment Plan
+                      </span>
+                      <span className="text-[11px] px-1.5 py-0.5 bg-amber-500/20 rounded text-amber-200">
+                        Planned Flow segments: {plannedSegments}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-300">
+                      <div>Duration: <strong className="text-slate-100">{currentMedia.durationSec.toFixed(1)} sec</strong></div>
+                      <div>Maximum segment: <strong className="text-slate-100">10 sec</strong></div>
+                      <div className="col-span-2 text-slate-400">
+                        Identity continuity: <strong className="text-slate-200">Best effort</strong> (same prompt baseline)
+                      </div>
+                    </div>
+                    <div className="mt-1 pt-1.5 border-t border-amber-500/20 flex items-center justify-between text-[11px]">
+                      <span className="text-slate-400">Estimated Cost:</span>
+                      <span className="font-semibold text-amber-200">
+                        {plannedSegments} × 20 ≈ {estimatedTotal} credits{' '}
+                        <span className="text-[10px] text-amber-400 font-normal">(ESTIMATE ONLY)</span>
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>

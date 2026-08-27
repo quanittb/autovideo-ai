@@ -7,7 +7,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const CURRENT_FLOW_MANIFEST_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_FLOW_MANIFEST_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -132,8 +132,164 @@ impl FlowJobState {
 }
 
 // -----------------------------------------------------------------------------
-// 2. Child Submission State
+// 2. Child Submission State & Long-Video Types
 // -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FlowJobKind {
+    SingleSegment,
+    LongVideoParent,
+    LongVideoChild,
+}
+
+impl Default for FlowJobKind {
+    fn default() -> Self {
+        Self::SingleSegment
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FlowIdentityContinuityStrategy {
+    SamePromptBaseline,
+    ReferenceAnchor,
+    OverlapVisualAnchor,
+    Unsupported,
+}
+
+impl Default for FlowIdentityContinuityStrategy {
+    fn default() -> Self {
+        Self::SamePromptBaseline
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FlowFaceContinuityStatus {
+    Pass,
+    Fail,
+    Unverified,
+    NoFace,
+}
+
+impl Default for FlowFaceContinuityStatus {
+    fn default() -> Self {
+        Self::Unverified
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FlowSeamStatus {
+    Pass,
+    Fail,
+    Unverified,
+}
+
+impl Default for FlowSeamStatus {
+    fn default() -> Self {
+        Self::Unverified
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowContinuityEvidence {
+    pub boundary_index: usize,
+    pub previous_segment_index: usize,
+    pub next_segment_index: usize,
+    #[serde(default)]
+    pub previous_end_frame_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub next_start_frame_paths: Vec<PathBuf>,
+    pub face_continuity_status: FlowFaceContinuityStatus,
+    pub seam_status: FlowSeamStatus,
+    #[serde(default)]
+    pub metric_name: Option<String>,
+    #[serde(default)]
+    pub metric_value: Option<f64>,
+    #[serde(default)]
+    pub reviewed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FlowAudioRestorationMode {
+    StreamCopy,
+    DeterministicTranscode,
+    NoSourceAudio,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowCanonicalGeometry {
+    pub width: u32,
+    pub height: u32,
+    pub orientation: String,
+    #[serde(default = "default_sar")]
+    pub sar: String,
+}
+
+fn default_sar() -> String {
+    "1:1".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowParentLedger {
+    pub segment_count: usize,
+    pub planning_cost_estimate: u32,
+    pub authoritative_committed_credits: u32,
+    pub reserved_credits: u32,
+    pub completed_paid_segments: usize,
+    #[serde(default)]
+    pub max_total_credits: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowPlannedSegment {
+    pub segment_index: usize,
+    pub start_frame: u64,
+    pub end_frame: u64,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub planned_duration_sec: f64,
+    pub planned_frame_count: u64,
+    pub source_segment_path: PathBuf,
+    pub source_segment_sha256: String,
+    #[serde(default)]
+    pub child_job_id: Option<String>,
+    pub state: FlowJobState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowLongVideoPlan {
+    pub parent_job_id: String,
+    pub project_id: String,
+    #[serde(default)]
+    pub source_media_id: Option<String>,
+    pub source_duration_ms: u64,
+    pub source_fps_rational: (u32, u32),
+    pub source_timing_mode: String,
+    pub working_proxy_created: bool,
+    #[serde(default)]
+    pub working_proxy_path: Option<PathBuf>,
+    #[serde(default)]
+    pub working_proxy_sha256: Option<String>,
+    pub strategy: String,
+    pub segment_count: usize,
+    pub segments: Vec<FlowPlannedSegment>,
+    pub requested_config: FlowRequestedGenerationConfig,
+    pub prompt_hash: String,
+    pub transformation_intent: crate::ai::transformation::TransformationIntent,
+    pub identity_mode: crate::ai::transformation::IdentityMode,
+    pub continuity_strategy: FlowIdentityContinuityStrategy,
+    pub identity_continuity_guaranteed: bool,
+    pub created_at: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -263,6 +419,20 @@ pub struct FlowGenerationManifest {
     pub active_segment_index: usize,
     pub final_audio_policy: FlowFinalAudioPolicy,
     pub final_output: Option<FlowOutputArtifactRecord>,
+    #[serde(default)]
+    pub job_kind: FlowJobKind,
+    #[serde(default)]
+    pub long_video_plan: Option<FlowLongVideoPlan>,
+    #[serde(default)]
+    pub parent_ledger: Option<FlowParentLedger>,
+    #[serde(default)]
+    pub continuity_strategy: Option<FlowIdentityContinuityStrategy>,
+    #[serde(default)]
+    pub continuity_evidence: Vec<FlowContinuityEvidence>,
+    #[serde(default)]
+    pub audio_restoration_mode: Option<FlowAudioRestorationMode>,
+    #[serde(default)]
+    pub canonical_geometry: Option<FlowCanonicalGeometry>,
     pub cancellation_requested: bool,
     pub error: Option<JobErrorRecord>,
     pub timestamps: JobTimestamps,
@@ -322,6 +492,13 @@ impl FlowGenerationManifest {
             active_segment_index: 0,
             final_audio_policy,
             final_output: None,
+            job_kind: FlowJobKind::SingleSegment,
+            long_video_plan: None,
+            parent_ledger: None,
+            continuity_strategy: None,
+            continuity_evidence: Vec::new(),
+            audio_restoration_mode: None,
+            canonical_geometry: None,
             cancellation_requested: false,
             error: None,
             timestamps: JobTimestamps {
@@ -366,6 +543,10 @@ impl FlowGenerationManifest {
             error_code: self.error.as_ref().map(|e| e.code.clone()),
             error_message: self.error.as_ref().map(|e| e.sanitized_message.clone()),
             timestamps: self.timestamps.clone(),
+            job_kind: Some(self.job_kind),
+            continuity_strategy: self.continuity_strategy,
+            parent_ledger: self.parent_ledger.clone(),
+            audio_restoration_mode: self.audio_restoration_mode,
         }
     }
 }
@@ -408,6 +589,14 @@ pub struct FlowJobSnapshot {
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub timestamps: JobTimestamps,
+    #[serde(default)]
+    pub job_kind: Option<FlowJobKind>,
+    #[serde(default)]
+    pub continuity_strategy: Option<FlowIdentityContinuityStrategy>,
+    #[serde(default)]
+    pub parent_ledger: Option<FlowParentLedger>,
+    #[serde(default)]
+    pub audio_restoration_mode: Option<FlowAudioRestorationMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

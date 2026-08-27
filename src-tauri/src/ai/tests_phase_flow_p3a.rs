@@ -671,9 +671,9 @@ fn test_flow_p3a_08_capability_provenance_and_context_separation() {
 
 #[test]
 fn test_flow_p3a_09_manifest_schema_v4_backward_compatibility() {
-    assert_eq!(CURRENT_FLOW_MANIFEST_SCHEMA_VERSION, 4);
+    assert!(CURRENT_FLOW_MANIFEST_SCHEMA_VERSION >= 4);
 
-    // Test serialization and deserialization with schema 4
+    // Test serialization and deserialization with schema 4/5
     let req_config = FlowRequestedGenerationConfig {
         model_id: Some("Omni Flash".to_string()),
         resolution: Some("720p".to_string()),
@@ -722,7 +722,10 @@ fn test_flow_p3a_09_manifest_schema_v4_backward_compatibility() {
         },
     );
 
-    assert_eq!(manifest.schema_version, 4);
+    assert_eq!(
+        manifest.schema_version,
+        CURRENT_FLOW_MANIFEST_SCHEMA_VERSION
+    );
     assert_eq!(
         manifest.requested_generation_config.model_id.as_deref(),
         Some("Omni Flash")
@@ -734,11 +737,22 @@ fn test_flow_p3a_09_manifest_schema_v4_backward_compatibility() {
 
     let json_str = serde_json::to_string(&manifest).unwrap();
     let deserialized: FlowGenerationManifest = serde_json::from_str(&json_str).unwrap();
-    assert_eq!(deserialized.schema_version, 4);
+    assert_eq!(
+        deserialized.schema_version,
+        CURRENT_FLOW_MANIFEST_SCHEMA_VERSION
+    );
     assert_eq!(
         deserialized.requested_generation_config.model_id.as_deref(),
         Some("Omni Flash")
     );
+
+    // Test backward compatibility reading explicit v4 schema
+    let v4_raw_json = json_str.replace(
+        &format!("\"schemaVersion\":{}", CURRENT_FLOW_MANIFEST_SCHEMA_VERSION),
+        "\"schemaVersion\":4",
+    );
+    let from_v4: FlowGenerationManifest = serde_json::from_str(&v4_raw_json).unwrap();
+    assert_eq!(from_v4.schema_version, 4);
 
     let snapshot = manifest.to_snapshot();
     assert_eq!(
