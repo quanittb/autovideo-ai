@@ -83,6 +83,8 @@ pub struct PreparedFlowSubmission {
     pub prepared_fingerprint: String,
     #[serde(default)]
     pub source_identity: Option<String>,
+    #[serde(default)]
+    pub uploaded_source_evidence: Option<super::manifest::FlowUploadedSourceEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

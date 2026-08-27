@@ -335,7 +335,25 @@ pub struct FlowParentLedger {
     pub reserved_credits: u32,
     pub completed_paid_segments: usize,
     #[serde(default)]
+    pub dispatched_paid_clicks: usize,
+    #[serde(default)]
     pub max_total_credits: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowUploadedSourceEvidence {
+    pub segment_index: usize,
+    pub expected_file_name: String,
+    pub observed_file_name: String,
+    pub expected_duration: f64,
+    #[serde(default)]
+    pub observed_duration: Option<f64>,
+    pub evidence_timestamp: String,
+    #[serde(default)]
+    pub active_card_identity: Option<String>,
+    #[serde(default)]
+    pub edit_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -353,6 +371,18 @@ pub struct FlowPlannedSegment {
     #[serde(default)]
     pub child_job_id: Option<String>,
     pub state: FlowJobState,
+    #[serde(default)]
+    pub local_submission_attempt_id: Option<String>,
+    #[serde(default)]
+    pub submission_state: FlowChildSubmissionState,
+    #[serde(default)]
+    pub submission_evidence: Option<String>,
+    #[serde(default)]
+    pub uploaded_source_evidence: Option<FlowUploadedSourceEvidence>,
+    #[serde(default)]
+    pub click_dispatched: bool,
+    #[serde(default)]
+    pub preclick_cost: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

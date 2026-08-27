@@ -1171,93 +1171,100 @@ impl FlowOrchestrator {
             }
         })?;
 
-        let preflight_id = request.preflight_id.as_deref().ok_or_else(|| {
-            "FLOW_PREFLIGHT_REQUIRED: Paid generation requires a valid preflightId from a successful preflight".to_string()
-        })?;
-
-        let req_fp = request
-            .configuration_fingerprint
-            .as_deref()
-            .ok_or_else(|| {
-                "FLOW_PREFLIGHT_REQUIRED: Paid generation requires configurationFingerprint"
-                    .to_string()
-            })?;
-
         let prompt_hash = calculate_prompt_hash(&clean_prompt);
         let requested_config = request.canonical_requested_config();
 
-        // Validate configuration fingerprint against expected
-        let expected_fingerprint = compute_configuration_fingerprint(
-            &request.profile_id,
-            &request.source_media_id,
-            &prompt_hash,
-            intent,
-            identity_mode,
-            &requested_config,
-        );
+        if !is_long_video {
+            let preflight_id = request.preflight_id.as_deref().ok_or_else(|| {
+                "FLOW_PREFLIGHT_REQUIRED: Paid generation requires a valid preflightId from a successful preflight".to_string()
+            })?;
 
-        if req_fp != &expected_fingerprint {
-            return Err(
-                "FLOW_PREFLIGHT_STALE: Preflight configuration signature is invalid or stale"
-                    .to_string(),
+            let req_fp = request
+                .configuration_fingerprint
+                .as_deref()
+                .ok_or_else(|| {
+                    "FLOW_PREFLIGHT_REQUIRED: Paid generation requires configurationFingerprint"
+                        .to_string()
+                })?;
+
+            // Validate configuration fingerprint against expected
+            let expected_fingerprint = compute_configuration_fingerprint(
+                &request.profile_id,
+                &request.source_media_id,
+                &prompt_hash,
+                intent,
+                identity_mode,
+                &requested_config,
             );
-        }
 
-        // Validate preflight ticket from store
-        let ticket = self
-            .preflight_tickets
-            .get_ticket(preflight_id)
-            .ok_or_else(|| "FLOW_PREFLIGHT_REQUIRED: Preflight ticket not found".to_string())?;
+            if req_fp != &expected_fingerprint {
+                return Err(
+                    "FLOW_PREFLIGHT_STALE: Preflight configuration signature is invalid or stale"
+                        .to_string(),
+                );
+            }
 
-        let expires_at_dt = chrono::DateTime::parse_from_rfc3339(&ticket.expires_at)
-            .map_err(|_| {
-                "FLOW_PREFLIGHT_STALE: Invalid preflight expiration timestamp".to_string()
-            })?
-            .with_timezone(&Utc);
-        if Utc::now() > expires_at_dt {
-            return Err("FLOW_PREFLIGHT_STALE: Preflight ticket has expired".to_string());
-        }
+            // Validate preflight ticket from store
+            let ticket = self
+                .preflight_tickets
+                .get_ticket(preflight_id)
+                .ok_or_else(|| "FLOW_PREFLIGHT_REQUIRED: Preflight ticket not found".to_string())?;
 
-        if ticket.project_id != request.project_id
-            || ticket.profile_id != request.profile_id
-            || ticket.source_media_id != request.source_media_id
-            || ticket.configuration_fingerprint != req_fp
-        {
-            return Err(
-                "FLOW_PREFLIGHT_STALE: Preflight configuration signature is invalid or stale"
-                    .to_string(),
-            );
-        }
+            let expires_at_dt = chrono::DateTime::parse_from_rfc3339(&ticket.expires_at)
+                .map_err(|_| {
+                    "FLOW_PREFLIGHT_STALE: Invalid preflight expiration timestamp".to_string()
+                })?
+                .with_timezone(&Utc);
+            if Utc::now() > expires_at_dt {
+                return Err("FLOW_PREFLIGHT_STALE: Preflight ticket has expired".to_string());
+            }
 
-        if !ticket.ready_for_paid_submission {
-            return Err(
-                "FLOW_PREFLIGHT_NOT_READY: Preflight was not authorized for paid submission"
-                    .to_string(),
-            );
-        }
+            if ticket.project_id != request.project_id
+                || ticket.profile_id != request.profile_id
+                || ticket.source_media_id != request.source_media_id
+                || ticket.configuration_fingerprint != req_fp
+            {
+                return Err(
+                    "FLOW_PREFLIGHT_STALE: Preflight configuration signature is invalid or stale"
+                        .to_string(),
+                );
+            }
 
-        let live_cost = ticket.live_displayed_credit_cost.ok_or_else(|| {
-            "FLOW_PREFLIGHT_REQUIRED: Live displayed cost was not verified in preflight".to_string()
-        })?;
+            if !ticket.ready_for_paid_submission {
+                return Err(
+                    "FLOW_PREFLIGHT_NOT_READY: Preflight was not authorized for paid submission"
+                        .to_string(),
+                );
+            }
 
-        if live_cost > max_credits {
-            return Err(format!(
-                "FLOW_CREDIT_BUDGET_EXCEEDED: Live displayed cost ({}) exceeds max budget ({})",
-                live_cost, max_credits
-            ));
+            let live_cost = ticket.live_displayed_credit_cost.ok_or_else(|| {
+                "FLOW_PREFLIGHT_REQUIRED: Live displayed cost was not verified in preflight"
+                    .to_string()
+            })?;
+
+            if live_cost > max_credits {
+                return Err(format!(
+                    "FLOW_CREDIT_BUDGET_EXCEEDED: Live displayed cost ({}) exceeds max budget ({})",
+                    live_cost, max_credits
+                ));
+            }
         }
 
         // Plan segments using largest legal boundary
         let plan = FlowVideoSegmenter::plan_segments(&facts, &self.capability_policy)?;
 
-        // Atomically consume preflight ticket immediately before job creation
-        let _consumed_ticket = self
-            .preflight_tickets
-            .consume_ticket(preflight_id)
-            .ok_or_else(|| {
-                "FLOW_PREFLIGHT_ALREADY_CONSUMED: Preflight ticket has already been used or consumed"
-                    .to_string()
-            })?;
+        // Atomically consume preflight ticket immediately before job creation (for single-segment)
+        if !is_long_video {
+            if let Some(p_id) = request.preflight_id.as_deref() {
+                let _consumed_ticket = self
+                    .preflight_tickets
+                    .consume_ticket(p_id)
+                    .ok_or_else(|| {
+                        "FLOW_PREFLIGHT_ALREADY_CONSUMED: Preflight ticket has already been used or consumed"
+                            .to_string()
+                    })?;
+            }
+        }
 
         let parent_id = format!("flow_{}", uuid::Uuid::new_v4());
         let client_request_id = format!("req_{}", Utc::now().timestamp_millis());
@@ -1342,6 +1349,7 @@ impl FlowOrchestrator {
                 authoritative_committed_credits: 0,
                 reserved_credits: 0,
                 completed_paid_segments: 0,
+                dispatched_paid_clicks: 0,
                 max_total_credits: Some(max_credits),
             };
 
@@ -1378,14 +1386,30 @@ impl FlowOrchestrator {
         let source_video_clone = canonical_source_path;
 
         tokio::spawn(async move {
-            let _ = orchestrator_clone
+            if let Err(e) = orchestrator_clone
                 .run_flow_worker(
                     &project_id_clone,
                     &parent_id_clone,
                     &source_video_clone,
                     cancellations,
                 )
-                .await;
+                .await
+            {
+                eprintln!("[FLOW WORKER ERROR] job {}: {}", parent_id_clone, e);
+                if let Ok(mut m) = orchestrator_clone
+                    .store
+                    .load_manifest(&project_id_clone, &parent_id_clone)
+                {
+                    if m.state != FlowJobState::Failed && m.state != FlowJobState::Cancelled {
+                        m.state = FlowJobState::Failed;
+                        m.error = Some(JobErrorRecord {
+                            code: "WORKER_EXECUTION_FAILED".to_string(),
+                            sanitized_message: e,
+                        });
+                        let _ = orchestrator_clone.store.save_manifest_atomic(&mut m);
+                    }
+                }
+            }
         });
 
         Ok(snapshot)
@@ -2110,11 +2134,54 @@ impl FlowOrchestrator {
         let rational_fps = long_plan.get_rational_fps();
         let total_segs = long_plan.segments.len();
 
+        let profile_dir = self.profile_manager.get_profile_dir(&manifest.profile_id)?;
+        let _lock_guard = match self
+            .profile_manager
+            .acquire_session_lock(&manifest.profile_id)
+        {
+            Ok(g) => Some(g),
+            Err(e) => {
+                manifest.state = FlowJobState::Blocked;
+                manifest.error = Some(JobErrorRecord {
+                    code: "FLOW_PROFILE_LOCKED".to_string(),
+                    sanitized_message: format!(
+                        "Profile {} is currently locked or in use: {}",
+                        manifest.profile_id, e
+                    ),
+                });
+                self.store.save_manifest_atomic(&mut manifest)?;
+                return Ok(());
+            }
+        };
+
+        let is_mock =
+            manifest.profile_id.starts_with("profile_mock") || manifest.profile_id == "mock";
+
+        let mut active_session = if !is_mock {
+            match self.bridge.open_active_session(&profile_dir).await {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    manifest.state = FlowJobState::Failed;
+                    manifest.error = Some(JobErrorRecord {
+                        code: "SESSION_SPAWN_FAILED".to_string(),
+                        sanitized_message: e,
+                    });
+                    self.store.save_manifest_atomic(&mut manifest)?;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+
         for i in 0..total_segs {
             if self
                 .check_cancelled(project_id, parent_id, cancellations.as_ref())
                 .await
             {
+                if let Some(s) = active_session.take() {
+                    s.close().await;
+                }
                 manifest.state = FlowJobState::Cancelled;
                 self.store.save_manifest_atomic(&mut manifest)?;
                 return Ok(());
@@ -2127,34 +2194,299 @@ impl FlowOrchestrator {
                 continue;
             }
 
-            // Budget check before processing child (Section 37)
-            let unit_cost = 20u32;
-            if let Some(ref ledger) = manifest.parent_ledger {
-                if let Some(max_tot) = ledger.max_total_credits {
-                    if ledger.authoritative_committed_credits + unit_cost > max_tot {
-                        manifest.state = FlowJobState::Failed;
+            let raw_child = raw_children_dir.join(format!("raw_child_{:03}.mp4", i));
+
+            let unit_cost = if !raw_child.exists() {
+                if let Some(ref mut session_ref) = active_session {
+                    let seg_duration = (long_plan.segments[i].planned_frame_count as f64
+                        * rational_fps.denominator as f64)
+                        / (rational_fps.numerator as f64);
+                    let attempt_id =
+                        format!("att_{}_{}_{}", parent_id, i, Utc::now().timestamp_millis());
+
+                    manifest.state = FlowJobState::Submitting;
+                    long_plan.segments[i].state = FlowJobState::Submitting;
+                    long_plan.segments[i].local_submission_attempt_id = Some(attempt_id.clone());
+                    manifest.long_video_plan = Some(long_plan.clone());
+                    self.store.save_manifest_atomic(&mut manifest)?;
+
+                    // Fresh preflight / prepare video edit for child segment
+                    let prep = match session_ref
+                        .prepare_video_edit(
+                            &manifest.submitted_prompt,
+                            Some(&long_plan.segments[i].source_segment_path),
+                            Some(seg_duration),
+                            Some(&manifest.requested_generation_config),
+                            &attempt_id,
+                        )
+                        .await
+                    {
+                        Ok(p) => p,
+                        Err(e) => {
+                            if let Some(s) = active_session.take() {
+                                s.close().await;
+                            }
+                            manifest.state = FlowJobState::Failed;
+                            manifest.error = Some(JobErrorRecord {
+                                code: "PREPARATION_FAILED".to_string(),
+                                sanitized_message: e,
+                            });
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            return Ok(());
+                        }
+                    };
+
+                    let seg_cost = match prep.live_displayed_credit_cost {
+                        Some(c) => c,
+                        None => {
+                            if let Some(s) = active_session.take() {
+                                s.close().await;
+                            }
+                            manifest.state = FlowJobState::Blocked;
+                            manifest.error = Some(JobErrorRecord {
+                                code: "FLOW_LIVE_COST_UNVERIFIED".to_string(),
+                                sanitized_message: "PRE_CLICK_REJECTED: Live displayed credit cost could not be verified on the Flow workspace".to_string(),
+                            });
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            return Ok(());
+                        }
+                    };
+
+                    // Cost gate: per-segment cost <= 20
+                    if seg_cost > 20 {
+                        if let Some(s) = active_session.take() {
+                            s.close().await;
+                        }
+                        manifest.state = FlowJobState::Blocked;
                         manifest.error = Some(JobErrorRecord {
-                            code: "FLOW_TOTAL_CREDIT_BUDGET_EXCEEDED".to_string(),
+                            code: "FLOW_SEGMENT_CREDIT_BUDGET_EXCEEDED".to_string(),
                             sanitized_message: format!(
-                                "Committed credits ({}) + next segment cost ({}) exceeds maxTotalCredits ({})",
-                                ledger.authoritative_committed_credits, unit_cost, max_tot
+                                "PRE_CLICK_REJECTED: Submitting segment #{} requires {} credits, which exceeds per-segment limit of 20 credits",
+                                i, seg_cost
                             ),
                         });
                         self.store.save_manifest_atomic(&mut manifest)?;
                         return Ok(());
                     }
+
+                    // Budget check before click against parent ledger
+                    if let Some(ref ledger) = manifest.parent_ledger {
+                        if let Some(max_tot) = ledger.max_total_credits {
+                            if ledger.authoritative_committed_credits + seg_cost > max_tot {
+                                if let Some(s) = active_session.take() {
+                                    s.close().await;
+                                }
+                                manifest.state = FlowJobState::Failed;
+                                manifest.error = Some(JobErrorRecord {
+                                    code: "FLOW_TOTAL_CREDIT_BUDGET_EXCEEDED".to_string(),
+                                    sanitized_message: format!(
+                                        "Committed credits ({}) + next segment cost ({}) exceeds maxTotalCredits ({})",
+                                        ledger.authoritative_committed_credits, seg_cost, max_tot
+                                    ),
+                                });
+                                self.store.save_manifest_atomic(&mut manifest)?;
+                                return Ok(());
+                            }
+                        }
+                    }
+
+                    // Section 7 & 8: Revalidate active media and record uploaded_source_evidence
+                    long_plan.segments[i].uploaded_source_evidence =
+                        prep.uploaded_source_evidence.clone();
+                    long_plan.segments[i].preclick_cost = Some(seg_cost);
+
+                    let expected_stem = format!("segment_{:03}", i);
+                    if let Some(ref obs_source) = prep.source_identity {
+                        let obs_lower = obs_source.to_lowercase();
+                        if !obs_lower.contains(&expected_stem) {
+                            if let Some(s) = active_session.take() {
+                                s.close().await;
+                            }
+                            manifest.state = FlowJobState::Failed;
+                            manifest.error = Some(JobErrorRecord {
+                                code: "FLOW_ACTIVE_MEDIA_MISMATCH".to_string(),
+                                sanitized_message: format!(
+                                    "Observed active media ({}) does not match expected segment ({})",
+                                    obs_source, expected_stem
+                                ),
+                            });
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            return Ok(());
+                        }
+                    }
+
+                    // Pre-click checkpoint
+                    long_plan.segments[i].submission_state =
+                        FlowChildSubmissionState::AttemptPersisted;
+                    manifest.long_video_plan = Some(long_plan.clone());
+                    self.store.save_manifest_atomic(&mut manifest)?;
+
+                    // Click Generate EXACTLY ONCE
+                    let submit_outcome = session_ref
+                        .submit_prepared(
+                            &attempt_id,
+                            seg_cost,
+                            seg_cost, // Child cap = preflight cost
+                            &prep.prepared_fingerprint,
+                            Some(&manifest.requested_generation_config),
+                            Some(&manifest.prompt_hash),
+                            Some(&expected_stem),
+                        )
+                        .await;
+
+                    let generation_evidence = match submit_outcome {
+                        Ok(FlowSubmissionOutcome::ProvenSubmitted {
+                            generation_evidence,
+                            ..
+                        }) => {
+                            manifest.state = FlowJobState::Generating;
+                            long_plan.segments[i].state = FlowJobState::Generating;
+                            long_plan.segments[i].submission_state =
+                                FlowChildSubmissionState::ProvenSubmitted;
+                            long_plan.segments[i].submission_evidence =
+                                Some(generation_evidence.clone());
+                            long_plan.segments[i].click_dispatched = true;
+                            if let Some(ref mut ledg) = manifest.parent_ledger {
+                                ledg.dispatched_paid_clicks += 1;
+                                ledg.authoritative_committed_credits += seg_cost;
+                            }
+                            manifest.long_video_plan = Some(long_plan.clone());
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            generation_evidence
+                        }
+                        Ok(FlowSubmissionOutcome::PreClickRejected { reason, .. }) => {
+                            if let Some(s) = active_session.take() {
+                                s.close().await;
+                            }
+                            manifest.state = FlowJobState::Failed;
+                            manifest.error = Some(JobErrorRecord {
+                                code: "PRE_CLICK_REJECTED".to_string(),
+                                sanitized_message: reason
+                                    .unwrap_or_else(|| "Pre-click validation rejected".to_string()),
+                            });
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            return Ok(());
+                        }
+                        Ok(FlowSubmissionOutcome::PostClickAmbiguous { reason, .. }) => {
+                            if let Some(s) = active_session.take() {
+                                s.close().await;
+                            }
+                            manifest.state = FlowJobState::GenerationAmbiguous;
+                            long_plan.segments[i].submission_state =
+                                FlowChildSubmissionState::Ambiguous;
+                            manifest.error = Some(JobErrorRecord {
+                                code: "GENERATION_AMBIGUOUS".to_string(),
+                                sanitized_message: reason.unwrap_or_else(|| {
+                                    "Post-click transition ambiguous".to_string()
+                                }),
+                            });
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            if let Some(s) = active_session.take() {
+                                s.close().await;
+                            }
+                            manifest.state = FlowJobState::Failed;
+                            manifest.error = Some(JobErrorRecord {
+                                code: "SUBMISSION_FAILED".to_string(),
+                                sanitized_message: e,
+                            });
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            return Ok(());
+                        }
+                    };
+
+                    // Poll until completion (up to 10 minutes)
+                    let poll_start = Utc::now();
+                    let poll_timeout = std::time::Duration::from_secs(600);
+                    let mut is_completed = false;
+
+                    while !is_completed {
+                        if self
+                            .check_cancelled(project_id, parent_id, cancellations.as_ref())
+                            .await
+                        {
+                            if let Some(s) = active_session.take() {
+                                s.close().await;
+                            }
+                            manifest.state = FlowJobState::Cancelled;
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            return Ok(());
+                        }
+
+                        if Utc::now().signed_duration_since(poll_start).num_seconds()
+                            > poll_timeout.as_secs() as i64
+                        {
+                            if let Some(s) = active_session.take() {
+                                s.close().await;
+                            }
+                            manifest.state = FlowJobState::Failed;
+                            manifest.error = Some(JobErrorRecord {
+                                code: "GENERATION_TIMEOUT".to_string(),
+                                sanitized_message:
+                                    "Flow generation exceeded maximum polling duration of 10 minutes"
+                                        .to_string(),
+                            });
+                            self.store.save_manifest_atomic(&mut manifest)?;
+                            return Ok(());
+                        }
+
+                        let poll_res = session_ref.poll(&generation_evidence).await?;
+                        match poll_res.status.as_str() {
+                            "ready" => {
+                                session_ref
+                                    .download(poll_res.download_url.as_deref(), &raw_child)
+                                    .await?;
+                                is_completed = true;
+                            }
+                            "failed" => {
+                                if let Some(s) = active_session.take() {
+                                    s.close().await;
+                                }
+                                manifest.state = FlowJobState::Failed;
+                                manifest.error = Some(JobErrorRecord {
+                                    code: "GENERATION_FAILED".to_string(),
+                                    sanitized_message: poll_res
+                                        .error_message
+                                        .unwrap_or_else(|| "Generation failed".to_string()),
+                                });
+                                self.store.save_manifest_atomic(&mut manifest)?;
+                                return Ok(());
+                            }
+                            _ => {
+                                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                            }
+                        }
+                    }
+
+                    seg_cost
+                } else {
+                    // Mock mode
+                    let unit_cost = 20u32;
+                    if let Some(ref ledger) = manifest.parent_ledger {
+                        if let Some(max_tot) = ledger.max_total_credits {
+                            if ledger.authoritative_committed_credits + unit_cost > max_tot {
+                                manifest.state = FlowJobState::Failed;
+                                manifest.error = Some(JobErrorRecord {
+                                    code: "FLOW_TOTAL_CREDIT_BUDGET_EXCEEDED".to_string(),
+                                    sanitized_message: format!(
+                                        "Committed credits ({}) + next segment cost ({}) exceeds maxTotalCredits ({})",
+                                        ledger.authoritative_committed_credits, unit_cost, max_tot
+                                    ),
+                                });
+                                self.store.save_manifest_atomic(&mut manifest)?;
+                                return Ok(());
+                            }
+                        }
+                    }
+
+                    let _ = std::fs::copy(&long_plan.segments[i].source_segment_path, &raw_child);
+                    unit_cost
                 }
-            }
-
-            manifest.active_segment_index = i;
-            manifest.state = FlowJobState::Submitting;
-            self.store.save_manifest_atomic(&mut manifest)?;
-
-            let raw_child = raw_children_dir.join(format!("raw_child_{:03}.mp4", i));
-            if !raw_child.exists() {
-                // Use extracted segment as raw child in mock / pipeline fallback
-                let _ = std::fs::copy(&long_plan.segments[i].source_segment_path, &raw_child);
-            }
+            } else {
+                20u32
+            };
 
             manifest.state = FlowJobState::ValidatingSegment;
             self.store.save_manifest_atomic(&mut manifest)?;
@@ -2170,9 +2502,14 @@ impl FlowOrchestrator {
             match norm_res {
                 Ok(_) => {
                     long_plan.segments[i].state = FlowJobState::Completed;
+                    long_plan.segments[i].submission_state =
+                        FlowChildSubmissionState::ProvenCompleted;
                     if let Some(ref mut ledger) = manifest.parent_ledger {
                         ledger.completed_paid_segments += 1;
-                        ledger.authoritative_committed_credits += unit_cost;
+                        if active_session.is_none() {
+                            ledger.dispatched_paid_clicks += 1;
+                            ledger.authoritative_committed_credits += unit_cost;
+                        }
                     }
 
                     // Continuity evidence for boundary with previous segment
@@ -2193,10 +2530,12 @@ impl FlowOrchestrator {
                     }
 
                     manifest.long_video_plan = Some(long_plan.clone());
-                    // Atomically persist manifest checkpoint after every transition (Section 17)
                     self.store.save_manifest_atomic(&mut manifest)?;
                 }
                 Err(e) => {
+                    if let Some(s) = active_session.take() {
+                        s.close().await;
+                    }
                     manifest.state = FlowJobState::Failed;
                     manifest.error = Some(JobErrorRecord {
                         code: "CHILD_NORMALIZATION_FAILED".to_string(),
@@ -2206,6 +2545,10 @@ impl FlowOrchestrator {
                     return Ok(());
                 }
             }
+        }
+
+        if let Some(s) = active_session.take() {
+            s.close().await;
         }
 
         // 3. Final Stitching Phase (Section 12)

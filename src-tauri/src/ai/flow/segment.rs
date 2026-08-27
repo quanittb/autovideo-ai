@@ -157,6 +157,12 @@ impl FlowVideoSegmenter {
                 source_segment_sha256: String::new(),
                 child_job_id: None,
                 state: FlowJobState::Planning,
+                local_submission_attempt_id: None,
+                submission_state: FlowChildSubmissionState::NeverAttempted,
+                submission_evidence: None,
+                uploaded_source_evidence: None,
+                click_dispatched: false,
+                preclick_cost: None,
             });
 
             start_frame = end_frame;

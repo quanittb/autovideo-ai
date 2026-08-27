@@ -279,6 +279,12 @@ fn test_flow_p4a_06_raw_child_short_by_2_frames_normalized_with_clone_pad() {
         source_segment_sha256: String::new(),
         child_job_id: None,
         state: FlowJobState::Completed,
+        local_submission_attempt_id: None,
+        submission_state: FlowChildSubmissionState::NeverAttempted,
+        submission_evidence: None,
+        uploaded_source_evidence: None,
+        click_dispatched: false,
+        preclick_cost: None,
     };
 
     let geom = FlowCanonicalGeometry {
@@ -331,6 +337,12 @@ fn test_flow_p4a_07_raw_child_long_by_2_frames_normalized_with_trim() {
         source_segment_sha256: String::new(),
         child_job_id: None,
         state: FlowJobState::Completed,
+        local_submission_attempt_id: None,
+        submission_state: FlowChildSubmissionState::NeverAttempted,
+        submission_evidence: None,
+        uploaded_source_evidence: None,
+        click_dispatched: false,
+        preclick_cost: None,
     };
 
     let geom = FlowCanonicalGeometry {
@@ -383,6 +395,12 @@ fn test_flow_p4a_08_raw_child_drift_exceeding_tolerance_fails_parent() {
         source_segment_sha256: String::new(),
         child_job_id: None,
         state: FlowJobState::Completed,
+        local_submission_attempt_id: None,
+        submission_state: FlowChildSubmissionState::NeverAttempted,
+        submission_evidence: None,
+        uploaded_source_evidence: None,
+        click_dispatched: false,
+        preclick_cost: None,
     };
 
     let geom = FlowCanonicalGeometry {
@@ -428,6 +446,12 @@ fn test_flow_p4a_09_different_child_resolutions_normalized_preserving_aspect_rat
         source_segment_sha256: String::new(),
         child_job_id: None,
         state: FlowJobState::Completed,
+        local_submission_attempt_id: None,
+        submission_state: FlowChildSubmissionState::NeverAttempted,
+        submission_evidence: None,
+        uploaded_source_evidence: None,
+        click_dispatched: false,
+        preclick_cost: None,
     };
 
     let target_geom = FlowCanonicalGeometry {
@@ -469,6 +493,12 @@ fn test_flow_p4a_10_incompatible_child_orientation_fails_normalizer() {
         source_segment_sha256: String::new(),
         child_job_id: None,
         state: FlowJobState::Completed,
+        local_submission_attempt_id: None,
+        submission_state: FlowChildSubmissionState::NeverAttempted,
+        submission_evidence: None,
+        uploaded_source_evidence: None,
+        click_dispatched: false,
+        preclick_cost: None,
     };
 
     let target_geom = FlowCanonicalGeometry {

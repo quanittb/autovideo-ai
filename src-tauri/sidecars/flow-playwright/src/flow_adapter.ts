@@ -418,11 +418,6 @@ export async function ensureUploadedVideoEditActive(
       if ((await leafMatch.count().catch(() => 0)) > 0 && (await leafMatch.isVisible().catch(() => false))) {
         return leafMatch;
       }
-      // 3. Play circle card in media drawer
-      const playCircle = page.locator(`i:has-text("play_circle"), i:has-text("play_arrow")`).last();
-      if ((await playCircle.count().catch(() => 0)) > 0 && (await playCircle.isVisible().catch(() => false))) {
-        return playCircle;
-      }
       return null;
     };
 
@@ -1241,7 +1236,28 @@ export async function detectGenerationState(
     return { status: 'failed', progressPct: 0, errorMessage: 'Flow generation failed' };
   }
 
-  // 5. Ready / Download check
+  // 5. Generating / Queued check (Authoritative semantic progress markers)
+  const progressIndicator = page
+    .locator(
+      '#progress-indicator, [data-testid="progress-indicator"], .progress-indicator, [data-status="generating"]'
+    )
+    .first();
+  if ((await progressIndicator.count().catch(() => 0)) > 0 && (await progressIndicator.isVisible().catch(() => false))) {
+    const progressAttr = await progressIndicator.getAttribute('data-progress').catch(() => null);
+    const progressPct = progressAttr ? parseFloat(progressAttr) : 0;
+    return { status: 'generating', progressPct: isNaN(progressPct) ? 0 : progressPct };
+  }
+
+  const generatingCard = page
+    .locator(
+      '.generating-card, [data-state="generating"], div:has-text("Đang tạo"), div:has-text("Generating..."), span:has-text("Đang tạo"), p:has-text("Đang tạo")'
+    )
+    .first();
+  if ((await generatingCard.count().catch(() => 0)) > 0 && (await generatingCard.isVisible().catch(() => false))) {
+    return { status: 'generating', progressPct: 0 };
+  }
+
+  // 6. Ready / Download check
   const downloadLink = page
     .locator(
       'a#download-link, a[download], a[href*="download"], button:has-text("Download"), button:has-text("Tải xuống")'
@@ -1274,27 +1290,6 @@ export async function detectGenerationState(
       status: 'ready',
       progressPct: 100,
     };
-  }
-
-  // 6. Generating / Queued check (Authoritative semantic progress markers)
-  const progressIndicator = page
-    .locator(
-      '#progress-indicator, [data-testid="progress-indicator"], .progress-indicator, [data-status="generating"]'
-    )
-    .first();
-  if ((await progressIndicator.count().catch(() => 0)) > 0 && (await progressIndicator.isVisible().catch(() => false))) {
-    const progressAttr = await progressIndicator.getAttribute('data-progress').catch(() => null);
-    const progressPct = progressAttr ? parseFloat(progressAttr) : 0;
-    return { status: 'generating', progressPct: isNaN(progressPct) ? 0 : progressPct };
-  }
-
-  const generatingCard = page
-    .locator(
-      '.generating-card, [data-state="generating"], div:has-text("Đang tạo"), div:has-text("Generating...")'
-    )
-    .first();
-  if ((await generatingCard.count().catch(() => 0)) > 0 && (await generatingCard.isVisible().catch(() => false))) {
-    return { status: 'generating', progressPct: 0 };
   }
 
   // 7. Fail-closed: do NOT fabricate generating 50%
@@ -1896,6 +1891,16 @@ export class FlowUiAdapterV1 {
     costProvenance: 'UPLOADED_VIDEO_EDIT' | 'GENERIC_COMPOSER_DIAGNOSTIC' | 'UNKNOWN';
     preparedFingerprint: string;
     sourceIdentity?: string;
+    uploadedSourceEvidence?: {
+      segmentIndex: number;
+      expectedFileName: string;
+      observedFileName: string;
+      expectedDuration: number;
+      observedDuration?: number;
+      evidenceTimestamp: string;
+      activeCardIdentity?: string;
+      editUrl?: string;
+    };
   }> {
     const page = this.page;
     if (!page) throw new Error('Browser not launched');
@@ -2029,6 +2034,18 @@ export class FlowUiAdapterV1 {
       costProvenance: editVerif?.uploadedVideoEditActive ? 'UPLOADED_VIDEO_EDIT' : 'UNKNOWN',
       preparedFingerprint,
       sourceIdentity,
+      uploadedSourceEvidence: editVerif
+        ? {
+            segmentIndex: (params as any).segmentIndex || 0,
+            expectedFileName: params.videoPath ? path.basename(params.videoPath) : '',
+            observedFileName: sourceIdentity,
+            expectedDuration: params.durationSec || 10.0,
+            observedDuration: editVerif.inputSelectedDuration,
+            evidenceTimestamp: new Date().toISOString(),
+            activeCardIdentity: sourceIdentity,
+            editUrl: page.url(),
+          }
+        : undefined,
     };
   }
 
@@ -2106,6 +2123,19 @@ export class FlowUiAdapterV1 {
 
     // Requirement 9: Revalidate expected configuration
     if (params.expectedConfig) {
+      if (params.expectedConfig.sourceIdentity) {
+        const expSource = params.expectedConfig.sourceIdentity.toLowerCase();
+        const obsSource = (activeState.sourceTitle || '').toLowerCase();
+        if (obsSource && !obsSource.includes(expSource) && !expSource.includes(obsSource)) {
+          return {
+            outcome: 'PRE_CLICK_REJECTED',
+            clickDispatched: false,
+            localSubmissionAttemptId: params.localSubmissionAttemptId,
+            reason: `FLOW_ACTIVE_MEDIA_MISMATCH: Observed active media (${activeState.sourceTitle}) does not match expected (${params.expectedConfig.sourceIdentity})`,
+          };
+        }
+      }
+
       if (params.expectedConfig.modelId) {
         const expModel = normalizeCanonicalModel(params.expectedConfig.modelId);
         const obsModel = normalizeCanonicalModel(activeState.model);
@@ -2406,7 +2436,7 @@ export class FlowUiAdapterV1 {
     }
 
     throw new Error(
-      'DOWNLOAD_CONTROL_NOT_OBSERVED: No valid download control or accessible URL was observed on the completed result'
+      'FLOW_GENERATED_OUTPUT_NOT_UNIQUELY_IDENTIFIED: No valid download control or accessible URL was uniquely observed for the generated output'
     );
   }
 

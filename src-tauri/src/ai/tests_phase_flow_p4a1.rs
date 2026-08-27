@@ -1,8 +1,8 @@
 use super::flow::manifest::{
-    FlowCanonicalGeometry, FlowFaceContinuityStatus, FlowFinalAudioPolicy, FlowGenerationManifest,
-    FlowIdentityContinuityStrategy, FlowJobKind, FlowJobState, FlowLongVideoPlan,
-    FlowNormalizedSegment, FlowPlannedSegment, FlowRationalFrameRate,
-    FlowRequestedGenerationConfig, FlowSeamStatus, FlowSegmentPlan,
+    FlowCanonicalGeometry, FlowChildSubmissionState, FlowFaceContinuityStatus,
+    FlowFinalAudioPolicy, FlowGenerationManifest, FlowIdentityContinuityStrategy, FlowJobKind,
+    FlowJobState, FlowLongVideoPlan, FlowNormalizedSegment, FlowPlannedSegment,
+    FlowRationalFrameRate, FlowRequestedGenerationConfig, FlowSeamStatus, FlowSegmentPlan,
 };
 use super::flow::orchestrator::{FlowGenerationRequest, FlowPreflightTicket, FlowRuntimeService};
 use super::flow::{FlowContinuityManager, FlowStitcher, FlowVideoNormalizer, FlowVideoSegmenter};
@@ -251,6 +251,12 @@ fn test_flow_p4a1_03_two_pass_normalization_exact_frame_counts() {
         source_segment_sha256: String::new(),
         child_job_id: None,
         state: FlowJobState::Completed,
+        local_submission_attempt_id: None,
+        submission_state: FlowChildSubmissionState::NeverAttempted,
+        submission_evidence: None,
+        uploaded_source_evidence: None,
+        click_dispatched: false,
+        preclick_cost: None,
     };
 
     let geom = FlowCanonicalGeometry {
@@ -554,6 +560,12 @@ fn test_flow_p4a1_06_rehydration_preserves_normalized_children_and_zero_calls() 
         source_segment_sha256: "sha_seg0".to_string(),
         child_job_id: Some("child_000".to_string()),
         state: FlowJobState::Completed, // Normalized and completed!
+        local_submission_attempt_id: None,
+        submission_state: FlowChildSubmissionState::NeverAttempted,
+        submission_evidence: None,
+        uploaded_source_evidence: None,
+        click_dispatched: false,
+        preclick_cost: None,
     };
     let seg1 = FlowPlannedSegment {
         segment_index: 1,
@@ -567,6 +579,12 @@ fn test_flow_p4a1_06_rehydration_preserves_normalized_children_and_zero_calls() 
         source_segment_sha256: "sha_seg1".to_string(),
         child_job_id: None,
         state: FlowJobState::Planning, // Pending!
+        local_submission_attempt_id: None,
+        submission_state: FlowChildSubmissionState::NeverAttempted,
+        submission_evidence: None,
+        uploaded_source_evidence: None,
+        click_dispatched: false,
+        preclick_cost: None,
     };
 
     manifest.long_video_plan = Some(FlowLongVideoPlan {
