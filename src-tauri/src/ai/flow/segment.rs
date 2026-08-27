@@ -1,7 +1,8 @@
 use super::capability::FlowCapabilityPolicy;
 use super::manifest::{
     FlowChildSegmentRecord, FlowChildSubmissionState, FlowIdentityContinuityStrategy, FlowJobState,
-    FlowLongVideoPlan, FlowPlannedSegment, FlowRequestedGenerationConfig, FlowSegmentPlan,
+    FlowLongVideoPlan, FlowPlannedSegment, FlowRationalFrameRate, FlowRequestedGenerationConfig,
+    FlowSegmentPlan,
 };
 use crate::ai::cloud::job::JobTimestamps;
 use crate::ai::cloud::manifest::SegmentBoundary;
@@ -57,7 +58,6 @@ impl FlowVideoSegmenter {
                 .map_err(|e| format!("Failed to create work dir: {}", e))?;
             let proxy_path = work_dir.join("working_proxy_cfr.mp4");
 
-            let target_fps = 30.0;
             let output = Command::new("ffmpeg")
                 .args([
                     "-y",
@@ -72,7 +72,7 @@ impl FlowVideoSegmenter {
                     "-pix_fmt",
                     "yuv420p",
                     "-r",
-                    &format!("{:.4}", target_fps),
+                    "30/1",
                     "-an",
                     proxy_path.to_str().unwrap_or_default(),
                 ])
@@ -105,6 +105,7 @@ impl FlowVideoSegmenter {
 
         let r_num = timing_facts.r_frame_rate.num.max(1);
         let r_den = timing_facts.r_frame_rate.den.max(1);
+        let rational_fps = FlowRationalFrameRate::new(r_num, r_den);
 
         // Derive max frames per segment: floor(max_sec * num / den)
         let total_limit_frames_float = (max_sec * r_num as f64) / (r_den as f64);
@@ -191,6 +192,9 @@ impl FlowVideoSegmenter {
             source_media_id: source_media_id.map(|s| s.to_string()),
             source_duration_ms: (source_facts.duration_sec * 1000.0).round() as u64,
             source_fps_rational: (r_num, r_den),
+            rational_fps: Some(rational_fps),
+            fps_numerator: Some(r_num),
+            fps_denominator: Some(r_den),
             source_timing_mode,
             working_proxy_created,
             working_proxy_path,
@@ -224,14 +228,14 @@ impl FlowVideoSegmenter {
         };
 
         let (r_num, r_den) = plan.source_fps_rational;
-        let fps = r_num as f64 / r_den as f64;
+        let rational_fps_str = format!("{}/{}", r_num, r_den);
 
         for seg in &mut plan.segments {
             let seg_filename = format!("segment_{:03}.mp4", seg.segment_index);
             let seg_path = output_dir.join(&seg_filename);
 
             let start_sec = (seg.start_frame as f64 * r_den as f64) / (r_num as f64);
-            let duration_sec = seg.planned_duration_sec;
+            let duration_sec = (seg.planned_frame_count as f64 * r_den as f64) / (r_num as f64);
 
             let output = Command::new("ffmpeg")
                 .args([
@@ -251,7 +255,7 @@ impl FlowVideoSegmenter {
                     "-pix_fmt",
                     "yuv420p",
                     "-r",
-                    &format!("{:.4}", fps),
+                    &rational_fps_str,
                     "-an",
                     "-avoid_negative_ts",
                     "make_zero",

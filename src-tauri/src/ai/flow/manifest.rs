@@ -203,14 +203,105 @@ pub struct FlowContinuityEvidence {
     pub previous_end_frame_paths: Vec<PathBuf>,
     #[serde(default)]
     pub next_start_frame_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub contact_sheet_path: Option<PathBuf>,
     pub face_continuity_status: FlowFaceContinuityStatus,
     pub seam_status: FlowSeamStatus,
     #[serde(default)]
     pub metric_name: Option<String>,
     #[serde(default)]
+    pub metric_category: Option<String>,
+    #[serde(default)]
     pub metric_value: Option<f64>,
     #[serde(default)]
     pub reviewed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowRationalFrameRate {
+    #[serde(alias = "fpsNumerator")]
+    pub numerator: u32,
+    #[serde(alias = "fpsDenominator")]
+    pub denominator: u32,
+}
+
+impl Default for FlowRationalFrameRate {
+    fn default() -> Self {
+        Self {
+            numerator: 30,
+            denominator: 1,
+        }
+    }
+}
+
+impl FlowRationalFrameRate {
+    pub fn new(numerator: u32, denominator: u32) -> Self {
+        Self {
+            numerator: numerator.max(1),
+            denominator: denominator.max(1),
+        }
+    }
+
+    pub fn to_f64(&self) -> f64 {
+        self.numerator as f64 / self.denominator as f64
+    }
+
+    pub fn to_ffmpeg_arg(&self) -> String {
+        format!("{}/{}", self.numerator, self.denominator)
+    }
+
+    pub fn expected_duration_sec(&self, frame_count: u64) -> f64 {
+        (frame_count as f64 * self.denominator as f64) / (self.numerator as f64)
+    }
+}
+
+impl From<(u32, u32)> for FlowRationalFrameRate {
+    fn from(t: (u32, u32)) -> Self {
+        Self::new(t.0, t.1)
+    }
+}
+
+impl From<f64> for FlowRationalFrameRate {
+    fn from(v: f64) -> Self {
+        if (v - 29.97).abs() < 0.01 {
+            Self::new(30000, 1001)
+        } else if (v - 23.976).abs() < 0.01 {
+            Self::new(24000, 1001)
+        } else {
+            let num = (v * 1000.0).round() as u32;
+            Self::new(num, 1000)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowNormalizedSegment {
+    pub segment_index: usize,
+    pub path: PathBuf,
+    pub frame_count: u64,
+    pub sha256: String,
+}
+
+impl FlowNormalizedSegment {
+    pub fn new(segment_index: usize, path: PathBuf, frame_count: u64, sha256: String) -> Self {
+        Self {
+            segment_index,
+            path,
+            frame_count,
+            sha256,
+        }
+    }
+
+    pub fn from_path(segment_index: usize, path: PathBuf) -> Self {
+        Self {
+            segment_index,
+            path,
+            frame_count: 0,
+            sha256: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -273,6 +364,12 @@ pub struct FlowLongVideoPlan {
     pub source_media_id: Option<String>,
     pub source_duration_ms: u64,
     pub source_fps_rational: (u32, u32),
+    #[serde(default)]
+    pub rational_fps: Option<FlowRationalFrameRate>,
+    #[serde(default)]
+    pub fps_numerator: Option<u32>,
+    #[serde(default)]
+    pub fps_denominator: Option<u32>,
     pub source_timing_mode: String,
     pub working_proxy_created: bool,
     #[serde(default)]
@@ -289,6 +386,18 @@ pub struct FlowLongVideoPlan {
     pub continuity_strategy: FlowIdentityContinuityStrategy,
     pub identity_continuity_guaranteed: bool,
     pub created_at: String,
+}
+
+impl FlowLongVideoPlan {
+    pub fn get_rational_fps(&self) -> FlowRationalFrameRate {
+        if let Some(r) = self.rational_fps {
+            r
+        } else if let (Some(num), Some(den)) = (self.fps_numerator, self.fps_denominator) {
+            FlowRationalFrameRate::new(num, den)
+        } else {
+            FlowRationalFrameRate::new(self.source_fps_rational.0, self.source_fps_rational.1)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

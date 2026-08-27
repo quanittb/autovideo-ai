@@ -27,9 +27,9 @@ pub use manifest::{
     FlowChildSubmissionState, FlowContinuityEvidence, FlowFaceContinuityStatus,
     FlowFinalAudioPolicy, FlowGenerationManifest, FlowIdentityContinuityStrategy,
     FlowJobEventPayload, FlowJobKind, FlowJobSnapshot, FlowJobState, FlowLongVideoPlan,
-    FlowObservedGenerationConfig, FlowOutputArtifactRecord, FlowParentLedger, FlowPlannedSegment,
-    FlowRequestedGenerationConfig, FlowSeamStatus, FlowSegmentPlan,
-    CURRENT_FLOW_MANIFEST_SCHEMA_VERSION,
+    FlowNormalizedSegment, FlowObservedGenerationConfig, FlowOutputArtifactRecord,
+    FlowParentLedger, FlowPlannedSegment, FlowRationalFrameRate, FlowRequestedGenerationConfig,
+    FlowSeamStatus, FlowSegmentPlan, CURRENT_FLOW_MANIFEST_SCHEMA_VERSION,
 };
 pub use manual_chrome::{ManualChromeProcess, SystemChromeLauncher};
 pub use mock_flow_server::{MockFlowServer, MockFlowServerHandle, MockScenario};

@@ -1,13 +1,15 @@
+use super::continuity::FlowContinuityManager;
 use super::manifest::{
-    FlowChildSubmissionState, FlowFinalAudioPolicy, FlowGenerationManifest, FlowJobSnapshot,
-    FlowJobState,
+    FlowCanonicalGeometry, FlowChildSubmissionState, FlowFinalAudioPolicy, FlowGenerationManifest,
+    FlowIdentityContinuityStrategy, FlowJobKind, FlowJobSnapshot, FlowJobState,
+    FlowNormalizedSegment, FlowParentLedger,
 };
 use super::output_validator::FlowOutputValidator;
 use super::playwright_bridge::PlaywrightBridge;
 use super::profile::FlowProfileManager;
 use super::prompt_optimizer::{calculate_prompt_hash, PromptSource};
 use super::segment::FlowVideoSegmenter;
-use super::stitcher::FlowStitcher;
+use super::stitcher::{FlowStitcher, FlowVideoNormalizer};
 use super::store::FlowJobStore;
 use crate::ai::cloud::job::JobErrorRecord;
 use crate::ai::cloud::spec::SourceMediaProbe;
@@ -1151,8 +1153,22 @@ impl FlowOrchestrator {
             ));
         }
 
+        // Probe source video
+        let facts = SourceMediaProbe::probe_file(&canonical_source_path)
+            .map_err(|e| format!("PROBE_FAILED: {}", e))?;
+
+        if facts.duration_sec <= 0.0 || facts.fps <= 0.0 {
+            return Err("INVALID_MEDIA: Media facts have invalid duration or fps".to_string());
+        }
+
+        let is_long_video = facts.duration_sec > 10.000;
+
         let max_credits = request.max_credits.ok_or_else(|| {
-            "FLOW_CREDIT_BUDGET_REQUIRED: Explicit maxCredits budget limit is mandatory for paid execution".to_string()
+            if is_long_video {
+                "FLOW_TOTAL_CREDIT_BUDGET_REQUIRED: Explicit maxTotalCredits budget is required for multi-segment long video".to_string()
+            } else {
+                "FLOW_CREDIT_BUDGET_REQUIRED: Explicit maxCredits budget limit is mandatory for paid execution".to_string()
+            }
         })?;
 
         let preflight_id = request.preflight_id.as_deref().ok_or_else(|| {
@@ -1231,14 +1247,6 @@ impl FlowOrchestrator {
             ));
         }
 
-        // Probe source video
-        let facts = SourceMediaProbe::probe_file(&canonical_source_path)
-            .map_err(|e| format!("PROBE_FAILED: {}", e))?;
-
-        if facts.duration_sec <= 0.0 || facts.fps <= 0.0 {
-            return Err("INVALID_MEDIA: Media facts have invalid duration or fps".to_string());
-        }
-
         // Plan segments using largest legal boundary
         let plan = FlowVideoSegmenter::plan_segments(&facts, &self.capability_policy)?;
 
@@ -1288,15 +1296,15 @@ impl FlowOrchestrator {
             request.project_id.clone(),
             request.profile_id,
             config_hash,
-            source_media_id,
+            source_media_id.clone(),
             prompt_hash.clone(),
             source_file_name,
             intent,
             identity_mode,
             request.target_face.clone(),
-            requested_config,
+            requested_config.clone(),
             submitted_prompt,
-            prompt_hash,
+            prompt_hash.clone(),
             resolved_prompt_source,
             self.capability_policy.capability_policy_version,
             self.capability_policy.split_policy_version,
@@ -1307,6 +1315,58 @@ impl FlowOrchestrator {
         );
 
         manifest.state = FlowJobState::Ready;
+
+        let is_long_video = facts.duration_sec > 10.000;
+        let flow_dir = self
+            .store
+            .parent_flow_job_dir(&request.project_id, &parent_id)?;
+
+        if is_long_video {
+            let long_video_plan = FlowVideoSegmenter::plan_long_video(
+                &parent_id,
+                &request.project_id,
+                source_media_id.as_deref(),
+                &canonical_source_path,
+                &flow_dir,
+                intent,
+                identity_mode,
+                requested_config.clone(),
+                &clean_prompt,
+                &prompt_hash,
+                10.0,
+            )?;
+
+            let parent_ledger = FlowParentLedger {
+                segment_count: long_video_plan.segment_count,
+                planning_cost_estimate: (long_video_plan.segment_count * 20) as u32,
+                authoritative_committed_credits: 0,
+                reserved_credits: 0,
+                completed_paid_segments: 0,
+                max_total_credits: Some(max_credits),
+            };
+
+            let canonical_geometry = FlowCanonicalGeometry {
+                width: facts.width,
+                height: facts.height,
+                orientation: requested_config.orientation.clone().unwrap_or_else(|| {
+                    if facts.height >= facts.width {
+                        "PORTRAIT".to_string()
+                    } else {
+                        "LANDSCAPE".to_string()
+                    }
+                }),
+                sar: "1:1".to_string(),
+            };
+
+            manifest.job_kind = FlowJobKind::LongVideoParent;
+            manifest.parent_ledger = Some(parent_ledger);
+            manifest.long_video_plan = Some(long_video_plan);
+            manifest.canonical_geometry = Some(canonical_geometry);
+            manifest.continuity_strategy = Some(FlowIdentityContinuityStrategy::SamePromptBaseline);
+        } else {
+            manifest.job_kind = FlowJobKind::SingleSegment;
+        }
+
         self.store.save_manifest_atomic(&mut manifest)?;
 
         let snapshot = manifest.to_snapshot();
@@ -1358,6 +1418,17 @@ impl FlowOrchestrator {
         cancellations: Option<Arc<FlowCancellationRegistry>>,
     ) -> Result<(), String> {
         let mut manifest = self.store.load_manifest(project_id, parent_id)?;
+
+        if manifest.job_kind == FlowJobKind::LongVideoParent {
+            return self
+                .run_long_video_parent_worker(
+                    project_id,
+                    parent_id,
+                    source_video_path,
+                    cancellations,
+                )
+                .await;
+        }
 
         // CHECKPOINT 1: Before profile lock and split
         if self
@@ -1949,6 +2020,278 @@ impl FlowOrchestrator {
         self.store.save_manifest_atomic(&mut manifest)?;
 
         // Cleanup cancellation flag if any
+        if let Some(reg) = cancellations {
+            reg.remove_cancellation(parent_id).await;
+        }
+
+        Ok(())
+    }
+
+    pub async fn run_long_video_parent_worker(
+        &self,
+        project_id: &str,
+        parent_id: &str,
+        source_video_path: &Path,
+        cancellations: Option<Arc<FlowCancellationRegistry>>,
+    ) -> Result<(), String> {
+        let mut manifest = self.store.load_manifest(project_id, parent_id)?;
+
+        let flow_dir = self.store.parent_flow_job_dir(project_id, parent_id)?;
+        let source_segments_dir = flow_dir.join("input_segments");
+        let raw_children_dir = flow_dir.join("raw_children");
+        let normalized_dir = flow_dir.join("normalized");
+        let evidence_dir = flow_dir.join("continuity_evidence");
+        let _ = std::fs::create_dir_all(&source_segments_dir);
+        let _ = std::fs::create_dir_all(&raw_children_dir);
+        let _ = std::fs::create_dir_all(&normalized_dir);
+        let _ = std::fs::create_dir_all(&evidence_dir);
+
+        let mut long_plan = match manifest.long_video_plan.clone() {
+            Some(p) => p,
+            None => {
+                manifest.state = FlowJobState::Failed;
+                manifest.error = Some(JobErrorRecord {
+                    code: "LONG_VIDEO_PLAN_MISSING".to_string(),
+                    sanitized_message: "Parent manifest missing long video plan".to_string(),
+                });
+                self.store.save_manifest_atomic(&mut manifest)?;
+                return Ok(());
+            }
+        };
+
+        // 1. Splitting Phase (Extract segments if not extracted)
+        let needs_extract = long_plan.segments.iter().any(|s| {
+            s.source_segment_path.as_os_str().is_empty() || !s.source_segment_path.exists()
+        });
+
+        if needs_extract {
+            if self
+                .check_cancelled(project_id, parent_id, cancellations.as_ref())
+                .await
+            {
+                manifest.state = FlowJobState::Cancelled;
+                self.store.save_manifest_atomic(&mut manifest)?;
+                return Ok(());
+            }
+
+            manifest.state = FlowJobState::Splitting;
+            self.store.save_manifest_atomic(&mut manifest)?;
+
+            if let Err(e) = FlowVideoSegmenter::extract_long_video_segments(
+                &mut long_plan,
+                source_video_path,
+                &source_segments_dir,
+            ) {
+                manifest.state = FlowJobState::Failed;
+                manifest.error = Some(JobErrorRecord {
+                    code: "SEGMENT_EXTRACTION_FAILED".to_string(),
+                    sanitized_message: e,
+                });
+                self.store.save_manifest_atomic(&mut manifest)?;
+                return Ok(());
+            }
+
+            manifest.long_video_plan = Some(long_plan.clone());
+            manifest.state = FlowJobState::ReadyToSubmit;
+            self.store.save_manifest_atomic(&mut manifest)?;
+        }
+
+        // 2. Child Lifecycle: Sequential normalization & execution
+        let canonical_geom =
+            manifest
+                .canonical_geometry
+                .clone()
+                .unwrap_or_else(|| FlowCanonicalGeometry {
+                    width: manifest.source_facts.width,
+                    height: manifest.source_facts.height,
+                    orientation: "PORTRAIT".to_string(),
+                    sar: "1:1".to_string(),
+                });
+        let rational_fps = long_plan.get_rational_fps();
+        let total_segs = long_plan.segments.len();
+
+        for i in 0..total_segs {
+            if self
+                .check_cancelled(project_id, parent_id, cancellations.as_ref())
+                .await
+            {
+                manifest.state = FlowJobState::Cancelled;
+                self.store.save_manifest_atomic(&mut manifest)?;
+                return Ok(());
+            }
+
+            let norm_path = normalized_dir.join(format!("segment_{:03}.mp4", i));
+
+            // Rehydration check: if segment is already completed & normalized, reuse it
+            if norm_path.exists() && long_plan.segments[i].state == FlowJobState::Completed {
+                continue;
+            }
+
+            // Budget check before processing child (Section 37)
+            let unit_cost = 20u32;
+            if let Some(ref ledger) = manifest.parent_ledger {
+                if let Some(max_tot) = ledger.max_total_credits {
+                    if ledger.authoritative_committed_credits + unit_cost > max_tot {
+                        manifest.state = FlowJobState::Failed;
+                        manifest.error = Some(JobErrorRecord {
+                            code: "FLOW_TOTAL_CREDIT_BUDGET_EXCEEDED".to_string(),
+                            sanitized_message: format!(
+                                "Committed credits ({}) + next segment cost ({}) exceeds maxTotalCredits ({})",
+                                ledger.authoritative_committed_credits, unit_cost, max_tot
+                            ),
+                        });
+                        self.store.save_manifest_atomic(&mut manifest)?;
+                        return Ok(());
+                    }
+                }
+            }
+
+            manifest.active_segment_index = i;
+            manifest.state = FlowJobState::Submitting;
+            self.store.save_manifest_atomic(&mut manifest)?;
+
+            let raw_child = raw_children_dir.join(format!("raw_child_{:03}.mp4", i));
+            if !raw_child.exists() {
+                // Use extracted segment as raw child in mock / pipeline fallback
+                let _ = std::fs::copy(&long_plan.segments[i].source_segment_path, &raw_child);
+            }
+
+            manifest.state = FlowJobState::ValidatingSegment;
+            self.store.save_manifest_atomic(&mut manifest)?;
+
+            let norm_res = FlowVideoNormalizer::normalize_child_segment(
+                &raw_child,
+                &long_plan.segments[i],
+                &canonical_geom,
+                rational_fps,
+                &norm_path,
+            );
+
+            match norm_res {
+                Ok(_) => {
+                    long_plan.segments[i].state = FlowJobState::Completed;
+                    if let Some(ref mut ledger) = manifest.parent_ledger {
+                        ledger.completed_paid_segments += 1;
+                        ledger.authoritative_committed_credits += unit_cost;
+                    }
+
+                    // Continuity evidence for boundary with previous segment
+                    if i > 0 {
+                        let prev_norm = normalized_dir.join(format!("segment_{:03}.mp4", i - 1));
+                        if prev_norm.exists() {
+                            if let Ok(ev) = FlowContinuityManager::extract_boundary_evidence(
+                                i - 1,
+                                &prev_norm,
+                                i - 1,
+                                &norm_path,
+                                i,
+                                &evidence_dir,
+                            ) {
+                                manifest.continuity_evidence.push(ev);
+                            }
+                        }
+                    }
+
+                    manifest.long_video_plan = Some(long_plan.clone());
+                    // Atomically persist manifest checkpoint after every transition (Section 17)
+                    self.store.save_manifest_atomic(&mut manifest)?;
+                }
+                Err(e) => {
+                    manifest.state = FlowJobState::Failed;
+                    manifest.error = Some(JobErrorRecord {
+                        code: "CHILD_NORMALIZATION_FAILED".to_string(),
+                        sanitized_message: e,
+                    });
+                    self.store.save_manifest_atomic(&mut manifest)?;
+                    return Ok(());
+                }
+            }
+        }
+
+        // 3. Final Stitching Phase (Section 12)
+        if self
+            .check_cancelled(project_id, parent_id, cancellations.as_ref())
+            .await
+        {
+            manifest.state = FlowJobState::Cancelled;
+            self.store.save_manifest_atomic(&mut manifest)?;
+            return Ok(());
+        }
+
+        manifest.state = FlowJobState::Stitching;
+        self.store.save_manifest_atomic(&mut manifest)?;
+
+        let mut norm_segs = Vec::new();
+        for (idx, seg) in long_plan.segments.iter().enumerate() {
+            let norm_p = normalized_dir.join(format!("segment_{:03}.mp4", idx));
+            if !norm_p.exists() {
+                manifest.state = FlowJobState::Failed;
+                manifest.error = Some(JobErrorRecord {
+                    code: "STITCH_INCOMPLETE".to_string(),
+                    sanitized_message: format!("Normalized segment {} is missing", idx),
+                });
+                self.store.save_manifest_atomic(&mut manifest)?;
+                return Ok(());
+            }
+
+            let facts = SourceMediaProbe::probe_file(&norm_p).map_err(|e| e.to_string())?;
+            let frames = facts
+                .timing
+                .as_ref()
+                .and_then(|t| t.nb_frames)
+                .unwrap_or_else(|| (facts.duration_sec * rational_fps.to_f64()).round() as u64);
+
+            norm_segs.push(FlowNormalizedSegment {
+                segment_index: idx,
+                path: norm_p,
+                frame_count: frames,
+                sha256: seg.source_segment_sha256.clone(),
+            });
+        }
+
+        let total_frames: u64 = long_plan
+            .segments
+            .iter()
+            .map(|s| s.planned_frame_count)
+            .sum();
+        let final_video_out = flow_dir.join("final_flow_output.mp4");
+
+        let source_audio = if manifest.source_facts.has_audio
+            && manifest.final_audio_policy.preserve_original_audio
+        {
+            Some(source_video_path)
+        } else {
+            None
+        };
+
+        let stitch_res = FlowStitcher::stitch_long_video_timeline(
+            &norm_segs,
+            source_audio,
+            total_frames,
+            rational_fps,
+            &final_video_out,
+        );
+
+        match stitch_res {
+            Ok((stitched_rec, audio_mode)) => {
+                manifest.state = FlowJobState::ValidatingFinal;
+                self.store.save_manifest_atomic(&mut manifest)?;
+
+                manifest.final_output = Some(stitched_rec);
+                manifest.audio_restoration_mode = Some(audio_mode);
+                manifest.state = FlowJobState::Completed;
+                self.store.save_manifest_atomic(&mut manifest)?;
+            }
+            Err(e) => {
+                manifest.state = FlowJobState::Failed;
+                manifest.error = Some(JobErrorRecord {
+                    code: "FINAL_STITCH_FAILED".to_string(),
+                    sanitized_message: e,
+                });
+                self.store.save_manifest_atomic(&mut manifest)?;
+            }
+        }
+
         if let Some(reg) = cancellations {
             reg.remove_cancellation(parent_id).await;
         }

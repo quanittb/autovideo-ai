@@ -503,11 +503,16 @@ fn test_flow_p4a_11_strict_segment_index_order_stitching() {
     create_synthetic_test_video(&seg2, 2.0, 30.0, 576, 1024, false);
 
     let final_path = temp_dir.path().join("stitched_ordered.mp4");
+    let norm_segs = vec![
+        FlowNormalizedSegment::from_path(0, seg0),
+        FlowNormalizedSegment::from_path(1, seg1),
+        FlowNormalizedSegment::from_path(2, seg2),
+    ];
     let (record, mode) = FlowStitcher::stitch_long_video_timeline(
-        &[seg0, seg1, seg2],
+        &norm_segs,
         None,
         180, // 6.0s * 30fps
-        30.0,
+        FlowRationalFrameRate::new(30, 1),
         &final_path,
     )
     .expect("stitch timeline");
@@ -524,9 +529,15 @@ fn test_flow_p4a_12_source_without_audio_produces_zero_audio_streams() {
     create_synthetic_test_video(&seg0, 3.0, 30.0, 576, 1024, false);
 
     let final_path = temp_dir.path().join("final_silent.mp4");
-    let (record, mode) =
-        FlowStitcher::stitch_long_video_timeline(&[seg0], None, 90, 30.0, &final_path)
-            .expect("stitch silent");
+    let norm_segs = vec![FlowNormalizedSegment::from_path(0, seg0)];
+    let (record, mode) = FlowStitcher::stitch_long_video_timeline(
+        &norm_segs,
+        None,
+        90,
+        FlowRationalFrameRate::new(30, 1),
+        &final_path,
+    )
+    .expect("stitch silent");
 
     assert_eq!(record.has_audio, false);
     assert_eq!(mode, FlowAudioRestorationMode::NoSourceAudio);
@@ -542,11 +553,12 @@ fn test_flow_p4a_13_audio_restoration_stream_copy_vs_transcode() {
     create_synthetic_test_video(&audio_source, 4.0, 30.0, 576, 1024, true);
 
     let final_path = temp_dir.path().join("final_restored.mp4");
+    let norm_segs = vec![FlowNormalizedSegment::from_path(0, seg0)];
     let (record, mode) = FlowStitcher::stitch_long_video_timeline(
-        &[seg0],
+        &norm_segs,
         Some(&audio_source),
         120,
-        30.0,
+        FlowRationalFrameRate::new(30, 1),
         &final_path,
     )
     .expect("stitch with audio");
@@ -578,8 +590,14 @@ fn test_flow_p4a_14_continuity_truth_unverified_and_visual_seam_distinction() {
         evidence.face_continuity_status,
         FlowFaceContinuityStatus::Unverified
     );
+    assert_eq!(evidence.seam_status, FlowSeamStatus::Unverified);
     assert_eq!(evidence.metric_name, Some("mean_pixel_delta".to_string()));
+    assert_eq!(
+        evidence.metric_category,
+        Some("VISUAL_SEAM_METRIC".to_string())
+    );
     assert!(evidence.metric_value.is_some());
+    assert!(evidence.contact_sheet_path.is_some());
     assert!(evidence.previous_end_frame_paths.len() > 0);
     assert!(evidence.next_start_frame_paths.len() > 0);
 }
@@ -826,11 +844,16 @@ fn test_flow_p4a_17_full_mock_acceptance_25s_source_to_project_derived_asset() {
 
     // 6. Stitch timeline and mux original full audio ONCE
     let final_output_path = proj_dir.join("media").join("derived_flow_full_25s.mp4");
+    let norm_segs = vec![
+        FlowNormalizedSegment::from_path(0, norm_child_0),
+        FlowNormalizedSegment::from_path(1, norm_child_1),
+        FlowNormalizedSegment::from_path(2, norm_child_2),
+    ];
     let (final_record, audio_mode) = FlowStitcher::stitch_long_video_timeline(
-        &[norm_child_0, norm_child_1, norm_child_2],
+        &norm_segs,
         Some(&source_video_path),
         750, // 25.0s * 30fps
-        30.0,
+        FlowRationalFrameRate::new(30, 1),
         &final_output_path,
     )
     .expect("stitch long video");
