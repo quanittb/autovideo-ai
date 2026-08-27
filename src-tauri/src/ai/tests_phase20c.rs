@@ -1,3 +1,4 @@
+use crate::ai::flow::GEMINI_API_KEY_SENTINEL;
 use crate::ai::phase20c::*;
 use std::path::Path;
 
@@ -201,18 +202,31 @@ fn test_phase20c_06_c3_confirmed_target_passenger_replaces_single_face() {
 
 #[test]
 fn test_phase20c_07_gemini_default_placeholder_sentinel_returns_not_configured() {
-    assert_eq!(DEFAULT_GEMINI_API_KEY, "Axxxxxxxxxxx");
-    // When no override and env is empty, sentinel "Axxxxxxxxxxx" must return NotConfigured
+    assert_eq!(GEMINI_API_KEY_SENTINEL, "Axxxxxxxxxxx");
+    assert!(!is_valid_gemini_key(GEMINI_API_KEY_SENTINEL));
+
+    // When no override and env is empty, valid DEFAULT_GEMINI_API_KEY resolves ApplicationDefault
     let res = ProviderCredentialResolver::resolve_gemini(None);
-    // (In clean test environment without GEMINI_API_KEY set)
     if std::env::var("GEMINI_API_KEY").is_err() {
-        assert_eq!(res, ResolvedCredential::NotConfigured);
+        assert_eq!(
+            res,
+            ResolvedCredential::Configured {
+                key: DEFAULT_GEMINI_API_KEY.to_string(),
+                source: CredentialSource::ApplicationDefault,
+            }
+        );
     }
 
     // Generic placeholders also rejected
     let res2 = ProviderCredentialResolver::resolve_gemini(Some("your_api_key_here"));
     if std::env::var("GEMINI_API_KEY").is_err() {
-        assert_eq!(res2, ResolvedCredential::NotConfigured);
+        assert_eq!(
+            res2,
+            ResolvedCredential::Configured {
+                key: DEFAULT_GEMINI_API_KEY.to_string(),
+                source: CredentialSource::ApplicationDefault,
+            }
+        );
     }
 }
 

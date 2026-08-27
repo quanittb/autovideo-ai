@@ -382,6 +382,131 @@ impl FlowRuntimeService {
         let manifests = self.orchestrator.store().list_all_flow_jobs(project_id)?;
         Ok(manifests.into_iter().map(|m| m.to_snapshot()).collect())
     }
+
+    pub fn use_flow_output_in_project(
+        &self,
+        project_id: &str,
+        parent_id: &str,
+    ) -> Result<crate::projects::UseFlowOutputResult, String> {
+        let manifest = self
+            .orchestrator
+            .store()
+            .load_manifest(project_id, parent_id)?;
+        let final_record = manifest.final_output.ok_or_else(|| {
+            "ARTIFACT_NOT_READY: Flow generation output artifact has not been created".to_string()
+        })?;
+
+        let flow_job_dir = self
+            .orchestrator
+            .store()
+            .parent_flow_job_dir(project_id, parent_id)?;
+        let canonical_job_dir = flow_job_dir
+            .canonicalize()
+            .map_err(|e| format!("CANONICALIZE_FAILED: {}", e))?;
+        let canonical_artifact = final_record
+            .final_path
+            .canonicalize()
+            .map_err(|e| format!("OUTPUT_NOT_FOUND: {}", e))?;
+
+        if !canonical_artifact.starts_with(&canonical_job_dir) {
+            return Err(
+                "SECURITY_VIOLATION: Output artifact is outside flow job directory".to_string(),
+            );
+        }
+
+        let paths = self.orchestrator.storage_paths();
+        let manager = crate::projects::ProjectManager::new(paths.clone());
+        let mut project = manager
+            .get_project(project_id)
+            .map_err(|e| format!("{}", e))?;
+
+        // Idempotency check: if project already has a derived asset with this provider job ID, return it
+        if let Some(existing) = project
+            .derived_media_assets
+            .iter()
+            .find(|d| d.provenance.provider == "FLOW" && d.provenance.provider_job_id == parent_id)
+        {
+            return Ok(crate::projects::UseFlowOutputResult {
+                derived_asset: existing.clone(),
+                project,
+            });
+        }
+
+        let project_dir = paths.projects_dir.join(project_id);
+        let derived_dir = project_dir.join("media").join("derived");
+        std::fs::create_dir_all(&derived_dir)
+            .map_err(|e| format!("Failed to create project derived media directory: {}", e))?;
+
+        let new_asset_id = format!("media_flow_{}", uuid::Uuid::new_v4().simple());
+        let derived_filename = format!("flow_{}_{}.mp4", parent_id, new_asset_id);
+        let destination_path = derived_dir.join(&derived_filename);
+
+        std::fs::copy(&canonical_artifact, &destination_path)
+            .map_err(|e| format!("Failed to copy derived asset into project media: {}", e))?;
+
+        // Probe the destination file to ensure independent metadata
+        let media_service = crate::media::MediaService::new();
+        let probed_metadata = media_service
+            .probe(&destination_path)
+            .map_err(|e| format!("Failed to probe copied derived media: {}", e))?;
+
+        let source_media_id_used = manifest.source_media_id.clone().unwrap_or_else(|| {
+            project
+                .source_media
+                .as_ref()
+                .map(|s| s.media_id.clone())
+                .unwrap_or_default()
+        });
+
+        let derived_source_media = crate::projects::SourceMedia {
+            media_id: new_asset_id.clone(),
+            original_file_name: derived_filename,
+            source_path: destination_path,
+            duration_ms: probed_metadata.duration_ms,
+            width: probed_metadata.width,
+            height: probed_metadata.height,
+            fps: probed_metadata.fps,
+            file_size_bytes: probed_metadata.file_size_bytes,
+            container: probed_metadata.container,
+            video_codec: probed_metadata.video_codec,
+            audio_codec: probed_metadata.audio_codec,
+            has_audio: probed_metadata.has_audio,
+        };
+
+        let provenance = crate::projects::DerivedMediaProvenance {
+            provider: "FLOW".to_string(),
+            provider_job_id: parent_id.to_string(),
+            source_media_id: source_media_id_used,
+            transformation_intent: manifest.transformation_intent,
+            identity_mode: manifest.identity_mode,
+            prompt_hash: manifest.prompt_hash.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        let derived_asset = crate::projects::DerivedMediaAsset {
+            media: derived_source_media,
+            provenance,
+        };
+
+        project.derived_media_assets.push(derived_asset.clone());
+        if let Some(ref mut ed) = project.editor_state {
+            ed.active_media_id = Some(new_asset_id);
+        } else {
+            project.editor_state = Some(crate::projects::ProjectEditorState {
+                active_media_id: Some(new_asset_id),
+                ..Default::default()
+            });
+        }
+
+        let updated_project = manager
+            .update_project(&project)
+            .map_err(|e| format!("{}", e))?;
+
+        Ok(crate::projects::UseFlowOutputResult {
+            derived_asset,
+            project: updated_project,
+        })
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -1519,7 +1644,9 @@ impl FlowOrchestrator {
                             &prep.prepared_fingerprint,
                             Some(&manifest.requested_generation_config),
                             Some(&manifest.prompt_hash),
-                            manifest.source_file_name.as_deref(),
+                            prep.source_identity
+                                .as_deref()
+                                .or(manifest.source_file_name.as_deref()),
                         )
                         .await;
 

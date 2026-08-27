@@ -81,6 +81,8 @@ pub struct PreparedFlowSubmission {
     pub live_displayed_credit_cost: Option<u32>,
     pub cost_provenance: super::orchestrator::FlowCostProvenance,
     pub prepared_fingerprint: String,
+    #[serde(default)]
+    pub source_identity: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

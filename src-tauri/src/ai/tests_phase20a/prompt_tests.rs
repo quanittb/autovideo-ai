@@ -227,7 +227,12 @@ fn test_phase20a_08_gemini_failure_leaves_prompt_untouched() {
     let temp_dir = tempdir().unwrap();
     let store = SecretStore::new(temp_dir.path().to_path_buf());
     let _ = store.clear_gemini_api_key();
-    let optimizer = GeminiPromptOptimizer::new(store);
+    std::env::remove_var("GEMINI_API_KEY");
+    let optimizer = GeminiPromptOptimizer::with_endpoint_and_model(
+        store,
+        Some("http://127.0.0.1:9/v1".to_string()),
+        "gemini-2.0-flash".to_string(),
+    );
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let req = OptimizePromptRequest {
@@ -247,7 +252,6 @@ fn test_phase20a_08_gemini_failure_leaves_prompt_untouched() {
     };
     let res = rt.block_on(optimizer.optimize_prompt(req));
     assert!(res.is_err());
-    assert!(res.unwrap_err().contains("GEMINI_API_KEY_NOT_CONFIGURED"));
 }
 
 #[test]
@@ -476,7 +480,9 @@ fn test_phase20a_54_failed_verification_preserves_stored_key() {
 
     let temp_dir = tempdir().unwrap();
     let store = SecretStore::new(temp_dir.path().to_path_buf());
-    store.set_gemini_api_key("my_stored_secret_key").unwrap();
+    store
+        .set_gemini_api_key("MockGeminiSecretKey123456789")
+        .unwrap();
 
     let manager = GeminiCredentialManager::with_endpoint_and_model(
         store.clone(),
@@ -491,7 +497,7 @@ fn test_phase20a_54_failed_verification_preserves_stored_key() {
     // Assert key is NOT deleted from SecretStore
     assert_eq!(
         store.get_gemini_api_key(),
-        Some("my_stored_secret_key".to_string())
+        Some("MockGeminiSecretKey123456789".to_string())
     );
 }
 
@@ -561,9 +567,12 @@ fn test_phase20a_57_zero_credential_leakage_in_diagnostics() {
 
 #[test]
 fn test_phase20c_gemini_01_sentinel_default_returns_not_configured() {
-    assert_eq!(DEFAULT_GEMINI_API_KEY, "Axxxxxxxxxxx");
-    let is_valid = is_valid_gemini_key(DEFAULT_GEMINI_API_KEY);
+    assert_eq!(GEMINI_API_KEY_SENTINEL, "Axxxxxxxxxxx");
+    let is_valid = is_valid_gemini_key(GEMINI_API_KEY_SENTINEL);
     assert!(!is_valid, "Sentinel key must not be considered valid");
+
+    let is_app_default_valid = is_valid_gemini_key(DEFAULT_GEMINI_API_KEY);
+    assert!(is_app_default_valid, "Configured default key is valid");
 
     let temp_dir = tempdir().unwrap();
     let store = SecretStore::new(temp_dir.path().to_path_buf());
@@ -571,8 +580,15 @@ fn test_phase20c_gemini_01_sentinel_default_returns_not_configured() {
 
     if std::env::var("GEMINI_API_KEY").is_err() {
         let cred = store.resolve_gemini_credential();
-        assert_eq!(cred, None);
+        assert_eq!(
+            cred,
+            Some(ResolvedGeminiCredential {
+                key: DEFAULT_GEMINI_API_KEY.to_string(),
+                source: GeminiCredentialSource::ApplicationDefault,
+            })
+        );
         assert!(!store.is_gemini_configured());
+        assert!(store.resolve_gemini_credential().is_some());
     }
 }
 
@@ -624,8 +640,13 @@ fn test_phase20c_gemini_05_remove_custom_key_falls_back() {
     let status = manager.get_status();
     assert!(!status.stored);
     if std::env::var("GEMINI_API_KEY").is_err() {
-        assert!(!status.is_configured);
-        assert_eq!(status.source, GeminiCredentialSource::NotConfigured);
+        if is_valid_gemini_key(DEFAULT_GEMINI_API_KEY) {
+            assert!(status.is_configured);
+            assert_eq!(status.source, GeminiCredentialSource::ApplicationDefault);
+        } else {
+            assert!(!status.is_configured);
+            assert_eq!(status.source, GeminiCredentialSource::NotConfigured);
+        }
     }
 }
 

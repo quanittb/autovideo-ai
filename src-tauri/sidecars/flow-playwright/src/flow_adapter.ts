@@ -540,34 +540,48 @@ export async function ensureUploadedVideoEditActive(
       ).catch(() => []);
       console.error(`[ensureUploadedVideoEditActive] Visible buttons after click: ${JSON.stringify(visibleButtons)}`);
 
-      // Try explicit edit button if surfaced on card or toolbar
+      // 1. Try explicit edit button if surfaced on card or toolbar
       const editBtn = page
         .locator(
-          'button:has-text("Chỉnh sửa"), button:has-text("Edit"), button[aria-label*="chỉnh sửa" i], button[aria-label*="edit" i], button:has(i:has-text("edit")), button:has(i:has-text("movie_edit")), button:has-text("Chèn"), button:has-text("Insert"), button:has-text("Thêm vào"), button:has-text("Add to")'
+          'button:has-text("Chỉnh sửa"), button:has-text("Edit"), button[aria-label*="chỉnh sửa" i], button[aria-label*="edit" i], button:has(i:has-text("edit")), button:has(i:has-text("movie_edit"))'
+        )
+        .first();
+
+      // 2. Try insert/add-to-canvas button if surfaced on card selection (e.g. "add_2 Tạo", "Chèn", "Insert", "Thêm vào", "Add to")
+      const addBtn = page
+        .locator(
+          'button:has-text("Chèn"), button:has-text("Insert"), button:has-text("Thêm vào"), button:has-text("Add to"), button:has(i:has-text("add_2")), button:has(span:has-text("add_2")), button:has-text("add_2 Tạo"), button:has-text("add_2")'
         )
         .first();
 
       if ((await editBtn.count().catch(() => 0)) > 0 && (await editBtn.isVisible().catch(() => false))) {
         const btnText = await editBtn.innerText().catch(() => '');
-        console.error(`[ensureUploadedVideoEditActive] Clicking button: ${btnText}...`);
+        console.error(`[ensureUploadedVideoEditActive] Clicking edit button: ${btnText}...`);
         await editBtn.click().catch(() => {});
         await page.waitForTimeout(2000);
       } else {
-        // Try dragging asset to canvas to instantiate video node
-        const box = await activeEl.boundingBox().catch(() => null);
-        if (box) {
-          console.error(`[ensureUploadedVideoEditActive] Dragging media card to canvas from (${box.x}, ${box.y})...`);
-          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-          await page.mouse.down();
-          await page.waitForTimeout(200);
-          await page.mouse.move(box.x + 500, box.y + 150, { steps: 12 });
-          await page.waitForTimeout(200);
-          await page.mouse.up();
-          await page.waitForTimeout(2000);
+        if ((await addBtn.count().catch(() => 0)) > 0 && (await addBtn.isVisible().catch(() => false))) {
+          const btnText = await addBtn.innerText().catch(() => '');
+          console.error(`[ensureUploadedVideoEditActive] Clicking add-to-canvas button: ${btnText}...`);
+          await addBtn.click().catch(() => {});
+          await page.waitForTimeout(2500);
+        } else {
+          // Try dragging asset to canvas to instantiate video node
+          const box = await activeEl.boundingBox().catch(() => null);
+          if (box) {
+            console.error(`[ensureUploadedVideoEditActive] Dragging media card to canvas from (${box.x}, ${box.y})...`);
+            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+            await page.mouse.down();
+            await page.waitForTimeout(200);
+            await page.mouse.move(box.x + 500, box.y + 150, { steps: 12 });
+            await page.waitForTimeout(200);
+            await page.mouse.up();
+            await page.waitForTimeout(2000);
+          }
         }
 
-        // Bounded check for canvas node
-        const canvasNode = page.locator('.react-flow__node, button:has(video), div:has(> video)').first();
+        // Bounded check for canvas node (React Flow node or video element on canvas)
+        const canvasNode = page.locator('.react-flow__node, div[class*="react-flow__node"], button:has(video), div:has(> video)').first();
         if ((await canvasNode.count().catch(() => 0)) > 0 && (await canvasNode.isVisible().catch(() => false))) {
           console.error('[ensureUploadedVideoEditActive] Canvas node detected, opening into edit mode...');
           await canvasNode.click().catch(() => {});
@@ -587,9 +601,13 @@ export async function ensureUploadedVideoEditActive(
               await canvasNode.dblclick().catch(() => {});
             }
           }
-        } else if (box) {
-          // Double click original card
-          await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
+        } else {
+          // Double click original card and parent
+          const box = await activeEl.boundingBox().catch(() => null);
+          if (box) {
+            await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
+          }
+          await activeEl.dblclick().catch(() => {});
         }
       }
 
@@ -598,6 +616,21 @@ export async function ensureUploadedVideoEditActive(
     }
 
     editActive = await checkEditActive();
+
+    // Direct fallback: Check if an explicit /edit/ anchor link exists in project DOM
+    if (!editActive) {
+      const editLink = page.locator('a[href*="/edit/"]').first();
+      if ((await editLink.count().catch(() => 0)) > 0) {
+        const href = await editLink.getAttribute('href').catch(() => null);
+        if (href) {
+          console.error(`[ensureUploadedVideoEditActive] Found explicit edit link href: ${href}, navigating...`);
+          const fullUrl = new URL(href, page.url()).toString();
+          await page.goto(fullUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+          await page.waitForTimeout(3000);
+          editActive = await checkEditActive();
+        }
+      }
+    }
   }
 
   if (!editActive) {
@@ -1345,6 +1378,7 @@ export class FlowUiAdapterV1 {
         currentUrl.includes('ServiceLogin') ||
         currentUrl.includes('/signin')
       ) {
+        console.error(`[checkAuthStatus] LOGIN_REQUIRED: URL redirected to login: ${currentUrl}`);
         return { status: 'LOGIN_REQUIRED' };
       }
 
@@ -1355,6 +1389,7 @@ export class FlowUiAdapterV1 {
           .count()
           .catch(() => 0)) > 0;
       if (isGoogleSignInForm) {
+        console.error(`[checkAuthStatus] LOGIN_REQUIRED: Google sign-in form detected on ${currentUrl}`);
         return { status: 'LOGIN_REQUIRED' };
       }
 
@@ -1376,6 +1411,7 @@ export class FlowUiAdapterV1 {
         bodyTextLower.includes('verify your identity') ||
         bodyTextLower.includes('region is not supported')
       ) {
+        console.error(`[checkAuthStatus] FLOW_ELIGIBILITY_REQUIRED on ${currentUrl}`);
         return { status: 'FLOW_ELIGIBILITY_REQUIRED' };
       }
 
@@ -1393,6 +1429,7 @@ export class FlowUiAdapterV1 {
         bodyTextLower.includes('sign in with google to continue') ||
         bodyTextLower.includes('sign in to continue')
       ) {
+        console.error(`[checkAuthStatus] LOGIN_REQUIRED: login prompt or text detected on ${currentUrl}`);
         return { status: 'LOGIN_REQUIRED' };
       }
 
@@ -1410,7 +1447,28 @@ export class FlowUiAdapterV1 {
         await this.page.waitForTimeout(1000);
       }
 
-      // 5. Strong Authenticated Flow Workspace / Dashboard Detection using shared helpers
+      // 5. Authoritative session check via official Flow session API
+      if (currentUrl.includes('labs.google')) {
+        try {
+          const sessionAuth = await this.page.evaluate(async () => {
+            try {
+              const res = await fetch('/fx/api/auth/session');
+              if (res.ok) {
+                const data = (await res.json()) as any;
+                if (data?.user?.email && data?.access_token) {
+                  return true;
+                }
+              }
+            } catch {}
+            return false;
+          });
+          if (sessionAuth) {
+            return { status: 'READY' };
+          }
+        } catch {}
+      }
+
+      // 6. Strong Authenticated Flow Workspace / Dashboard Detection using shared helpers
       const hasMockAppRoot =
         (await this.page
           .locator('#flow-app[data-authenticated="true"], #flow-app')
@@ -1763,6 +1821,44 @@ export class FlowUiAdapterV1 {
             balance = parsedAria;
             break;
           }
+        }
+      } catch {}
+    }
+
+    // 2. Query official session & credits endpoint if DOM locator was not present
+    if (balance === null) {
+      try {
+        const liveCred = await this.page.evaluate(async () => {
+          try {
+            const sessionRes = await fetch('/fx/api/auth/session');
+            if (!sessionRes.ok) return null;
+            const session = (await sessionRes.json()) as any;
+            const token = session?.access_token;
+            if (!token) return null;
+
+            const credRes = await fetch(
+              'https://aisandbox-pa.googleapis.com/v1/credits',
+              {
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  Accept: 'application/json',
+                },
+              }
+            );
+            if (!credRes.ok) return null;
+            const credData = (await credRes.json()) as any;
+            if (typeof credData?.credits === 'number') {
+              return credData.credits;
+            }
+            if (typeof credData?.subscriptionCredits === 'number') {
+              return credData.subscriptionCredits;
+            }
+          } catch {}
+          return null;
+        });
+
+        if (typeof liveCred === 'number') {
+          balance = liveCred;
         }
       } catch {}
     }
