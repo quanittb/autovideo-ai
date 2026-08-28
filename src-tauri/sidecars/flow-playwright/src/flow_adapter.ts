@@ -2518,6 +2518,140 @@ export class FlowUiAdapterV1 {
     );
   }
 
+  async recoverExistingSubmission(params: {
+    providerProjectUrl: string;
+    expectedSourceStem: string;
+    submittedAt?: string;
+    destinationPath?: string;
+  }): Promise<{
+    status:
+      | 'RECOVERED_COMPLETED'
+      | 'STILL_GENERATING'
+      | 'PROVIDER_FAILED'
+      | 'OUTPUT_NOT_FOUND'
+      | 'OUTPUT_AMBIGUOUS'
+      | 'LOGIN_REQUIRED'
+      | 'FLOW_UI_CHANGED';
+    downloadUrl?: string;
+    savedPath?: string;
+    errorMessage?: string;
+    correlatedOutputTitle?: string;
+  }> {
+    const page = this.page;
+    if (!page) {
+      throw new Error('PAGE_NOT_INITIALIZED');
+    }
+
+    // 1. Check authentication status
+    const auth = await this.checkAuthStatus();
+    if (auth.status !== 'READY') {
+      return { status: 'LOGIN_REQUIRED', errorMessage: `Auth status is ${auth.status}` };
+    }
+
+    // 2. Navigate to the exact provider project URL
+    try {
+      await page.goto(params.providerProjectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(4000);
+    } catch (e: any) {
+      return { status: 'FLOW_UI_CHANGED', errorMessage: `Failed to navigate to project URL: ${e?.message || e}` };
+    }
+
+    // 3. Check for provider error messages
+    const bodyText = (await page.locator('body').innerText().catch(() => '')).toLowerCase();
+    if (
+      bodyText.includes('quá trình tạo không thành công') ||
+      bodyText.includes('generation failed') ||
+      bodyText.includes('không thể tạo video')
+    ) {
+      return { status: 'PROVIDER_FAILED', errorMessage: 'Provider reported generation failure on project canvas' };
+    }
+
+    // 4. Look for generating nodes/spinners specifically on the canvas/workflow
+    const generatingNodes = page.locator(
+      '.react-flow__node:has(.generating-card), .react-flow__node:has([data-state="generating"]), .react-flow__node:has([data-status="generating"]), .react-flow__node:has([role="progressbar"]), .react-flow__node:has(.spinner), .generating-card, [data-state="generating"]'
+    );
+    const generatingCount = await generatingNodes.count().catch(() => 0);
+    if (generatingCount > 0 && (await generatingNodes.first().isVisible().catch(() => false))) {
+      return { status: 'STILL_GENERATING' };
+    }
+
+    // 5. Look for completed video nodes/cards on canvas and in drawer
+    const completedVideoLocators = [
+      page.locator('.react-flow__node video[src]'),
+      page.locator('video[data-status="ready"]'),
+      page.locator('video[src*="blob:"]'),
+      page.locator('video[src*="http"]'),
+      page.locator('.react-flow__node:has(video)'),
+    ];
+
+    let foundVideoSrc: string | null = null;
+    let matchingVideoCount = 0;
+
+    for (const loc of completedVideoLocators) {
+      const count = await loc.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const item = loc.nth(i);
+        if (await item.isVisible().catch(() => false)) {
+          matchingVideoCount++;
+          const src = await item.getAttribute('src').catch(() => null);
+          if (src && !foundVideoSrc) {
+            foundVideoSrc = src;
+          }
+        }
+      }
+      if (matchingVideoCount > 0) break;
+    }
+
+    // 6. Check for download buttons
+    const downloadBtns = page.locator(
+      'a#download-link, a[download], a[href*="download"], button:has-text("Download"), button:has-text("Tải xuống"), button[aria-label*="Download" i], button[aria-label*="Tải xuống" i], button:has(i:has-text("download")), button:has(i:has-text("file_download"))'
+    );
+    const dlCount = await downloadBtns.count().catch(() => 0);
+
+    // If no video or download controls found
+    if (matchingVideoCount === 0 && dlCount === 0) {
+      // Check if global generating text exists
+      if (bodyText.includes('đang tạo') || bodyText.includes('generating')) {
+        return { status: 'STILL_GENERATING' };
+      }
+      return { status: 'OUTPUT_NOT_FOUND', errorMessage: 'No completed video or download control found in project' };
+    }
+
+    // Ambiguity check: if multiple distinct candidate videos exist that cannot be correlated
+    if (matchingVideoCount > 2) {
+      return {
+        status: 'OUTPUT_AMBIGUOUS',
+        errorMessage: `Found ${matchingVideoCount} distinct video elements without unique correlation`,
+      };
+    }
+
+    // Download if destinationPath is requested
+    if (params.destinationPath) {
+      try {
+        const dlRes = await this.downloadArtifact(foundVideoSrc || undefined, params.destinationPath);
+        if (dlRes.success) {
+          return {
+            status: 'RECOVERED_COMPLETED',
+            downloadUrl: foundVideoSrc || undefined,
+            savedPath: params.destinationPath,
+            correlatedOutputTitle: params.expectedSourceStem,
+          };
+        }
+      } catch (e: any) {
+        return {
+          status: 'OUTPUT_NOT_FOUND',
+          errorMessage: `Download artifact failed: ${e?.message || e}`,
+        };
+      }
+    }
+
+    return {
+      status: 'RECOVERED_COMPLETED',
+      downloadUrl: foundVideoSrc || undefined,
+      correlatedOutputTitle: params.expectedSourceStem,
+    };
+  }
+
   async closeBrowser(): Promise<void> {
     if (this.context) {
       try {

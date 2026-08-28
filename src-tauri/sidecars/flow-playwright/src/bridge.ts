@@ -65,6 +65,10 @@ export class FlowRpcBridge {
           const subRes = await this.adapter.submitPreparedVideoEdit(msg.params);
           return { id: msg.id, result: subRes };
 
+        case 'recover_existing_submission':
+          const recRes = await this.adapter.recoverExistingSubmission(msg.params);
+          return { id: msg.id, result: recRes };
+
         case 'close_browser':
           await this.adapter.closeBrowser();
           return { id: msg.id, result: { success: true } };

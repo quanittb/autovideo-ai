@@ -31,19 +31,19 @@ All executions strictly adhered to the Zero-Fake Policy and explicit human budge
 * **Credits Spent**: 20
 
 ### Clean Rerun Attempt
-* **Run ID**: `flow_792c6813-4c0d-485b-8e13-81a942a2e169` / `flow_6e304484-bcb9-458f-9790-2d07f18fc621`
+* **Parent Run ID**: `flow_0d2ba55e-029d-4188-a294-c7ebd8f567c6` (`proj-8e8c37f2-8d6d-4689-8e3c-bb86685f02fc`)
+* **Segment 0 Attempt ID**: `att_flow_0d2ba55e-029d-4188-a294-c7ebd8f567c6_0_1787934601818`
 * **Source Media**: `test-assets/p4b_source_15s.mp4` (SHA-256: `03390797b5787a923bfd703c53cf0cec64680451ab8c36dc6fc43f9e9e04ddab`)
 * **Segment 0 Input**: `segment_000.mp4` (10.0s, 300 frames, 720p, Portrait 9:16)
 * **Pre-Click Exact Media Verification**: PASSED (`activeCardIdentity: segment_000`)
 * **Pre-Click Fingerprint & Cost Gate**: PASSED (20 credits <= 20 credit limit)
-* **Generate Click Dispatched**: 1
-* **Credits Spent**: 20
-* **Polling Outcome**: Dispatched Segment 0 generation polled for 10 minutes in `Generating` state before reaching safety polling timeout.
+* **Generate Click Dispatched**: 1 (Committed credits: 20)
+* **Current Attempt Status**: `SEGMENT_0_SUBMITTED` / `POST_CLICK_POLL_TIMEOUT` / `RECOVERY_PENDING`
 * **Auto-Retries Executed**: 0 (Strictly fail-closed; Segment #1 was never dispatched; Segment #3 was never generated).
 
 ---
 
-## 2. Production Hotfixes Implemented & Verified
+## 2. Production Hotfixes & Recovery Mechanism Implemented
 
 ### A. Strict Media Card Matching & Upload
 * Removed generic `play_circle` / `play_arrow` fallback from `locateMediaCard`.
@@ -55,9 +55,11 @@ All executions strictly adhered to the Zero-Fake Policy and explicit human budge
 * **Prepared Fingerprint Gate**: Canonical hash matching `sourceStem`, `promptHash`, model (`Omni Flash`), resolution (`720p`), duration (`10`), orientation (`PORTRAIT / 9:16`), output count (`1`).
 * **Authoritative Live Cost Gate**: Tooltip and composer readback cross-checked against per-segment budget (<= 20 credits) and parent ledger budget (<= 40 credits).
 
-### C. Download & Polling Subsystem
-* `detectGenerationState` checks terminal error, eligibility, and generating/queued markers without fabricating progress.
-* `downloadArtifact` supports direct HTTP fetch, browser download event interception, and in-page `blob:` URL evaluation and binary streaming.
+### C. Zero-Paid Recovery Engine (`recover_existing_submission`)
+* Connects to exact persisted Google Flow workspace (`https://labs.google/fx/vi/tools/flow/project/0b0710f1-f569-4486-ac33-5222c5bf3808`).
+* Performs 0 generate clicks and 0 paid preflights.
+* Evaluates scoped node completion evidence over global text markers.
+* Correlates completed video artifact, downloads without scratch dependencies, normalizes to exactly 300 frames, and checkpoints manifest.
 
 ---
 
@@ -69,7 +71,7 @@ All non-paid unit and integration regression suites passed 100%:
 | :--- | :---: | :--- |
 | `tests_phase_flow_p4a1` | 8 / 8 (1 ignored live) | **PASS** |
 | `tests_phase_flow_p4a` | 25 / 25 (1 ignored live) | **PASS** |
-| `tests_phase_flow_p4b` | 9 / 9 (1 ignored live) | **PASS** |
+| `tests_phase_flow_p4b` | 18 / 18 (1 ignored live) | **PASS** |
 | Frontend Vitest (`src/**/*.test.ts`) | 61 / 61 (7 files) | **PASS** |
 | TypeScript & Vite Build (`npm run build`) | All modules bundled | **PASS** |
 | Sidecar Build (`npm run build` in `flow-playwright`) | `tsc` compilation clean | **PASS** |
@@ -90,4 +92,6 @@ All non-paid unit and integration regression suites passed 100%:
 
 * **Zero-Fake Policy**: Real Google Flow interaction was performed for live tests; mock tests strictly isolated in unit tests; zero fake balances or fake outputs created.
 * **Secrets Security**: No API tokens, passwords, cookies, or user profile credentials stored in source code, repository logs, or frontend bundles.
-* **Budget Limits**: Never exceeded 40 credits; exactly 2 paid clicks dispatched across entire Phase 4B experimentation; zero auto-retries.
+* **Observed Spend So Far**: 40 credits / 2 clicks across entire experimentation.
+* **Maximum Combined Authorized Ceiling**: 60 credits / 3 clicks.
+* **Auto-Retries**: 0.

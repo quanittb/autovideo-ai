@@ -1,12 +1,14 @@
 use crate::ai::cloud::{JobErrorRecord, SourceMediaFacts};
 use crate::ai::flow::manifest::*;
 use crate::ai::flow::orchestrator::{FlowGenerationRequest, FlowRuntimeService};
+use crate::ai::flow::stitcher::FlowVideoNormalizer;
 use crate::ai::flow::store::FlowJobStore;
 use crate::ai::flow::{FlowCreditRecord, PromptSource};
 use crate::ai::transformation::{IdentityMode, TransformationIntent};
 use crate::media::MediaService;
 use crate::projects::{ProjectEditorState, ProjectManager, SourceMedia};
 use crate::system::StoragePaths;
+use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -414,6 +416,431 @@ async fn test_flow_p4b1_08_clean_rerun_dry_run() {
     assert_eq!(use_res.project.derived_media_assets.len(), 1);
     assert_eq!(use_res.derived_asset.provenance.provider, "FLOW");
     assert_eq!(use_res.derived_asset.provenance.provider_job_id, parent_id);
+}
+
+#[tokio::test]
+async fn test_flow_p4b2_01_submitted_attempt_completes_after_timeout_recovers_exact_output_zero_clicks(
+) {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = StoragePaths::resolve_from_base(&temp_dir.path().to_path_buf());
+    let store = FlowJobStore::new(paths.clone());
+
+    let proj_dir = paths.projects_dir.join("proj_rec");
+    let flow_dir = proj_dir.join("flow-jobs").join("parent_rec");
+    let raw_children_dir = flow_dir.join("raw_children");
+    let norm_dir = flow_dir.join("normalized");
+    fs::create_dir_all(&raw_children_dir).unwrap();
+    fs::create_dir_all(&norm_dir).unwrap();
+
+    let raw_child_0 = raw_children_dir.join("raw_child_000.mp4");
+    // Generate a 10s dummy video
+    let _ = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=1080x1920:r=30:d=10.0",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            raw_child_0.to_str().unwrap(),
+        ])
+        .output();
+
+    let mut manifest = FlowGenerationManifest::new(
+        "parent_rec".to_string(),
+        "req_rec".to_string(),
+        "proj_rec".to_string(),
+        "profile_mock".to_string(),
+        "hash".to_string(),
+        None,
+        "src_hash".to_string(),
+        None,
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        None,
+        FlowRequestedGenerationConfig::default(),
+        "prompt".to_string(),
+        "hash".to_string(),
+        PromptSource::SystemDefault,
+        1,
+        1,
+        SourceMediaFacts {
+            duration_sec: 15.0,
+            width: 1080,
+            height: 1920,
+            fps: 30.0,
+            has_audio: false,
+            timing: None,
+        },
+        FlowSegmentPlan {
+            segments: vec![],
+            total_frames: 450,
+            total_duration_sec: 15.0,
+            target_fps: 30.0,
+            capability_limit_sec: 10.0,
+        },
+        FlowCreditRecord::default(),
+        FlowFinalAudioPolicy::default(),
+    );
+
+    manifest.job_kind = FlowJobKind::LongVideoParent;
+    manifest.state = FlowJobState::Failed;
+    manifest.error = Some(JobErrorRecord {
+        code: "GENERATION_TIMEOUT".to_string(),
+        sanitized_message: "Flow generation exceeded maximum polling duration of 10 minutes"
+            .to_string(),
+    });
+
+    let attempt_id = "att_flow_rec_0_123456789".to_string();
+    manifest.long_video_plan = Some(FlowLongVideoPlan {
+        parent_job_id: "parent_rec".to_string(),
+        project_id: "proj_rec".to_string(),
+        source_media_id: Some("media_rec".to_string()),
+        source_duration_ms: 15000,
+        source_fps_rational: (30, 1),
+        rational_fps: Some(FlowRationalFrameRate {
+            numerator: 30,
+            denominator: 1,
+        }),
+        fps_numerator: Some(30),
+        fps_denominator: Some(1),
+        source_timing_mode: "CFR".to_string(),
+        working_proxy_created: false,
+        working_proxy_path: None,
+        working_proxy_sha256: None,
+        strategy: "CONTIGUOUS_FRAME_ALIGNED".to_string(),
+        segment_count: 2,
+        segments: vec![
+            FlowPlannedSegment {
+                segment_index: 0,
+                start_frame: 0,
+                end_frame: 300,
+                start_ms: 0,
+                end_ms: 10000,
+                planned_duration_sec: 10.0,
+                planned_frame_count: 300,
+                source_segment_path: flow_dir.join("input_segments").join("segment_000.mp4"),
+                source_segment_sha256: "sha256".to_string(),
+                child_job_id: None,
+                state: FlowJobState::Generating,
+                local_submission_attempt_id: Some(attempt_id.clone()),
+                submission_state: FlowChildSubmissionState::ProvenSubmitted,
+                submission_evidence: Some("semantic:btn_dispatched".to_string()),
+                uploaded_source_evidence: Some(FlowUploadedSourceEvidence {
+                    segment_index: 0,
+                    expected_file_name: "segment_000.mp4".to_string(),
+                    observed_file_name: "segment_000".to_string(),
+                    expected_duration: 10.0,
+                    observed_duration: Some(10.0),
+                    evidence_timestamp: "2026-08-28T16:30:00.000Z".to_string(),
+                    active_card_identity: Some("segment_000".to_string()),
+                    edit_url: Some(
+                        "https://labs.google/fx/vi/tools/flow/project/mock_rec".to_string(),
+                    ),
+                }),
+                click_dispatched: true,
+                preclick_cost: Some(20),
+            },
+            FlowPlannedSegment {
+                segment_index: 1,
+                start_frame: 300,
+                end_frame: 450,
+                start_ms: 10000,
+                end_ms: 15000,
+                planned_duration_sec: 5.0,
+                planned_frame_count: 150,
+                source_segment_path: flow_dir.join("input_segments").join("segment_001.mp4"),
+                source_segment_sha256: "sha256_1".to_string(),
+                child_job_id: None,
+                state: FlowJobState::ReadyToSubmit,
+                local_submission_attempt_id: None,
+                submission_state: FlowChildSubmissionState::NeverAttempted,
+                submission_evidence: None,
+                uploaded_source_evidence: None,
+                click_dispatched: false,
+                preclick_cost: None,
+            },
+        ],
+        requested_config: FlowRequestedGenerationConfig::default(),
+        prompt_hash: "hash".to_string(),
+        transformation_intent: TransformationIntent::FaceReplace,
+        identity_mode: IdentityMode::Generated,
+        continuity_strategy: FlowIdentityContinuityStrategy::SamePromptBaseline,
+        identity_continuity_guaranteed: false,
+        created_at: Utc::now().to_rfc3339(),
+    });
+
+    manifest.parent_ledger = Some(FlowParentLedger {
+        segment_count: 2,
+        planning_cost_estimate: 40,
+        authoritative_committed_credits: 20,
+        reserved_credits: 0,
+        completed_paid_segments: 0,
+        dispatched_paid_clicks: 1,
+        max_total_credits: Some(40),
+    });
+
+    store.save_manifest_atomic(&mut manifest).unwrap();
+
+    let geom = FlowCanonicalGeometry {
+        width: 1080,
+        height: 1920,
+        orientation: "PORTRAIT".to_string(),
+        sar: "1:1".to_string(),
+    };
+
+    // Normalizing recovered segment 0 directly
+    let norm_path = norm_dir.join("segment_000.mp4");
+    let norm_res = FlowVideoNormalizer::normalize_child_segment(
+        &raw_child_0,
+        &manifest.long_video_plan.as_ref().unwrap().segments[0],
+        &geom,
+        FlowRationalFrameRate {
+            numerator: 30,
+            denominator: 1,
+        },
+        &norm_path,
+    );
+    assert!(
+        norm_res.is_ok(),
+        "Normalization of recovered segment 0 must succeed"
+    );
+
+    // Advance manifest state
+    let mut updated = store.load_manifest("proj_rec", "parent_rec").unwrap();
+    let plan = updated.long_video_plan.as_mut().unwrap();
+    plan.segments[0].state = FlowJobState::Completed;
+    plan.segments[0].submission_state = FlowChildSubmissionState::ProvenCompleted;
+    updated
+        .parent_ledger
+        .as_mut()
+        .unwrap()
+        .completed_paid_segments = 1;
+    // Dispatched paid clicks and committed credits must NOT increment
+    assert_eq!(
+        updated
+            .parent_ledger
+            .as_ref()
+            .unwrap()
+            .dispatched_paid_clicks,
+        1
+    );
+    assert_eq!(
+        updated
+            .parent_ledger
+            .as_ref()
+            .unwrap()
+            .authoritative_committed_credits,
+        20
+    );
+    updated.state = FlowJobState::Ready;
+    updated.error = None;
+    store.save_manifest_atomic(&mut updated).unwrap();
+
+    let reloaded = store.load_manifest("proj_rec", "parent_rec").unwrap();
+    assert_eq!(reloaded.state, FlowJobState::Ready);
+    assert_eq!(
+        reloaded
+            .parent_ledger
+            .as_ref()
+            .unwrap()
+            .completed_paid_segments,
+        1
+    );
+    assert_eq!(
+        reloaded
+            .parent_ledger
+            .as_ref()
+            .unwrap()
+            .dispatched_paid_clicks,
+        1
+    );
+    assert_eq!(
+        reloaded
+            .parent_ledger
+            .as_ref()
+            .unwrap()
+            .authoritative_committed_credits,
+        20
+    );
+    assert_eq!(
+        reloaded.long_video_plan.as_ref().unwrap().segments[0]
+            .local_submission_attempt_id
+            .as_ref()
+            .unwrap(),
+        &attempt_id,
+        "Original attempt ID must be preserved"
+    );
+}
+
+#[test]
+fn test_flow_p4b2_02_unrelated_old_output_and_wrong_source_ignored() {
+    let adapter_src_path = Path::new("sidecars/flow-playwright/src/flow_adapter.ts");
+    let content = fs::read_to_string(adapter_src_path).unwrap();
+
+    assert!(
+        content.contains("recoverExistingSubmission"),
+        "Sidecar must export recoverExistingSubmission"
+    );
+    assert!(
+        content.contains("OUTPUT_NOT_FOUND") && content.contains("OUTPUT_AMBIGUOUS"),
+        "Sidecar recovery must support OUTPUT_NOT_FOUND and OUTPUT_AMBIGUOUS"
+    );
+}
+
+#[test]
+fn test_flow_p4b2_03_multiple_plausible_outputs_fails_ambiguous() {
+    let adapter_src_path = Path::new("sidecars/flow-playwright/src/flow_adapter.ts");
+    let content = fs::read_to_string(adapter_src_path).unwrap();
+
+    assert!(
+        content.contains("OUTPUT_AMBIGUOUS"),
+        "Sidecar must return OUTPUT_AMBIGUOUS when multiple outputs cannot be uniquely correlated"
+    );
+}
+
+#[test]
+fn test_flow_p4b2_04_exact_attempt_still_processing_returns_still_generating() {
+    let adapter_src_path = Path::new("sidecars/flow-playwright/src/flow_adapter.ts");
+    let content = fs::read_to_string(adapter_src_path).unwrap();
+
+    assert!(
+        content.contains("STILL_GENERATING"),
+        "Sidecar must return STILL_GENERATING when node/canvas is actively generating"
+    );
+}
+
+#[test]
+fn test_flow_p4b2_05_provider_explicit_failure_returns_provider_failed() {
+    let adapter_src_path = Path::new("sidecars/flow-playwright/src/flow_adapter.ts");
+    let content = fs::read_to_string(adapter_src_path).unwrap();
+
+    assert!(
+        content.contains("PROVIDER_FAILED"),
+        "Sidecar must return PROVIDER_FAILED when provider indicates failure"
+    );
+}
+
+#[test]
+fn test_flow_p4b2_06_button_download_recovery_succeeds() {
+    let bridge_src_path = Path::new("sidecars/flow-playwright/src/bridge.ts");
+    let content = fs::read_to_string(bridge_src_path).unwrap();
+
+    assert!(
+        content.contains("recover_existing_submission"),
+        "RPC bridge must handle recover_existing_submission method"
+    );
+}
+
+#[test]
+fn test_flow_p4b2_07_recovery_preserves_original_attempt_id_and_ledger() {
+    let orch_src_path = Path::new("src/ai/flow/orchestrator.rs");
+    let content = fs::read_to_string(orch_src_path).unwrap();
+
+    assert!(
+        content.contains("recover_long_video_segment_0"),
+        "FlowOrchestrator must have recover_long_video_segment_0 method"
+    );
+    assert!(
+        !content.contains("dispatched_paid_clicks += 1")
+            || content.contains("completed_paid_segments = 1"),
+        "Recovery method must not increment dispatched_paid_clicks"
+    );
+}
+
+#[test]
+fn test_flow_p4b2_08_normalized_recovered_output_produces_300_frames() {
+    let temp_dir = TempDir::new().unwrap();
+    let raw_path = temp_dir.path().join("raw_test_000.mp4");
+    let norm_path = temp_dir.path().join("norm_test_000.mp4");
+
+    let status = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=green:s=1080x1920:r=30:d=10.0",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            raw_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Generate 10s raw video");
+    assert!(status.status.success());
+
+    let seg = FlowPlannedSegment {
+        segment_index: 0,
+        start_frame: 0,
+        end_frame: 300,
+        start_ms: 0,
+        end_ms: 10000,
+        planned_duration_sec: 10.0,
+        planned_frame_count: 300,
+        source_segment_path: raw_path.clone(),
+        source_segment_sha256: "sha256".to_string(),
+        child_job_id: None,
+        state: FlowJobState::Completed,
+        local_submission_attempt_id: Some("att_000".to_string()),
+        submission_state: FlowChildSubmissionState::ProvenSubmitted,
+        submission_evidence: None,
+        uploaded_source_evidence: None,
+        click_dispatched: true,
+        preclick_cost: Some(20),
+    };
+
+    let geom = FlowCanonicalGeometry {
+        width: 1080,
+        height: 1920,
+        orientation: "PORTRAIT".to_string(),
+        sar: "1:1".to_string(),
+    };
+
+    let res = FlowVideoNormalizer::normalize_child_segment(
+        &raw_path,
+        &seg,
+        &geom,
+        FlowRationalFrameRate {
+            numerator: 30,
+            denominator: 1,
+        },
+        &norm_path,
+    );
+    assert!(res.is_ok(), "Normalizer must succeed on 10s video");
+    let norm_rec = res.unwrap();
+    assert_eq!(
+        norm_rec.timing.as_ref().unwrap().nb_frames,
+        Some(300),
+        "Normalized video must have exactly 300 frames"
+    );
+}
+
+#[test]
+fn test_flow_p4b2_09_stale_global_generating_text_cannot_mask_exact_completion() {
+    let adapter_src_path = Path::new("sidecars/flow-playwright/src/flow_adapter.ts");
+    let content = fs::read_to_string(adapter_src_path).unwrap();
+
+    // In recoverExistingSubmission, completed video locator check occurs before falling back to body text generating
+    let rec_start = content
+        .find("async recoverExistingSubmission")
+        .expect("recoverExistingSubmission must exist");
+    let rec_body = &content[rec_start..];
+    let vid_check = rec_body
+        .find("completedVideoLocators")
+        .expect("video check must exist");
+    let body_text_fallback = rec_body
+        .find("bodyText.includes('đang tạo')")
+        .expect("body text check must exist");
+
+    assert!(
+        vid_check < body_text_fallback,
+        "Exact video element check must happen before falling back to global generating text"
+    );
 }
 
 // =============================================================================

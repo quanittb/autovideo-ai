@@ -2641,4 +2641,143 @@ impl FlowOrchestrator {
 
         Ok(())
     }
+
+    pub async fn recover_long_video_segment_0(
+        &self,
+        project_id: &str,
+        parent_id: &str,
+    ) -> Result<super::playwright_bridge::FlowRecoveryResult, String> {
+        let mut manifest = self.store.load_manifest(project_id, parent_id)?;
+        if manifest.job_kind != FlowJobKind::LongVideoParent {
+            return Err("NOT_LONG_VIDEO_PARENT: Job is not a long video parent".to_string());
+        }
+
+        let plan = manifest
+            .long_video_plan
+            .as_mut()
+            .ok_or_else(|| "Missing long_video_plan in manifest".to_string())?;
+
+        let seg0 = plan
+            .segments
+            .get_mut(0)
+            .ok_or_else(|| "Missing segment 0 in plan".to_string())?;
+
+        if !seg0.click_dispatched {
+            return Err(
+                "SEGMENT_0_NOT_SUBMITTED: Cannot recover segment 0 because click was not dispatched"
+                    .to_string(),
+            );
+        }
+
+        let uploaded_evidence = seg0
+            .uploaded_source_evidence
+            .clone()
+            .ok_or_else(|| "Missing uploaded_source_evidence on segment 0".to_string())?;
+
+        let provider_project_url = uploaded_evidence
+            .edit_url
+            .as_deref()
+            .unwrap_or(PlaywrightBridge::OFFICIAL_FLOW_URL);
+        let evidence_timestamp = uploaded_evidence.evidence_timestamp.clone();
+
+        let flow_dir = self.store.parent_flow_job_dir(project_id, parent_id)?;
+        let raw_children_dir = flow_dir.join("raw_children");
+        let normalized_dir = flow_dir.join("normalized");
+        let _ = std::fs::create_dir_all(&raw_children_dir);
+        let _ = std::fs::create_dir_all(&normalized_dir);
+
+        let raw_child_000_path = raw_children_dir.join("raw_child_000.mp4");
+        let norm_000_path = normalized_dir.join("segment_000.mp4");
+
+        // Profile acquisition
+        let profile_dir = self.profile_manager.get_profile_dir(&manifest.profile_id)?;
+        let _profile_guard = self
+            .profile_manager
+            .acquire_session_lock(&manifest.profile_id)?;
+
+        let mut session = self.bridge.open_active_session(&profile_dir).await?;
+
+        let rec_res = session
+            .recover_submission(
+                provider_project_url,
+                "segment_000",
+                Some(&evidence_timestamp),
+                Some(&raw_child_000_path),
+            )
+            .await;
+
+        session.close().await;
+        drop(_profile_guard);
+
+        let recovery = rec_res?;
+
+        match recovery.status.as_str() {
+            "RECOVERED_COMPLETED" => {
+                if !raw_child_000_path.exists() {
+                    return Err(
+                        "RECOVERY_DOWNLOAD_MISSING: Raw child 0 was not downloaded".to_string()
+                    );
+                }
+
+                let canonical_geom =
+                    manifest
+                        .canonical_geometry
+                        .clone()
+                        .unwrap_or_else(|| FlowCanonicalGeometry {
+                            width: manifest.source_facts.width,
+                            height: manifest.source_facts.height,
+                            orientation: "PORTRAIT".to_string(),
+                            sar: "1:1".to_string(),
+                        });
+                let rational_fps = manifest
+                    .long_video_plan
+                    .as_ref()
+                    .map(|p| p.get_rational_fps())
+                    .unwrap_or(super::manifest::FlowRationalFrameRate {
+                        numerator: 30,
+                        denominator: 1,
+                    });
+
+                let plan = manifest.long_video_plan.as_ref().unwrap();
+                FlowVideoNormalizer::normalize_child_segment(
+                    &raw_child_000_path,
+                    &plan.segments[0],
+                    &canonical_geom,
+                    rational_fps,
+                    &norm_000_path,
+                )?;
+
+                // Update manifest state preserving exact original attemptId, 1 click, 20 credits
+                let plan = manifest.long_video_plan.as_mut().unwrap();
+                plan.segments[0].state = FlowJobState::Completed;
+                plan.segments[0].submission_state = FlowChildSubmissionState::ProvenCompleted;
+
+                if let Some(ref mut ledger) = manifest.parent_ledger {
+                    ledger.completed_paid_segments = 1;
+                    // Note: dispatched_paid_clicks remains 1, authoritative_committed_credits remains 20
+                }
+
+                manifest.state = FlowJobState::Ready;
+                manifest.error = None;
+                manifest.timestamps.updated_at = Utc::now().to_rfc3339();
+
+                self.store.save_manifest_atomic(&mut manifest)?;
+                Ok(recovery)
+            }
+            "PROVIDER_FAILED" => {
+                manifest.state = FlowJobState::Failed;
+                manifest.error = Some(JobErrorRecord {
+                    code: "PROVIDER_FAILED".to_string(),
+                    sanitized_message: recovery
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "Provider generation failed".to_string()),
+                });
+                manifest.timestamps.updated_at = Utc::now().to_rfc3339();
+                self.store.save_manifest_atomic(&mut manifest)?;
+                Ok(recovery)
+            }
+            _ => Ok(recovery),
+        }
+    }
 }

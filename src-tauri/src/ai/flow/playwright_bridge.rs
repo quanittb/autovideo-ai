@@ -19,6 +19,20 @@ pub struct FlowPollResult {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FlowRecoveryResult {
+    pub status: String,
+    #[serde(default)]
+    pub download_url: Option<String>,
+    #[serde(default)]
+    pub saved_path: Option<String>,
+    #[serde(default)]
+    pub error_message: Option<String>,
+    #[serde(default)]
+    pub correlated_output_title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FlowGenerationSettings {
     #[serde(default)]
     pub model: Option<String>,
@@ -839,6 +853,31 @@ impl FlowActiveBrowserSession {
                 destination_path
             ))
         }
+    }
+
+    pub async fn recover_submission(
+        &mut self,
+        provider_project_url: &str,
+        expected_source_stem: &str,
+        submitted_at: Option<&str>,
+        destination_path: Option<&Path>,
+    ) -> Result<FlowRecoveryResult, String> {
+        let dest_str = destination_path.map(|p| p.to_string_lossy().to_string());
+        let val = self
+            .sidecar
+            .call_rpc(
+                "recover_existing_submission",
+                serde_json::json!({
+                    "providerProjectUrl": provider_project_url,
+                    "expectedSourceStem": expected_source_stem,
+                    "submittedAt": submitted_at,
+                    "destinationPath": dest_str,
+                }),
+                Duration::from_secs(120),
+            )
+            .await?;
+
+        serde_json::from_value(val).map_err(|e| format!("Failed to parse recovery result: {}", e))
     }
 
     pub async fn close(mut self) {
