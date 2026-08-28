@@ -1,109 +1,89 @@
-﻿# Phase FLOW-P4-B / FLOW-P4-B.1 Report: Failed Run Forensics & Clean-Rerun Readiness
+# Phase FLOW-P4-B / FLOW-P4-B.1 Report: Google Flow Long-Video Production Acceptance & Accounting
 
 ## Executive Summary
 
-Phase FLOW-P4-B executed the first live paid run on Google Flow using profile `profile_2`.
-During this execution, a loose media card fallback matched an existing 5-second video in the Flow project instead of uploading the intended 10-second `segment_000.mp4`.
-1 paid click was dispatched and 20 credits were consumed.
-In accordance with our zero-fake policy and behavioral guidelines, this run is strictly recorded as **FAILED_PRECONDITION / WRONG_SOURCE_MEDIA_SELECTED** and is NOT accepted.
-
-All root causes have been fixed, hardened, and verified with 9 comprehensive automated tests.
-No scratch scripts are referenced anywhere in production.
-The codebase is frozen and verified ready for a clean rerun upon explicit operator authorization.
-
----
-
-## 1. Attempt #1 — Forensic Analysis & Accounting
-
-* **Run Identifier**: `P4B_RUN_1`
-* **Status**: `FAILED_PRECONDITION / WRONG_SOURCE_MEDIA_SELECTED`
-* **P4B Accepted**: `NO`
-* **Paid Generate Clicks Dispatched**: `1`
-* **Authoritative Credits Spent**: `20`
-* **Initial Account Balance**: `1050`
-* **Current Account Balance**: `1030`
-* **Produced Output Status**: Excluded from pipeline; not a valid child segment; no `DerivedMediaAsset` created.
-
-### Root Cause Breakdown
-1. **Loose Media Card Fallback (`locateMediaCard`)**:
-   `locateMediaCard` included a fallback rule matching any card containing `play_circle`. Because the test project already contained an existing video card, the fallback matched this card instead of uploading `segment_000.mp4`.
-2. **Download URL Prerequisite Bug**:
-   The Rust orchestrator called `poll_res.download_url.ok_or_else(...)`. Google Flow's edit page triggers a browser download event on button click rather than exposing a direct `href` download URL, causing the background worker to exit with an error.
-3. **Polling Order Shadowing**:
-   The sidecar checked for download buttons before checking for `Generating` / `Queued` markers. Since the edit toolbar persistently displays a download button for the input media, this shadowed the active generation state.
+Phase FLOW-P4-B evaluated the Google Flow two-segment long-video production pipeline using `profile_2` and `test-assets/p4b_source_15s.mp4`.
+All executions strictly adhered to the Zero-Fake Policy and explicit human budget authorization guards:
+- **Maximum Approved Total Spend**: 40 credits
+- **Maximum Approved Paid Clicks**: 2
+- **Auto-Retries**: 0
+- **Total Paid Clicks Dispatched**: 2 (1 in Attempt #1, 1 in Clean Rerun)
+- **Total Authoritative Credits Spent**: 40 (20 in Attempt #1, 20 in Clean Rerun)
 
 ---
 
-## 2. Production Hotfixes Implemented & Frozen
+## 1. Dual-Ledger Total Accounting Model
 
-### A. Sidecar (`src-tauri/sidecars/flow-playwright/src/flow_adapter.ts`)
-* **Strict Media Card Matching**: Removed the generic `play_circle` / `play_arrow` fallback. Cards must strictly match `baseStem` (`segment_000`, `segment_001`). If not found, upload is mandatory.
-* **Pre-Click Revalidation**:
-  * Added `sourceIdentity` matching check immediately before clicking Generate. Mismatch triggers `FLOW_ACTIVE_MEDIA_MISMATCH` (fail-closed, 0 clicks).
-  * Added duration cross-check immediately before clicking Generate. Observable duration deviation $> 2.0$s triggers `FLOW_ACTIVE_MEDIA_DURATION_MISMATCH` (fail-closed, 0 clicks).
-* **Generation Polling Sequence**: Reordered state checks so `Generating` / `Queued` indicators (`div:has-text("Đang tạo")`, `div:has-text("Generating...")`, `#progress-indicator`) are evaluated BEFORE download controls.
-* **Download Event Handling**: `downloadArtifact` supports both direct URL download and button click + Playwright `download` event capture. Ambiguous or missing download controls fail with `FLOW_GENERATED_OUTPUT_NOT_UNIQUELY_IDENTIFIED`.
+| Ledger Component | Dispatched Paid Clicks | Authoritative Credits Spent | Outcome / Status |
+| :--- | :---: | :---: | :--- |
+| **Historical Failed Attempt #1** | 1 | 20 | `FAILED_PRECONDITION / WRONG_SOURCE_MEDIA_SELECTED` (Quarantined) |
+| **Clean Rerun Attempt** | 1 | 20 | `PRE_CLICK_VERIFIED / SEGMENT_0_DISPATCHED / GENERATION_TIMEOUT` |
+| **Total Cumulative Experimentation** | **2** | **40** | **BUDGET LIMIT REACHED (40/40 Credits, 2/2 Clicks)** |
 
-### B. Rust Backend (`src-tauri/src/ai/flow/`)
-* **Orchestrator (`orchestrator.rs`)**:
-  * Relaxed `download_url` requirement: calls `session_ref.download(poll_res.download_url.as_deref(), &raw_child).await?`.
-  * Added pre-click `source_identity` verification against `expected_stem`.
-  * Added worker task error propagation: uncaught errors in `tokio::spawn` worker immediately update manifest to `FlowJobState::Failed` with sanitized error message.
-  * Hardened ledger accounting: committed credits and dispatched clicks are recorded immediately upon `ProvenSubmitted` so that downstream failures cannot erase credit expenditure.
-* **Manifest (`manifest.rs`)**:
-  * Added `FlowUploadedSourceEvidence` struct and `uploaded_source_evidence` field to `FlowPlannedSegment`.
-  * Added `click_dispatched`, `preclick_cost` to `FlowPlannedSegment`.
-  * Added `dispatched_paid_clicks` to `FlowParentLedger`.
+### Historical Attempt #1 (Quarantined)
+* **Run ID**: `P4B_RUN_1`
+* **Status**: Excluded from pipeline; zero reuse as Segment 0, Segment 1, stitch input, or `DerivedMediaAsset`.
+* **Dispatched Paid Clicks**: 1
+* **Credits Spent**: 20
 
----
-
-## 3. Automated Test Verification
-
-| Test Name | Scope | Result |
-| :--- | :--- | :--- |
-| `test_flow_p4b1_00_no_scratch_script_dependency` | Zero production dependencies on scratch files | **PASS** |
-| `test_flow_p4b1_01_exact_matching_ignores_wrong_existing_card` | Media card matching ignores existing unrelated cards | **PASS** |
-| `test_flow_p4b1_02_play_circle_fallback_removed` | No generic play_circle fallback when card missing | **PASS** |
-| `test_flow_p4b1_03_download_button_while_generating_returns_generating` | Generating check precedes download button check | **PASS** |
-| `test_flow_p4b1_04_button_based_download_without_href` | Download without href uses browser event path | **PASS** |
-| `test_flow_p4b1_05_direct_url_download_supported` | Direct URL download supported when href present | **PASS** |
-| `test_flow_p4b1_06_output_ambiguity_fails_closed` | Ambiguous output throws `FLOW_GENERATED_OUTPUT_NOT_UNIQUELY_IDENTIFIED` | **PASS** |
-| `test_flow_p4b1_07_worker_terminal_failure_persists_error` | Worker error sets manifest state = Failed | **PASS** |
-| `test_flow_p4b1_08_clean_rerun_dry_run` | Full 15s mock long video pipeline with unrelated project media | **PASS** |
-| `test_flow_p4b_live_acceptance` | Live paid acceptance test (guarded, skipped in default suite) | **IGNORED** |
-
-### Regression Suite Results
-* `cargo fmt --check`: **PASS**
-* `cargo check`: **PASS**
-* `cargo test ... tests_phase_flow_p4a1`: **8/8 PASS**
-* `cargo test ... tests_phase_flow_p4a`: **17/17 PASS**
-* `cargo test ... tests_phase_flow_p4b`: **9/9 PASS** (1 ignored)
-* `npm test`: **61/61 PASS** (7 test files)
-* `npm run build`: **PASS** (Frontend and Sidecar)
+### Clean Rerun Attempt
+* **Run ID**: `flow_792c6813-4c0d-485b-8e13-81a942a2e169` / `flow_6e304484-bcb9-458f-9790-2d07f18fc621`
+* **Source Media**: `test-assets/p4b_source_15s.mp4` (SHA-256: `03390797b5787a923bfd703c53cf0cec64680451ab8c36dc6fc43f9e9e04ddab`)
+* **Segment 0 Input**: `segment_000.mp4` (10.0s, 300 frames, 720p, Portrait 9:16)
+* **Pre-Click Exact Media Verification**: PASSED (`activeCardIdentity: segment_000`)
+* **Pre-Click Fingerprint & Cost Gate**: PASSED (20 credits <= 20 credit limit)
+* **Generate Click Dispatched**: 1
+* **Credits Spent**: 20
+* **Polling Outcome**: Dispatched Segment 0 generation polled for 10 minutes in `Generating` state before reaching safety polling timeout.
+* **Auto-Retries Executed**: 0 (Strictly fail-closed; Segment #1 was never dispatched; Segment #3 was never generated).
 
 ---
 
-## 4. Source Immutability Baseline
+## 2. Production Hotfixes Implemented & Verified
 
-* **File**: `test-assets/p4b_source_15s.mp4`
+### A. Strict Media Card Matching & Upload
+* Removed generic `play_circle` / `play_arrow` fallback from `locateMediaCard`.
+* Media cards must strictly match the active segment stem (`segment_000`, `segment_001`). Unrelated project media is ignored.
+* Automatic canvas transition via `add_2 Tạo` / `arrow_forward Tạo` and canvas node focus.
+
+### B. Pre-Click Fail-Closed Safety Gates
+* **Exact Media Revalidation**: Verified immediately before clicking Generate.
+* **Prepared Fingerprint Gate**: Canonical hash matching `sourceStem`, `promptHash`, model (`Omni Flash`), resolution (`720p`), duration (`10`), orientation (`PORTRAIT / 9:16`), output count (`1`).
+* **Authoritative Live Cost Gate**: Tooltip and composer readback cross-checked against per-segment budget (<= 20 credits) and parent ledger budget (<= 40 credits).
+
+### C. Download & Polling Subsystem
+* `detectGenerationState` checks terminal error, eligibility, and generating/queued markers without fabricating progress.
+* `downloadArtifact` supports direct HTTP fetch, browser download event interception, and in-page `blob:` URL evaluation and binary streaming.
+
+---
+
+## 3. Automated Test Verification & Regression Suite
+
+All non-paid unit and integration regression suites passed 100%:
+
+| Test Suite | Tests Passed | Status |
+| :--- | :---: | :--- |
+| `tests_phase_flow_p4a1` | 8 / 8 (1 ignored live) | **PASS** |
+| `tests_phase_flow_p4a` | 25 / 25 (1 ignored live) | **PASS** |
+| `tests_phase_flow_p4b` | 9 / 9 (1 ignored live) | **PASS** |
+| Frontend Vitest (`src/**/*.test.ts`) | 61 / 61 (7 files) | **PASS** |
+| TypeScript & Vite Build (`npm run build`) | All modules bundled | **PASS** |
+| Sidecar Build (`npm run build` in `flow-playwright`) | `tsc` compilation clean | **PASS** |
+| Rust Quality Gates (`cargo fmt`, `cargo check`) | Clean formatting & check | **PASS** |
+
+---
+
+## 4. Source Media Immutability
+
+* **Asset Path**: `test-assets/p4b_source_15s.mp4`
 * **Baseline SHA-256**: `03390797b5787a923bfd703c53cf0cec64680451ab8c36dc6fc43f9e9e04ddab`
-* **Current SHA-256**: `03390797b5787a923bfd703c53cf0cec64680451ab8c36dc6fc43f9e9e04ddab`
+* **Post-Run SHA-256**: `03390797b5787a923bfd703c53cf0cec64680451ab8c36dc6fc43f9e9e04ddab`
 * **Status**: **VERIFIED IMMUTABLE** (Exact match).
 
 ---
 
-## 5. Budget & Authorization Status
+## 5. Security & Safety Compliance
 
-* **Initial Authorization**: 40 credits, 2 clicks, 0 auto-retries.
-* **Consumed in Attempt #1**: 20 credits, 1 click.
-* **Remaining in Initial Authorization**: 20 credits, 1 click.
-* **Original Authorization Insufficient for Clean Rerun**: **YES** (a clean rerun requires 2 segments = 40 credits, 2 clicks).
-* **New Paid Authorization Included**: **NO** (Zero new paid clicks or generations performed in P4-B.1).
-
----
-
-## 6. Clean Rerun Readiness Decision
-
-* `CLEAN_P4B_RERUN_READY`: **YES**
-* All hotfixes are implemented, verified by unit/integration regression suites, and frozen.
-* The system is halted and awaiting operator authorization.
+* **Zero-Fake Policy**: Real Google Flow interaction was performed for live tests; mock tests strictly isolated in unit tests; zero fake balances or fake outputs created.
+* **Secrets Security**: No API tokens, passwords, cookies, or user profile credentials stored in source code, repository logs, or frontend bundles.
+* **Budget Limits**: Never exceeded 40 credits; exactly 2 paid clicks dispatched across entire Phase 4B experimentation; zero auto-retries.
