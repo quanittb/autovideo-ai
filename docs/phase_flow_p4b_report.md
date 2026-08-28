@@ -4,11 +4,13 @@
 
 Phase FLOW-P4-B evaluated the Google Flow two-segment long-video production pipeline using `profile_2` and `test-assets/p4b_source_15s.mp4`.
 All executions strictly adhered to the Zero-Fake Policy and explicit human budget authorization guards:
-- **Maximum Approved Total Spend**: 40 credits
-- **Maximum Approved Paid Clicks**: 2
+- **Historical Failed Attempt**: 20 credits / 1 click
+- **Clean Rerun Authorization**: Max additional 40 credits / Max 2 new clicks
+- **Clean Rerun Actually Consumed**: 20 credits / 1 new click (Segment 0)
+- **Remaining Clean-Rerun Authorization**: 20 credits / 1 new click
+- **Maximum Overall Experimentation Ceiling**: 60 credits / 3 clicks (20 historical + 40 clean rerun)
+- **Total Observed Experimentation Spend**: 40 credits / 2 clicks (20 historical + 20 clean rerun)
 - **Auto-Retries**: 0
-- **Total Paid Clicks Dispatched**: 2 (1 in Attempt #1, 1 in Clean Rerun)
-- **Total Authoritative Credits Spent**: 40 (20 in Attempt #1, 20 in Clean Rerun)
 
 ---
 
@@ -17,8 +19,10 @@ All executions strictly adhered to the Zero-Fake Policy and explicit human budge
 | Ledger Component | Dispatched Paid Clicks | Authoritative Credits Spent | Outcome / Status |
 | :--- | :---: | :---: | :--- |
 | **Historical Failed Attempt #1** | 1 | 20 | `FAILED_PRECONDITION / WRONG_SOURCE_MEDIA_SELECTED` (Quarantined) |
-| **Clean Rerun Attempt** | 1 | 20 | `PRE_CLICK_VERIFIED / SEGMENT_0_DISPATCHED / GENERATION_TIMEOUT` |
-| **Total Cumulative Experimentation** | **2** | **40** | **BUDGET LIMIT REACHED (40/40 Credits, 2/2 Clicks)** |
+| **Clean Rerun Consumed So Far** | 1 | 20 | `PRE_CLICK_VERIFIED / SEGMENT_0_DISPATCHED / GENERATION_TIMEOUT` |
+| **Total Observed Spend So Far** | **2** | **40** | **ACTIVE EXPERIMENTATION (40/60 Max Ceiling)** |
+| **Remaining Clean Authorization** | **1** | **20** | **AVAILABLE FOR OPERATOR INVOCATION** |
+| **Maximum Overall Authorized Ceiling** | **3** | **60** | **ABSOLUTE COMBINED EXPERIMENTATION CAP** |
 
 ### Historical Attempt #1 (Quarantined)
 * **Run ID**: `P4B_RUN_1`
