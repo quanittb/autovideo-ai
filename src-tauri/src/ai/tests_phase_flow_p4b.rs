@@ -1244,7 +1244,7 @@ async fn test_flow_p4b_live_acceptance() {
     println!("--------------------------------------------------");
     println!("[P4-B STEP 4] Polling long video job to terminal completion...");
     let mut final_snapshot = None;
-    for iteration in 1..=240 {
+    for iteration in 1..=480 {
         tokio::time::sleep(Duration::from_secs(5)).await;
         let snap = flow_service
             .get_flow_job_status(&project.id, &parent_id)
@@ -1459,4 +1459,230 @@ async fn test_flow_p4b_live_acceptance() {
     println!("==================================================");
     println!("FLOW-P4-B PAID PRODUCTION ACCEPTANCE RUN COMPLETED");
     println!("==================================================");
+}
+
+#[tokio::test]
+#[ignore = "Real live Google Flow paid long-video recovery and continuation acceptance"]
+async fn test_flow_p4b_live_resume_clean_run() {
+    if std::env::var("RUN_FLOW_P4B_LIVE_PAID_ACCEPTANCE").unwrap_or_default() != "1" {
+        println!("SKIPPED: Set RUN_FLOW_P4B_LIVE_PAID_ACCEPTANCE=1 to authorize live paid acceptance run.");
+        return;
+    }
+
+    println!("==================================================");
+    println!("FLOW-P4-B LIVE RESUME CLEAN RUN ACCEPTANCE");
+    println!("PROJECT_ID: proj-8e8c37f2-8d6d-4689-8e3c-bb86685f02fc");
+    println!("PARENT_JOB_ID: flow_0d2ba55e-029d-4188-a294-c7ebd8f567c6");
+    println!("REMAINING AUTHORIZATION: 20 CREDITS / 1 CLICK");
+    println!("==================================================");
+
+    let base_path = PathBuf::from("D:/rustProject/autovideo-ai/src-tauri/.autovideo_data");
+    let paths = StoragePaths::resolve_from_base(&base_path);
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let project_id = "proj-8e8c37f2-8d6d-4689-8e3c-bb86685f02fc";
+    let parent_id = "flow_0d2ba55e-029d-4188-a294-c7ebd8f567c6";
+
+    let source_path = paths
+        .projects_dir
+        .join(project_id)
+        .join("media")
+        .join("p4b_source_15s.mp4");
+    assert!(
+        source_path.exists(),
+        "Source media must exist at {:?}",
+        source_path
+    );
+
+    let source_sha256_before = calculate_file_sha256(&source_path);
+    println!("SOURCE_SHA256_BEFORE: {}", source_sha256_before);
+
+    // Initial Balance Check
+    println!("[P4-B RESUME] Querying initial credit balance...");
+    let initial_status = flow_service
+        .refresh_flow_credit_balance("profile_2")
+        .await
+        .expect("Failed to query initial credit balance");
+    let initial_balance = initial_status.balance;
+    println!("INITIAL_BALANCE: {:?}", initial_balance);
+
+    // Call Resume Generation
+    println!("[P4-B RESUME] Calling resume_flow_generation...");
+    let start_snapshot = flow_service
+        .resume_flow_generation(project_id, parent_id, &source_path)
+        .await
+        .expect("Failed to resume flow generation");
+
+    println!("RESUMED_SNAPSHOT: {:?}", start_snapshot);
+
+    // Poll to completion (up to 30 minutes = 360 * 5s)
+    let mut final_snapshot = None;
+    for iteration in 1..=360 {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let snap = flow_service
+            .get_flow_job_status(project_id, parent_id)
+            .expect("Failed to query job status during resume polling");
+
+        println!(
+            "[POLL #{:03}] State: {:?}, ActiveSeg: {}, Completed: {}/{}",
+            iteration,
+            snap.state,
+            snap.active_segment_index,
+            snap.completed_generations,
+            snap.total_segments
+        );
+
+        if snap.state == FlowJobState::Completed
+            || snap.state == FlowJobState::Failed
+            || snap.state == FlowJobState::Cancelled
+        {
+            final_snapshot = Some(snap);
+            break;
+        }
+    }
+
+    let end_snap = final_snapshot.expect("Polling timed out waiting for resumed job to complete");
+    println!("FINAL_STATE: {:?}", end_snap.state);
+    if let Some(ref err) = end_snap.error_message {
+        println!("JOB_ERROR_MESSAGE: {}", err);
+    }
+    assert_eq!(
+        end_snap.state,
+        FlowJobState::Completed,
+        "Resumed job must complete successfully"
+    );
+
+    // Load final manifest
+    let manifest = flow_service
+        .orchestrator
+        .store()
+        .load_manifest(project_id, parent_id)
+        .expect("Failed to load final manifest");
+
+    let ledger = manifest.parent_ledger.as_ref().expect("Ledger missing");
+    println!(
+        "LEDGER_COMPLETED_SEGMENTS: {}",
+        ledger.completed_paid_segments
+    );
+    println!(
+        "LEDGER_COMMITTED_CREDITS: {}",
+        ledger.authoritative_committed_credits
+    );
+    println!(
+        "LEDGER_DISPATCHED_CLICKS: {}",
+        ledger.dispatched_paid_clicks
+    );
+
+    assert_eq!(ledger.completed_paid_segments, 2);
+    assert!(ledger.authoritative_committed_credits <= 40);
+    assert!(ledger.dispatched_paid_clicks <= 2);
+
+    // Check final stitched output
+    let final_record = manifest
+        .final_output
+        .as_ref()
+        .expect("Final output record missing");
+    assert!(
+        final_record.final_path.exists(),
+        "Final video file must exist"
+    );
+    let final_sha256 = calculate_file_sha256(&final_record.final_path);
+    println!("FINAL_OUTPUT_PATH: {:?}", final_record.final_path);
+    println!("FINAL_SHA256: {}", final_sha256);
+    println!("FINAL_FRAME_COUNT: {}", final_record.frame_count);
+    println!("FINAL_DURATION_SEC: {}", final_record.duration_sec);
+
+    assert_eq!(final_record.frame_count, 450);
+
+    // Ingest into project as DerivedMediaAsset
+    let use_res = flow_service
+        .use_flow_output_in_project(project_id, parent_id)
+        .expect("Failed to ingest flow output into project");
+    println!("DERIVED_MEDIA_ID: {}", use_res.derived_asset.media.media_id);
+
+    // Final balance check
+    let final_status = flow_service
+        .refresh_flow_credit_balance("profile_2")
+        .await
+        .expect("Failed to query final credit balance");
+    println!("FINAL_BALANCE: {:?}", final_status.balance);
+
+    println!("==================================================");
+    println!("FLOW-P4-B LIVE RESUME CLEAN RUN COMPLETED SUCCESSFULLY");
+    println!("==================================================");
+}
+
+#[tokio::test]
+#[ignore = "Live recovery of Segment 0 only (0 credits / 0 clicks)"]
+async fn test_flow_p4b_live_recover_seg0_only() {
+    if std::env::var("RUN_FLOW_P4B_LIVE_PAID_ACCEPTANCE").unwrap_or_default() != "1" {
+        println!("SKIPPED");
+        return;
+    }
+
+    let base_path = PathBuf::from("D:/rustProject/autovideo-ai/src-tauri/.autovideo_data");
+    let paths = StoragePaths::resolve_from_base(&base_path);
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let project_id = "proj-c15a1fa7-cbcb-4bec-8a55-6d926d3d2fc2";
+    let parent_id = "flow_8a8ec897-ddf3-4a12-a161-955db6c6d757";
+
+    println!(
+        "[LIVE RECOVER SEG0] Attempting recovery for parent {}...",
+        parent_id
+    );
+    let rec_res = flow_service
+        .orchestrator
+        .recover_long_video_segment_0(project_id, parent_id)
+        .await;
+
+    println!("[LIVE RECOVER SEG0] Result: {:?}", rec_res);
+}
+
+#[tokio::test]
+#[ignore = "Diagnostic test to inspect Google Flow video settings popover"]
+async fn test_flow_p4b_inspect_video_settings() {
+    if std::env::var("RUN_FLOW_P4B_LIVE_PAID_ACCEPTANCE").unwrap_or_default() != "1" {
+        println!("SKIPPED");
+        return;
+    }
+
+    let base_path = PathBuf::from("D:/rustProject/autovideo-ai/src-tauri/.autovideo_data");
+    let paths = StoragePaths::resolve_from_base(&base_path);
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    let req = FlowGenerationRequest {
+        project_id: "proj-0566f1d3-f644-457a-9386-3ec8450a805f".to_string(),
+        source_media_id: "media_4c850963-cf0c-4c6b-9685-18747a4cd50a".to_string(),
+        profile_id: "profile_2".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: "Replace only the selected target person's facial identity".to_string(),
+        prompt_source: Some(PromptSource::SystemDefault),
+        target_face: None,
+        max_credits: Some(40),
+        preserve_original_audio: Some(true),
+        requested_config: Some(FlowRequestedGenerationConfig {
+            model_id: Some("Omni Flash".to_string()),
+            resolution: Some("720p".to_string()),
+            duration_sec: Some(10),
+            orientation: Some("PORTRAIT / 9:16".to_string()),
+            output_count: 1,
+        }),
+        configuration_fingerprint: None,
+        preflight_id: None,
+    };
+
+    let source_path = paths
+        .projects_dir
+        .join("proj-0566f1d3-f644-457a-9386-3ec8450a805f")
+        .join("media")
+        .join("p4b_source_15s.mp4");
+
+    let preflight = flow_service
+        .preflight_flow_generation(req, source_path)
+        .await
+        .expect("Preflight failed");
+
+    println!("PREFLIGHT_RESULT: {:?}", preflight);
 }

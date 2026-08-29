@@ -1,4 +1,4 @@
-# Phase FLOW-P4-B / FLOW-P4-B.1 Report: Google Flow Long-Video Production Acceptance & Accounting
+# Phase FLOW-P4-B / FLOW-P4-B.2 Report: Google Flow Long-Video Production Acceptance & Accounting
 
 ## Executive Summary
 
@@ -43,7 +43,7 @@ All executions strictly adhered to the Zero-Fake Policy and explicit human budge
 
 ---
 
-## 2. Production Hotfixes & Recovery Mechanism Implemented
+## 2. Production Hotfixes & Architecture Enhancements
 
 ### A. Strict Media Card Matching & Upload
 * Removed generic `play_circle` / `play_arrow` fallback from `locateMediaCard`.
@@ -56,10 +56,15 @@ All executions strictly adhered to the Zero-Fake Policy and explicit human budge
 * **Authoritative Live Cost Gate**: Tooltip and composer readback cross-checked against per-segment budget (<= 20 credits) and parent ledger budget (<= 40 credits).
 
 ### C. Zero-Paid Recovery Engine (`recover_existing_submission`)
-* Connects to exact persisted Google Flow workspace (`https://labs.google/fx/vi/tools/flow/project/0b0710f1-f569-4486-ac33-5222c5bf3808`).
+* Connects to exact persisted Google Flow workspace.
 * Performs 0 generate clicks and 0 paid preflights.
 * Evaluates scoped node completion evidence over global text markers.
 * Correlates completed video artifact, downloads without scratch dependencies, normalizes to exactly 300 frames, and checkpoints manifest.
+
+### D. Resumption Mechanism (`resume_flow_generation`)
+* Registered IPC command `resume_flow_generation` in `src-tauri/src/lib.rs` and `commands/mod.rs`.
+* Integrated into `FlowJobProgress.tsx` with dedicated "Tiếp tục công việc (Resume)" button for `FAILED`, `BLOCKED`, and `GENERATION_AMBIGUOUS` states.
+* Resumption verifies completed segments, checks `raw_children` cache, recovers Segment 0 if proven submitted, and proceeds with remaining unsubmitted segments without duplicate spend.
 
 ---
 
@@ -69,9 +74,7 @@ All non-paid unit and integration regression suites passed 100%:
 
 | Test Suite | Tests Passed | Status |
 | :--- | :---: | :--- |
-| `tests_phase_flow_p4a1` | 8 / 8 (1 ignored live) | **PASS** |
-| `tests_phase_flow_p4a` | 25 / 25 (1 ignored live) | **PASS** |
-| `tests_phase_flow_p4b` | 18 / 18 (1 ignored live) | **PASS** |
+| `tests_phase_flow_p4b` | 19 / 19 (4 ignored live) | **PASS** |
 | Frontend Vitest (`src/**/*.test.ts`) | 61 / 61 (7 files) | **PASS** |
 | TypeScript & Vite Build (`npm run build`) | All modules bundled | **PASS** |
 | Sidecar Build (`npm run build` in `flow-playwright`) | `tsc` compilation clean | **PASS** |

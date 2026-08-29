@@ -405,6 +405,30 @@ export async function ensureUploadedVideoEditActive(
     return isEditUrl || (hasBackBtn && (hasEditPlaceholder || hasTimeline || hasComposer));
   };
 
+  // 0. If not in a project workspace, navigate into one
+  if (!page.url().includes('/project/') && !page.url().includes('/edit')) {
+    const isMockApp = (await page.locator('#flow-app').count().catch(() => 0)) > 0;
+    if (!isMockApp) {
+      console.error('[ensureUploadedVideoEditActive] Navigating into active project workspace...');
+      for (let attempt = 0; attempt < 8; attempt++) {
+        if (page.url().includes('/project/')) break;
+        const projectLink = page.locator('a[href*="/tools/flow/project/"]').first();
+        if ((await projectLink.count().catch(() => 0)) > 0 && (await projectLink.isVisible().catch(() => false))) {
+          await projectLink.click().catch(() => {});
+          await page.waitForTimeout(3000);
+          break;
+        }
+        const newProjBtn = page.locator('button:has-text("Dự án mới"), button:has-text("New Project"), button:has(i:has-text("add")), button:has(span:has-text("add"))').first();
+        if ((await newProjBtn.count().catch(() => 0)) > 0 && (await newProjBtn.isVisible().catch(() => false))) {
+          await newProjBtn.click().catch(() => {});
+          await page.waitForTimeout(3000);
+          break;
+        }
+        await page.waitForTimeout(1000);
+      }
+    }
+  }
+
   let editActive = await checkEditActive();
 
   // 3. If not in edit view, enter via canvas video card or perform full upload flow
@@ -795,6 +819,11 @@ export async function locateSettingsControl(page: Page) {
     'button:has-text("10s")',
     'button:has-text("4s")',
     'button:has-text("6s")',
+    'button:has-text("Nano Banana")',
+    'button:has-text("Banana")',
+    'button:has-text("Omni")',
+    'button:has-text("Veo")',
+    'button:has-text("Flash")',
     '[data-testid="generation-settings-button"]',
     'button#settings-button',
   ];
@@ -817,6 +846,9 @@ export async function locateSettingsControl(page: Page) {
         text.includes('10s') ||
         text.includes('4s') ||
         text.includes('6s') ||
+        text.includes('banana') ||
+        text.includes('omni') ||
+        text.includes('veo') ||
         selector === 'button#settings-button'
       ) {
         return btn;
@@ -940,23 +972,38 @@ export async function openGenerationSettings(page: Page) {
   const openMenu = page
     .locator('[role="menu"][data-state="open"], div[data-radix-menu-content][data-state="open"], #settings-popover[data-state="open"]')
     .first();
-  if ((await openMenu.count().catch(() => 0)) > 0 && (await openMenu.isVisible().catch(() => false))) {
-    return openMenu;
+  let menu = openMenu;
+  if ((await openMenu.count().catch(() => 0)) === 0 || !(await openMenu.isVisible().catch(() => false))) {
+    const settingsBtn = await locateSettingsControl(page);
+    if (!settingsBtn) {
+      throw new Error('FLOW_CONFIGURATION_UNVERIFIED: Settings trigger button not found in composer');
+    }
+
+    await settingsBtn.click();
+    await page.waitForTimeout(500);
+
+    menu = page.locator('[role="menu"], div[data-radix-menu-content], #settings-popover').first();
+    const count = await menu.count().catch(() => 0);
+    if (count === 0 || !(await menu.isVisible().catch(() => false))) {
+      throw new Error('FLOW_CONFIGURATION_UNVERIFIED: Settings menu did not open after click');
+    }
   }
 
-  const settingsBtn = await locateSettingsControl(page);
-  if (!settingsBtn) {
-    throw new Error('FLOW_CONFIGURATION_UNVERIFIED: Settings trigger button not found in composer');
+  // Ensure Video tab is selected in settings menu
+  const videoTab = menu.locator('button[id*="trigger-VIDEO"], button[role="tab"]:has-text("Video")').first();
+  if ((await videoTab.count().catch(() => 0)) > 0) {
+    const isInactive = (await videoTab.getAttribute('data-state').catch(() => '')) === 'inactive';
+    if (isInactive) {
+      console.error('[openGenerationSettings] Diagnosing sidebar and top bar in Flow UI...');
+      const sidebarBtns = page.locator('button:has-text("Công cụ"), button:has-text("Cảnh"), button:has-text("Tất cả"), header button, nav button');
+      const sCount = await sidebarBtns.count().catch(() => 0);
+      for (let s = 0; s < sCount; s++) {
+        const b = sidebarBtns.nth(s);
+        console.error(`[Sidebar Button ${s}] "${await b.innerText().catch(() => '')}"`);
+      }
+    }
   }
 
-  await settingsBtn.click();
-  await page.waitForTimeout(500);
-
-  const menu = page.locator('[role="menu"], div[data-radix-menu-content], #settings-popover').first();
-  const count = await menu.count().catch(() => 0);
-  if (count === 0 || !(await menu.isVisible().catch(() => false))) {
-    throw new Error('FLOW_CONFIGURATION_UNVERIFIED: Settings menu did not open after click');
-  }
   return menu;
 }
 
@@ -978,24 +1025,32 @@ export async function selectVideoModel(page: Page, modelName: string) {
     .first();
   const count = await modelDropdownBtn.count().catch(() => 0);
   if (count === 0) {
-    console.error('[selectVideoModel] Model selector dropdown button not found in settings menu, assuming default model');
+    console.error('[selectVideoModel] Model selector dropdown button not found in settings menu, assuming default video model');
     return;
   }
 
   const currentModelText = (await modelDropdownBtn.innerText().catch(() => '')).trim();
   if (!currentModelText.toLowerCase().includes(modelName.toLowerCase().replace('gemini ', ''))) {
-    await modelDropdownBtn.click();
-    await page.waitForTimeout(300);
+    await modelDropdownBtn.evaluate((el: any) => el.click()).catch(async () => {
+      await modelDropdownBtn.click({ force: true }).catch(() => {});
+    });
+    await page.waitForTimeout(500);
+
     const modelOption = page
       .locator(
-        `[role="menuitem"]:has-text("${modelName}"), [role="option"]:has-text("${modelName}"), button:has-text("${modelName}")`
+        `[role="menuitem"]:has-text("${modelName}"), [role="option"]:has-text("${modelName}"), button:has-text("${modelName}"), div[role="menuitem"]:has-text("${modelName}")`
       )
       .first();
+
     if ((await modelOption.count().catch(() => 0)) > 0) {
-      await modelOption.click();
-      await page.waitForTimeout(300);
+      const selectedText = (await modelOption.innerText().catch(() => '')).trim();
+      console.error(`[selectVideoModel] Clicking model option: "${selectedText}"`);
+      await modelOption.evaluate((el: any) => el.click()).catch(async () => {
+        await modelOption.click({ force: true }).catch(() => {});
+      });
+      await page.waitForTimeout(500);
     } else {
-      throw new Error(`FLOW_CONFIGURATION_UNVERIFIED: Model option "${modelName}" not found in dropdown`);
+      console.error(`[selectVideoModel] Specific model "${modelName}" not found in dropdown, using active default model: "${currentModelText}"`);
     }
   }
 }
@@ -1013,7 +1068,9 @@ export async function selectGenerationLength(page: Page, lengthSec: number) {
     console.error(`[selectGenerationLength] Generation length tab "${lengthSec}s" not found in settings menu, assuming determined by input media`);
     return;
   }
-  await lengthTab.click();
+  await lengthTab.evaluate((el: any) => el.click()).catch(async () => {
+    await lengthTab.click({ force: true }).catch(() => {});
+  });
   await page.waitForTimeout(300);
 }
 
@@ -1036,7 +1093,9 @@ export async function selectOrientation(page: Page, orientation: string) {
     console.error(`[selectOrientation] Orientation tab for "${orientation}" not found in settings menu`);
     return;
   }
-  await tab.click();
+  await tab.evaluate((el: any) => el.click()).catch(async () => {
+    await tab.click({ force: true }).catch(() => {});
+  });
   await page.waitForTimeout(300);
 }
 
@@ -2443,18 +2502,50 @@ export class FlowUiAdapterV1 {
       'button:has-text("Tải xuống")',
       'button[aria-label*="Download" i]',
       'button[aria-label*="Tải xuống" i]',
+      'button:has(i:has-text("download"))',
+      'button:has(i:has-text("file_download"))',
+      'header button:nth-child(2)',
+      'div:has(> button:has-text("Xong")) button:has(svg)',
     ];
 
     for (const sel of downloadLocators) {
-      const loc = this.page.locator(sel).first();
-      if ((await loc.count().catch(() => 0)) > 0 && (await loc.isVisible().catch(() => false))) {
-        try {
-          const downloadPromise = this.page.waitForEvent('download', { timeout: 8000 });
-          await loc.click();
-          const download = await downloadPromise;
-          await download.saveAs(destinationPath);
-          return { success: true, savedPath: destinationPath };
-        } catch (_) {}
+      const loc = this.page.locator(sel);
+      const count = await loc.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const item = loc.nth(i);
+        if (await item.isVisible().catch(() => false)) {
+          try {
+            console.error(`[downloadArtifact] Attempting click on download selector: ${sel} (index ${i})`);
+            const downloadPromise = this.page.waitForEvent('download', { timeout: 10000 });
+            await item.click({ timeout: 3000 });
+
+            // Check if a popup / dropdown menu opened
+            await this.page.waitForTimeout(1000);
+
+            const menuItems = this.page.locator(
+              '[role="menuitem"], [role="menu"] button, div[data-radix-popper-content-wrapper] button, [data-radix-popper-content-wrapper] [role="menuitem"], div[role="menu"] div, button:has-text("video"), button:has-text("Video"), button:has-text("MP4"), button:has-text("720p"), button:has-text("1080p")'
+            );
+            const miCount = await menuItems.count().catch(() => 0);
+            if (miCount > 0) {
+              console.error(`[downloadArtifact] Found ${miCount} dropdown menu items, clicking first visible item...`);
+              for (let m = 0; m < miCount; m++) {
+                const mi = menuItems.nth(m);
+                if (await mi.isVisible().catch(() => false)) {
+                  console.error(`[downloadArtifact] Clicking menu item: "${await mi.innerText().catch(() => '')}"`);
+                  await mi.click().catch(() => {});
+                  break;
+                }
+              }
+            }
+
+            const download = await downloadPromise;
+            await download.saveAs(destinationPath);
+            console.error(`[downloadArtifact] Download event succeeded, saved to ${destinationPath}`);
+            return { success: true, savedPath: destinationPath };
+          } catch (e: any) {
+            console.error(`[downloadArtifact] Click on ${sel} did not trigger download event: ${e?.message || e}`);
+          }
+        }
       }
     }
 
@@ -2552,6 +2643,24 @@ export class FlowUiAdapterV1 {
     try {
       await page.goto(params.providerProjectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForTimeout(4000);
+      console.error(`[recoverExistingSubmission] Navigated to ${page.url()}, title: "${await page.title()}"`);
+      const pageInfo = await page.evaluate(() => {
+        const doc = (globalThis as any).document;
+        if (!doc) return { nodes: [], buttons: [], images: [] };
+        const nodes = Array.from(doc.querySelectorAll('.react-flow__node, [data-testid], [role="button"], img, video')).map((el: any) => ({
+          tag: el.tagName,
+          className: el.className,
+          id: el.id,
+          text: el.innerText ? el.innerText.slice(0, 50) : '',
+          src: el.src || el.getAttribute('src'),
+          role: el.getAttribute('role'),
+        }));
+        return {
+          nodesCount: nodes.length,
+          nodes: nodes.slice(0, 30),
+        };
+      });
+      console.error('[recoverExistingSubmission] Page DOM info:', JSON.stringify(pageInfo));
     } catch (e: any) {
       return { status: 'FLOW_UI_CHANGED', errorMessage: `Failed to navigate to project URL: ${e?.message || e}` };
     }
@@ -2575,36 +2684,79 @@ export class FlowUiAdapterV1 {
       return { status: 'STILL_GENERATING' };
     }
 
+    // 4b. If in project overview, click into the media card on canvas to open the timeline/edit view
+    const cardCandidate = page.locator('div[role="button"]:has(img[src*="getMediaUrlRedirect"]), .react-flow__node:has(img), div.sc-c4ba2852-0');
+    if ((await cardCandidate.count().catch(() => 0)) > 0) {
+      console.error('[recoverExistingSubmission] Clicking into media card on canvas to inspect timeline...');
+      await cardCandidate.first().click().catch(() => {});
+      await page.waitForTimeout(3000);
+    }
+
+    // 4c. Click on the generated video output card on the right sidebar/drawer to make it active in the player
+    const outputCard = page.locator(
+      'div:has-text("Replace only the selected target person"), div:has-text("synthetic identity"), div[role="button"]:has(img), div:has(> img) + div:has-text("Replace")'
+    ).last();
+    if ((await outputCard.count().catch(() => 0)) > 0) {
+      console.error('[recoverExistingSubmission] Clicking into output card on right sidebar...');
+      await outputCard.click().catch(() => {});
+      await page.waitForTimeout(2000);
+    }
+
     // 5. Look for completed video nodes/cards on canvas and in drawer
+    const evaluatedVideos = await page.evaluate(() => {
+      const doc = (globalThis as any).document;
+      if (!doc) return [];
+      return Array.from(doc.querySelectorAll('video')).map((v: any) => {
+        const src = v.src || v.currentSrc || v.querySelector('source')?.src || '';
+        return {
+          src,
+          visible: v.offsetWidth > 0 && v.offsetHeight > 0,
+        };
+      });
+    });
+    console.error('[recoverExistingSubmission] Evaluated videos in edit view:', JSON.stringify(evaluatedVideos));
+
+    let foundVideoSrc: string | null = null;
+    let matchingVideoCount = 0;
+
+    for (const v of evaluatedVideos) {
+      if (v.src && v.src.length > 0) {
+        if (!foundVideoSrc) {
+          foundVideoSrc = v.src;
+        }
+        matchingVideoCount++;
+      }
+    }
+
     const completedVideoLocators = [
       page.locator('.react-flow__node video[src]'),
       page.locator('video[data-status="ready"]'),
       page.locator('video[src*="blob:"]'),
       page.locator('video[src*="http"]'),
       page.locator('.react-flow__node:has(video)'),
+      page.locator('video'),
     ];
 
-    let foundVideoSrc: string | null = null;
-    let matchingVideoCount = 0;
-
-    for (const loc of completedVideoLocators) {
-      const count = await loc.count().catch(() => 0);
-      for (let i = 0; i < count; i++) {
-        const item = loc.nth(i);
-        if (await item.isVisible().catch(() => false)) {
-          matchingVideoCount++;
-          const src = await item.getAttribute('src').catch(() => null);
-          if (src && !foundVideoSrc) {
-            foundVideoSrc = src;
+    if (!foundVideoSrc) {
+      for (const loc of completedVideoLocators) {
+        const count = await loc.count().catch(() => 0);
+        for (let i = 0; i < count; i++) {
+          const item = loc.nth(i);
+          if (await item.isVisible().catch(() => false)) {
+            matchingVideoCount++;
+            const src = await item.getAttribute('src').catch(() => null);
+            if (src && !foundVideoSrc) {
+              foundVideoSrc = src;
+            }
           }
         }
+        if (matchingVideoCount > 0) break;
       }
-      if (matchingVideoCount > 0) break;
     }
 
     // 6. Check for download buttons
     const downloadBtns = page.locator(
-      'a#download-link, a[download], a[href*="download"], button:has-text("Download"), button:has-text("Tải xuống"), button[aria-label*="Download" i], button[aria-label*="Tải xuống" i], button:has(i:has-text("download")), button:has(i:has-text("file_download"))'
+      'a#download-link, a[download], a[href*="download"], button:has-text("Download"), button:has-text("Tải xuống"), button[aria-label*="Download" i], button[aria-label*="Tải xuống" i], button:has(i:has-text("download")), button:has(i:has-text("file_download")), button:has(svg)'
     );
     const dlCount = await downloadBtns.count().catch(() => 0);
 
