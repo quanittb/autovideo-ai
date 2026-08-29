@@ -68,6 +68,7 @@ interface FlowJobStoreState {
     }
   ) => Promise<void>;
   cancelFlowJob: (projectId: string, parentId: string) => Promise<void>;
+  resumeFlowJob: (projectId: string, parentId: string) => Promise<void>;
   pollJobStatus: (projectId: string, parentId: string) => Promise<void>;
   openOutputArtifact: (projectId: string, parentId: string) => Promise<string>;
   revealOutputInFolder: (projectId: string, parentId: string) => Promise<string>;
@@ -367,6 +368,30 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
             ? err
             : err?.message || 'Failed to cancel Flow job',
       });
+    }
+  },
+
+  resumeFlowJob: async (projectId: string, parentId: string) => {
+    set({ isStarting: true, error: null });
+    try {
+      const snapshot = await flowApi.resumeFlowJob(projectId, parentId);
+      set((state) => ({
+        activeJob: snapshot,
+        jobs: [
+          ...state.jobs.filter((j) => j.parentId !== snapshot.parentId),
+          snapshot,
+        ],
+        isStarting: false,
+      }));
+    } catch (err: any) {
+      set({
+        error:
+          typeof err === 'string'
+            ? err
+            : err?.message || 'Failed to resume Flow job',
+        isStarting: false,
+      });
+      throw err;
     }
   },
 

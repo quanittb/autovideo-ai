@@ -843,6 +843,256 @@ fn test_flow_p4b2_09_stale_global_generating_text_cannot_mask_exact_completion()
     );
 }
 
+#[tokio::test]
+async fn test_flow_p4b2_10_resume_flow_generation_skips_completed_segments() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = StoragePaths::resolve_from_base(&temp_dir.path().to_path_buf());
+    let service = FlowRuntimeService::new(paths.clone());
+    service
+        .orchestrator
+        .profile_manager()
+        .create_profile("profile_mock", "Mock")
+        .unwrap();
+
+    let proj_dir = paths.projects_dir.join("proj_resume");
+    let flow_dir = proj_dir.join("flow-jobs").join("parent_resume");
+    let norm_dir = flow_dir.join("normalized");
+    let input_dir = flow_dir.join("input_segments");
+    fs::create_dir_all(&norm_dir).unwrap();
+    fs::create_dir_all(&input_dir).unwrap();
+
+    // Create 2 dummy segments
+    let seg0_norm_path = norm_dir.join("segment_000.mp4");
+    let seg0_src = input_dir.join("segment_000.mp4");
+    let seg1_src = input_dir.join("segment_001.mp4");
+    let dummy_source = temp_dir.path().join("source_15s.mp4");
+
+    let _ = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=1080x1920:r=30:d=10.0",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            seg0_norm_path.to_str().unwrap(),
+        ])
+        .output();
+
+    let _ = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=1080x1920:r=30:d=10.0",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            seg0_src.to_str().unwrap(),
+        ])
+        .output();
+
+    let _ = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=1080x1920:r=30:d=5.0",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            seg1_src.to_str().unwrap(),
+        ])
+        .output();
+
+    let _ = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=1080x1920:r=30:d=15.0",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            dummy_source.to_str().unwrap(),
+        ])
+        .output();
+
+    let mut manifest = FlowGenerationManifest::new(
+        "parent_resume".to_string(),
+        "req_resume".to_string(),
+        "proj_resume".to_string(),
+        "profile_mock".to_string(),
+        "hash".to_string(),
+        None,
+        "src_hash".to_string(),
+        None,
+        TransformationIntent::FaceReplace,
+        IdentityMode::Generated,
+        None,
+        FlowRequestedGenerationConfig::default(),
+        "prompt".to_string(),
+        "hash".to_string(),
+        PromptSource::SystemDefault,
+        1,
+        1,
+        SourceMediaFacts {
+            duration_sec: 15.0,
+            width: 1080,
+            height: 1920,
+            fps: 30.0,
+            has_audio: false,
+            timing: None,
+        },
+        FlowSegmentPlan {
+            segments: vec![],
+            total_frames: 450,
+            total_duration_sec: 15.0,
+            target_fps: 30.0,
+            capability_limit_sec: 10.0,
+        },
+        FlowCreditRecord::default(),
+        FlowFinalAudioPolicy::default(),
+    );
+
+    manifest.job_kind = FlowJobKind::LongVideoParent;
+    manifest.state = FlowJobState::Failed;
+    manifest.error = Some(JobErrorRecord {
+        code: "GENERATION_TIMEOUT".to_string(),
+        sanitized_message: "Timed out".to_string(),
+    });
+
+    manifest.long_video_plan = Some(FlowLongVideoPlan {
+        parent_job_id: "parent_resume".to_string(),
+        project_id: "proj_resume".to_string(),
+        source_media_id: Some("media_resume".to_string()),
+        source_duration_ms: 15000,
+        source_fps_rational: (30, 1),
+        rational_fps: Some(FlowRationalFrameRate {
+            numerator: 30,
+            denominator: 1,
+        }),
+        fps_numerator: Some(30),
+        fps_denominator: Some(1),
+        source_timing_mode: "CFR".to_string(),
+        working_proxy_created: false,
+        working_proxy_path: None,
+        working_proxy_sha256: None,
+        strategy: "CONTIGUOUS_FRAME_ALIGNED".to_string(),
+        segment_count: 2,
+        segments: vec![
+            FlowPlannedSegment {
+                segment_index: 0,
+                start_frame: 0,
+                end_frame: 300,
+                start_ms: 0,
+                end_ms: 10000,
+                planned_duration_sec: 10.0,
+                planned_frame_count: 300,
+                source_segment_path: seg0_src,
+                source_segment_sha256: "sha256_0".to_string(),
+                child_job_id: None,
+                state: FlowJobState::Completed,
+                local_submission_attempt_id: Some("att_000".to_string()),
+                submission_state: FlowChildSubmissionState::ProvenCompleted,
+                submission_evidence: None,
+                uploaded_source_evidence: None,
+                click_dispatched: true,
+                preclick_cost: Some(20),
+            },
+            FlowPlannedSegment {
+                segment_index: 1,
+                start_frame: 300,
+                end_frame: 450,
+                start_ms: 10000,
+                end_ms: 15000,
+                planned_duration_sec: 5.0,
+                planned_frame_count: 150,
+                source_segment_path: seg1_src,
+                source_segment_sha256: "sha256_1".to_string(),
+                child_job_id: None,
+                state: FlowJobState::ReadyToSubmit,
+                local_submission_attempt_id: None,
+                submission_state: FlowChildSubmissionState::NeverAttempted,
+                submission_evidence: None,
+                uploaded_source_evidence: None,
+                click_dispatched: false,
+                preclick_cost: None,
+            },
+        ],
+        requested_config: FlowRequestedGenerationConfig::default(),
+        prompt_hash: "hash".to_string(),
+        transformation_intent: TransformationIntent::FaceReplace,
+        identity_mode: IdentityMode::Generated,
+        continuity_strategy: FlowIdentityContinuityStrategy::SamePromptBaseline,
+        identity_continuity_guaranteed: false,
+        created_at: Utc::now().to_rfc3339(),
+    });
+
+    manifest.parent_ledger = Some(FlowParentLedger {
+        segment_count: 2,
+        planning_cost_estimate: 40,
+        authoritative_committed_credits: 20,
+        reserved_credits: 0,
+        completed_paid_segments: 1,
+        dispatched_paid_clicks: 1,
+        max_total_credits: Some(40),
+    });
+
+    service
+        .orchestrator
+        .store()
+        .save_manifest_atomic(&mut manifest)
+        .unwrap();
+
+    // Call resume
+    let snapshot = service
+        .resume_flow_generation("proj_resume", "parent_resume", &dummy_source)
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.parent_id, "parent_resume");
+
+    // Poll until completion or timeout
+    let mut finished = false;
+    for _ in 0..50 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let m = service
+            .orchestrator
+            .store()
+            .load_manifest("proj_resume", "parent_resume")
+            .unwrap();
+        if m.state == FlowJobState::Completed {
+            finished = true;
+            break;
+        }
+        if m.state == FlowJobState::Failed {
+            panic!("Job failed with error: {:?}", m.error);
+        }
+    }
+
+    assert!(finished, "Resumed job must reach Completed state");
+
+    let final_m = service
+        .orchestrator
+        .store()
+        .load_manifest("proj_resume", "parent_resume")
+        .unwrap();
+
+    assert_eq!(final_m.state, FlowJobState::Completed);
+    assert!(final_m.final_output.is_some());
+    assert_eq!(final_m.parent_ledger.unwrap().completed_paid_segments, 2);
+}
+
 // =============================================================================
 // REAL LIVE PAID TEST (MUST BE #[ignore] AND GUARDED)
 // =============================================================================

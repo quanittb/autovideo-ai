@@ -9,6 +9,7 @@ import {
   FolderOpen,
   ExternalLink,
   PlusCircle,
+  RotateCcw,
 } from 'lucide-react';
 import { FlowJobSnapshot, FlowJobState } from '../../lib/ipc';
 import { useFlowJobStore } from '../../stores/flowJobStore';
@@ -19,7 +20,7 @@ interface FlowJobProgressProps {
 }
 
 export const FlowJobProgress: React.FC<FlowJobProgressProps> = ({ job }) => {
-  const { cancelFlowJob, openOutputArtifact, revealOutputInFolder, useOutputInProject } =
+  const { cancelFlowJob, resumeFlowJob, openOutputArtifact, revealOutputInFolder, useOutputInProject } =
     useFlowJobStore();
   const { activeProject, setActiveProject } = useProjectStore();
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -156,6 +157,24 @@ export const FlowJobProgress: React.FC<FlowJobProgressProps> = ({ job }) => {
     }
   };
 
+  const handleResume = async () => {
+    setIsActing(true);
+    setActionMessage(null);
+    try {
+      await resumeFlowJob(job.projectId, job.parentId);
+      setActionMessage('Resuming Flow generation...');
+    } catch (err: any) {
+      setActionMessage(typeof err === 'string' ? err : err?.message || 'Failed to resume generation');
+    } finally {
+      setIsActing(false);
+    }
+  };
+
+  const canResume =
+    job.state === 'FAILED' ||
+    job.state === 'GENERATION_AMBIGUOUS' ||
+    job.state === 'BLOCKED';
+
   return (
     <div className="flex flex-col gap-3 p-4 bg-slate-900/80 border border-slate-800 rounded-xl">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -182,6 +201,17 @@ export const FlowJobProgress: React.FC<FlowJobProgressProps> = ({ job }) => {
             >
               <Square className="w-3 h-3" />
               <span>Cancel</span>
+            </button>
+          )}
+
+          {canResume && (
+            <button
+              onClick={handleResume}
+              disabled={isActing}
+              className="px-2.5 py-0.5 rounded bg-indigo-900/60 hover:bg-indigo-800/80 border border-indigo-600/60 text-indigo-200 text-xs flex items-center gap-1 transition cursor-pointer"
+            >
+              <RotateCcw className="w-3 h-3" />
+              <span>Resume</span>
             </button>
           )}
         </div>
@@ -219,9 +249,23 @@ export const FlowJobProgress: React.FC<FlowJobProgressProps> = ({ job }) => {
       </div>
 
       {job.errorMessage && (
-        <div className="flex items-start gap-2 p-3 bg-rose-950/40 border border-rose-800/50 rounded-lg text-xs text-rose-300">
-          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-          <span>{job.errorMessage}</span>
+        <div className="flex flex-col gap-2 p-3 bg-rose-950/40 border border-rose-800/50 rounded-lg text-xs text-rose-300">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <span>{job.errorMessage}</span>
+          </div>
+          {canResume && (
+            <div className="flex items-center justify-end pt-1">
+              <button
+                onClick={handleResume}
+                disabled={isActing}
+                className="px-3 py-1 rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 text-white text-xs flex items-center gap-1.5 transition cursor-pointer font-medium"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Resume Generation</span>
+              </button>
+            </div>
+          )}
         </div>
       )}
 

@@ -191,6 +191,7 @@ pub fn run() {
             preflight_flow_generation,
             start_flow_generation,
             cancel_flow_generation,
+            resume_flow_generation,
             get_flow_job_status,
             list_flow_jobs,
             refresh_flow_credit_balance,

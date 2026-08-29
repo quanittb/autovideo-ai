@@ -2575,6 +2575,41 @@ pub async fn cancel_flow_generation(
 }
 
 #[command]
+pub async fn resume_flow_generation(
+    project_id: String,
+    parent_id: String,
+    flow_service: tauri::State<'_, Arc<crate::ai::flow::FlowRuntimeService>>,
+) -> Result<crate::ai::flow::FlowJobSnapshot, String> {
+    let paths = crate::system::StoragePaths::default_paths();
+    let manifest = flow_service
+        .orchestrator
+        .store()
+        .load_manifest(&project_id, &parent_id)?;
+
+    let media_id_opt = manifest
+        .long_video_plan
+        .as_ref()
+        .and_then(|p| p.source_media_id.as_deref())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            manifest
+                .source_media_id
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+        });
+
+    let (canonical_source, _) = resolve_project_media_by_id(&project_id, media_id_opt, &paths)?;
+
+    if !canonical_source.exists() {
+        return Err(format!("SOURCE_MEDIA_NOT_FOUND: {:?}", canonical_source));
+    }
+
+    flow_service
+        .resume_flow_generation(&project_id, &parent_id, &canonical_source)
+        .await
+}
+
+#[command]
 pub fn get_flow_job_status(
     project_id: String,
     parent_id: String,

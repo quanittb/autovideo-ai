@@ -1176,6 +1176,12 @@ export const flowApi = {
   cancelFlowJob: (projectId: string, parentId: string): Promise<FlowJobSnapshot> =>
     invoke('cancel_flow_generation', { projectId, parentId }),
 
+  resumeGeneration: (projectId: string, parentId: string): Promise<FlowJobSnapshot> =>
+    invoke('resume_flow_generation', { projectId, parentId }),
+
+  resumeFlowJob: (projectId: string, parentId: string): Promise<FlowJobSnapshot> =>
+    invoke('resume_flow_generation', { projectId, parentId }),
+
   getGenerationJob: (projectId: string, jobId: string): Promise<FlowJobSnapshot> =>
     invoke('get_flow_job_status', { projectId, parentId: jobId }),
 

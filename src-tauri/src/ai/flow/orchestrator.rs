@@ -350,6 +350,89 @@ impl FlowRuntimeService {
         self.orchestrator.store().cancel_job(project_id, parent_id)
     }
 
+    pub async fn resume_flow_generation(
+        &self,
+        project_id: &str,
+        parent_id: &str,
+        source_video_path: &Path,
+    ) -> Result<FlowJobSnapshot, String> {
+        let mut manifest = self
+            .orchestrator
+            .store()
+            .load_manifest(project_id, parent_id)?;
+        if manifest.state == FlowJobState::Completed || manifest.state == FlowJobState::Cancelled {
+            return Err(format!(
+                "CANNOT_RESUME: Job is in state {:?}",
+                manifest.state
+            ));
+        }
+
+        // If long video and segment 0 was dispatched but timed out / failed, attempt zero-paid recovery first
+        if manifest.job_kind == FlowJobKind::LongVideoParent {
+            if let Some(ref plan) = manifest.long_video_plan {
+                if let Some(seg0) = plan.segments.get(0) {
+                    if seg0.click_dispatched && seg0.state != FlowJobState::Completed {
+                        let rec = self
+                            .orchestrator
+                            .recover_long_video_segment_0(project_id, parent_id)
+                            .await;
+                        if let Ok(ref r) = rec {
+                            eprintln!("[FLOW RESUME] Segment 0 recovery returned: {:?}", r.status);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Reload manifest after possible recovery
+        manifest = self
+            .orchestrator
+            .store()
+            .load_manifest(project_id, parent_id)?;
+        if manifest.state == FlowJobState::Failed {
+            manifest.state = FlowJobState::ReadyToSubmit;
+            manifest.error = None;
+            self.orchestrator
+                .store()
+                .save_manifest_atomic(&mut manifest)?;
+        }
+
+        let orchestrator_clone = self.orchestrator.clone();
+        let project_id_clone = project_id.to_string();
+        let parent_id_clone = parent_id.to_string();
+        let source_video_clone = source_video_path.to_path_buf();
+        let cancellations = Some(self.cancellations.clone());
+
+        tokio::spawn(async move {
+            if let Err(e) = orchestrator_clone
+                .run_flow_worker(
+                    &project_id_clone,
+                    &parent_id_clone,
+                    &source_video_clone,
+                    cancellations,
+                )
+                .await
+            {
+                eprintln!("[FLOW WORKER ERROR] job {}: {}", parent_id_clone, e);
+                if let Ok(mut m) = orchestrator_clone
+                    .store()
+                    .load_manifest(&project_id_clone, &parent_id_clone)
+                {
+                    if m.state != FlowJobState::Failed && m.state != FlowJobState::Cancelled {
+                        m.state = FlowJobState::Failed;
+                        m.error = Some(JobErrorRecord {
+                            code: "WORKER_EXECUTION_FAILED".to_string(),
+                            sanitized_message: e,
+                        });
+                        let _ = orchestrator_clone.store().save_manifest_atomic(&mut m);
+                    }
+                }
+            }
+        });
+
+        Ok(manifest.to_snapshot())
+    }
+
     pub fn get_flow_job_status(
         &self,
         project_id: &str,
