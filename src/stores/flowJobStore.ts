@@ -205,6 +205,11 @@ export const useFlowJobStore = create<FlowJobStoreState>((set, get) => ({
     try {
       const status = await flowApi.refreshCreditBalance(profileId);
       set((state) => ({
+        profiles: state.profiles.map((p) =>
+          p.profileId === profileId && (status.status === 'READY' || typeof status.balance === 'number')
+            ? { ...p, status: 'READY' }
+            : p
+        ),
         creditStatusByProfile: {
           ...state.creditStatusByProfile,
           [profileId]: status,

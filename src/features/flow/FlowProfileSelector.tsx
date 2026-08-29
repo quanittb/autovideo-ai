@@ -38,10 +38,15 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
 
-  const { openProfileBrowser, closeProfileBrowser, refreshProfileStatus } =
+  const { openProfileBrowser, closeProfileBrowser, refreshProfileStatus, creditStatusByProfile } =
     useFlowJobStore();
 
   const selected = profiles.find((p) => p.profileId === selectedProfileId);
+  const selectedCredit = selectedProfileId ? creditStatusByProfile[selectedProfileId] : undefined;
+  const isProfileVerified =
+    selected?.status === 'READY' ||
+    selectedCredit?.status === 'READY' ||
+    (typeof selectedCredit?.balance === 'number' && selectedCredit.balance > 0);
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -236,7 +241,7 @@ export const FlowProfileSelector: React.FC<FlowProfileSelectorProps> = ({
                   <Lock className="w-3.5 h-3.5" />
                   In Use
                 </span>
-              ) : selected.status === 'READY' ? (
+              ) : isProfileVerified ? (
                 <span className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-emerald-950/60 border border-emerald-600/40 text-emerald-300 rounded-lg">
                   <ShieldCheck className="w-3.5 h-3.5" />
                   Verified Ready

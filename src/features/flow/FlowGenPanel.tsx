@@ -214,11 +214,14 @@ export const FlowGenPanel: React.FC = () => {
   const isProfileLocked = selectedProfile?.isLocked ?? false;
   const isManualBrowserOpen =
     selectedProfile?.manualBrowserOpen || selectedProfile?.browserSessionOpen || false;
-  const isProfileReady = selectedProfile?.status === 'READY';
-  const isLoginRequired = selectedProfile?.status === 'LOGIN_REQUIRED';
-
   const currentProfileCredit = selectedProfileId ? creditStatusByProfile[selectedProfileId] : undefined;
   const isRefreshingCredit = selectedProfileId ? !!isRefreshingCreditByProfile[selectedProfileId] : false;
+  const isProfileReady =
+    selectedProfile?.status === 'READY' ||
+    currentProfileCredit?.status === 'READY' ||
+    (typeof currentProfileCredit?.balance === 'number' && currentProfileCredit.balance > 0);
+  const isLoginRequired =
+    selectedProfile?.status === 'LOGIN_REQUIRED' || currentProfileCredit?.status === 'LOGIN_REQUIRED';
 
   return (
     <div className="flex-1 w-full h-full overflow-y-auto p-4 sm:p-6 text-slate-100">
