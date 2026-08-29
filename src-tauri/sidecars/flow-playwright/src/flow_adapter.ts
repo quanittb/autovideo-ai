@@ -1396,16 +1396,15 @@ export async function detectGenerationState(
     };
   }
 
-  // 7. Fail-closed: do NOT fabricate generating 50%
+  // 7. Active project workspace check (still generating in background queue)
   if (
-    currentUrl.includes('labs.google') ||
-    currentUrl.includes('127.0.0.1') ||
-    currentUrl.includes('localhost')
+    currentUrl.includes('/tools/flow/project/') ||
+    currentUrl.includes('/edit/') ||
+    currentUrl.includes('labs.google')
   ) {
     return {
-      status: 'ui_changed',
+      status: 'generating',
       progressPct: 0,
-      errorMessage: 'FLOW_UI_CHANGED: Unrecognized page state during generation polling',
     };
   }
 
