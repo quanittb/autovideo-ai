@@ -190,7 +190,30 @@ export const FlowGenPanel: React.FC = () => {
   const handleStartGeneration = async () => {
     if (!projectId || !selectedProfileId || !selectedMediaId.trim() || !isPromptValid) return;
 
-    const maxCredits = maxCreditsInput.trim() ? parseInt(maxCreditsInput.trim(), 10) : undefined;
+    let activePreflight = preflight;
+    if (!activePreflight?.preflightId || !activePreflight?.configurationFingerprint) {
+      try {
+        activePreflight = await preflightFlowJob({
+          projectId,
+          profileId: selectedProfileId,
+          sourceMediaId: selectedMediaId.trim(),
+          transformationIntent,
+          identityMode: 'GENERATED',
+          prompt: prompt.trim(),
+          promptSource,
+          preserveOriginalAudio: true,
+          requestedConfig: currentRequestedConfig,
+        });
+      } catch {
+        return; // Handled by store
+      }
+    }
+
+    const currentMedia = availableMediaList.find((m) => m.id === selectedMediaId);
+    const plannedSegments = currentMedia && currentMedia.durationSec > 10 ? Math.ceil(currentMedia.durationSec / 10) : 1;
+    const defaultMaxCredits = (activePreflight?.liveDisplayedCreditCost ?? 20) * plannedSegments;
+    const userMaxCredits = maxCreditsInput.trim() ? parseInt(maxCreditsInput.trim(), 10) : undefined;
+    const maxCredits = isNaN(userMaxCredits as number) ? defaultMaxCredits : userMaxCredits;
 
     await startFlowJob(
       projectId,
@@ -201,11 +224,11 @@ export const FlowGenPanel: React.FC = () => {
       {
         transformationIntent,
         identityMode: 'GENERATED',
-        maxCredits: isNaN(maxCredits as number) ? undefined : maxCredits,
+        maxCredits,
         preserveOriginalAudio: true,
         requestedConfig: currentRequestedConfig,
-        configurationFingerprint: preflight?.configurationFingerprint,
-        preflightId: preflight?.preflightId,
+        configurationFingerprint: activePreflight?.configurationFingerprint,
+        preflightId: activePreflight?.preflightId,
       }
     );
   };
