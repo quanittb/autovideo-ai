@@ -6,8 +6,9 @@
 
 ## 1. Product Overview
 
-AutoVideo AI is a high-performance desktop application engineered for character replacement, style transformation, and generative video synthesis. It utilizes a **Hybrid AI Architecture**:
-- **Cloud-First Fast Path**: Dispatches heavy video-to-video / image-to-video generation tasks to scalable cloud inference providers (e.g. Replicate) for high resolution and fast turnaround regardless of host GPU specs.
+AutoVideo AI is a high-performance desktop application engineered for character replacement, style transformation, and generative video synthesis. It utilizes a **Hybrid Multi-Engine AI Architecture**:
+- **Google Flow Automation Engine**: Headless/Interactive Playwright sidecar automation for Google Flow video generation (`Omni Flash`, `Veo 2`), supporting long-video multi-segment generation, contiguous frame-accurate CFR stitching, original audio preservation, zero-fake dual-ledger accounting, and crash-resilient segment resumption.
+- **Cloud-First Fast Path**: Dispatches heavy video-to-video / image-to-video generation tasks to scalable cloud inference providers (e.g. Replicate) with pre-submission budget guards.
 - **Local Neural Engine**: Local fallback using PyTorch/Diffusers (Stable Diffusion 1.5, AnimateDiff, ControlNet, IP-Adapter) and ONNX Runtime for offline processing.
 - **Native Media Subsystem**: Rust-native job pipeline orchestration, frame caching, sub-second FFmpeg/FFprobe stream extraction, and audio preservation.
 
@@ -22,13 +23,15 @@ graph TD
     
     subgraph Rust Backend
         JE[Job Engine & Crash Recovery]
-        ROUTER[Generation Router: AUTO / CLOUD / LOCAL]
+        ROUTER[Generation Router: AUTO / FLOW / CLOUD / LOCAL]
         GUARD[Cost Guard & Budget Limit]
         MEDIA[Media Engine & FFmpeg Process Pipeline]
         PROBE[Hardware Capability Probe]
+        FLOW_ORCH[Flow Long-Video Orchestrator & Stitcher]
     end
     
     subgraph AI Execution Subsystems
+        FLOW_SIDECAR[Google Flow Playwright Bridge Sidecar: TypeScript + Node.js]
         CLOUD[Cloud Subsystem: Replicate REST API]
         LOCAL[Local Python Sidecar: PyTorch / Diffusers / ONNX]
     end
@@ -36,16 +39,33 @@ graph TD
     UI -->|Invoke Commands & Stream Events| IPC
     IPC --> JE
     IPC --> ROUTER
+    ROUTER -->|Google Flow Mode| FLOW_ORCH
+    FLOW_ORCH -->|Budget & Fingerprint Verified| FLOW_SIDECAR
+    FLOW_ORCH -->|Stitch & Mux Audio| MEDIA
     ROUTER -->|Budget Checked| GUARD
-    GUARD -->|Cloud Mode / Auto| CLOUD
-    GUARD -->|Local Fallback / Local Mode| LOCAL
+    GUARD -->|Cloud Mode| CLOUD
+    GUARD -->|Local Mode / Fallback| LOCAL
     JE --> MEDIA
     PROBE -.->|Hardware Tier Profile| ROUTER
 ```
 
 ---
 
-## 3. Installation & System Requirements
+## 3. Google Flow Long-Video Pipeline Architecture
+
+For videos exceeding the single-generation length (e.g. 10s), the system executes an automated multi-stage pipeline:
+
+1. **Analysis & Ingestion**: Probes input video for frame rate, duration, and CFR consistency.
+2. **Contiguous Frame-Aligned Segmentation**: Splits source video into frame-accurate segments (e.g. 10s chunks) without loss of edge frames.
+3. **Pre-Click Safety & Cost Gate**: Connects to Google Flow session, verifies target profile, uploads source video, verifies exact model and duration configuration, computes pre-click fingerprint, and validates against budget limits.
+4. **Segment Execution & Zero-Fake Accounting**: Submits each segment with single-click guarantees, tracks generation state semantically, and logs credit expenditures to the dual-ledger.
+5. **Zero-Paid Recovery & Resumption Engine**: If generation encounters a timeout or interruption, the recovery engine correlatively locates and downloads the completed output without duplicate paid clicks. The `resume_flow_generation` IPC command allows continuation from uncompleted segments.
+6. **Stitcher & Audio Preservation**: Normalizes all downloaded segment artifacts to target CFR 30fps MP4s, stitches them seamlessly into the final timeline, extracts original audio from source media, and muxes it with stream copy into the final video.
+7. **Asset Library Registration**: Registers the finished video as a `DerivedMediaAsset` in the active project.
+
+---
+
+## 4. Installation & System Requirements
 
 ### Prerequisites
 - **Node.js**: v18.0+ (`npm` or `pnpm`)
@@ -66,55 +86,36 @@ cd autovideo-ai
 # 2. Install frontend dependencies
 npm install
 
-# 3. Build frontend bundle
+# 3. Build sidecars
+cd src-tauri/sidecars/flow-playwright
+npm install
+npm run build
+cd ../../..
+
+# 4. Build frontend bundle
 npm run build
 
-# 4. Verify Rust backend compilation
+# 5. Verify Rust backend compilation
 cargo check --manifest-path src-tauri/Cargo.toml --all-targets
 
-# 5. Run test suite
+# 6. Run test suite
 cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
 ```
 
 ---
 
-## 4. Capability Status Matrix (Repository Truth)
+## 5. Capability Status Matrix (Repository Truth)
 
 | Subsystem / Feature | Current Status | Description |
 |---|---|---|
+| **Google Flow Long-Video Pipeline** | `REAL_AND_VERIFIED` | Full multi-segment workflow with pre-click safety gates, Playwright bridge, seamless stitching, original audio preservation, and zero-paid recovery. |
+| **Flow Resumption & Error Recovery** | `REAL_AND_VERIFIED` | `resume_flow_generation` IPC command and UI Resume button with segment preservation. |
+| **Zero-Fake Dual-Ledger Accounting** | `REAL_AND_VERIFIED` | Strict separation of quarantined attempts and clean rerun authorizations; zero fake balances. |
 | **Media Cache & Stream Extraction** | `REAL_AND_VERIFIED` | Full FFmpeg probe, frame extraction, and lossless audio extraction verified on physical MP4s. |
 | **Pipeline Job Engine & Recovery** | `REAL_AND_VERIFIED` | 6-stage video processing lifecycle with real cancellation, retry, and startup crash recovery. |
 | **Hardware Adaptive Classification** | `REAL_AND_VERIFIED` | Live probe isolates GPU VRAM tiers and flags Turing FP16 instability (e.g. GTX 1650 4GB). |
 | **Local Neural Inference (SD1.5 / AD)** | `REAL_AND_VERIFIED` | Validated end-to-end MP4 generation (`outputs/phase12/final/accepted_video.mp4`, 0 NaNs). |
 | **Cloud Video Provider Abstraction** | `REAL_AND_VERIFIED` | Unified `CloudVideoProvider` trait, `GenerationRouter`, and `CostGuard` budget checks. |
-| **Live Remote Cloud Generation** | `BLOCKED_BY_CREDENTIALS` | Replicate REST client implemented and verified via unit tests; live execution awaits `REPLICATE_API_TOKEN`. |
-| **Legacy Wizard Step Views** | `MOCK_OR_PLACEHOLDER` | `StepTransform.tsx`, `StepExport.tsx`, `ResultView.tsx` contain prototype mock timers/emojis; superceded by `GenerativeStudioView` and `JobMonitor`. |
-
----
-
-## 5. Cloud Provider Configuration
-
-AutoVideo AI implements a strict **Zero-Fake Policy**. Missing credentials halt execution with `REAL_CLOUD_LIVE_BLOCKED` rather than generating mock artifacts or fake cost statistics.
-
-To enable live cloud video generation:
-
-### Windows (PowerShell)
-```powershell
-# Set your Replicate API Token
-$env:REPLICATE_API_TOKEN = "r8_your_actual_token_here"
-
-# Execute real acceptance test runner
-& ".\.venv-generative\Scripts\python.exe" ".\src-tauri\scripts\cloud_live_acceptance.py"
-```
-
-### Linux / macOS (Bash)
-```bash
-export REPLICATE_API_TOKEN="r8_your_actual_token_here"
-python3 src-tauri/scripts/cloud_live_acceptance.py
-```
-
-### Cost Safety Guard
-The backend enforces a deterministic `max_cost_per_job` limit (default: `$5.00`). If a requested duration/resolution exceeds the budget threshold, the backend immediately rejects the job with `CLOUD_COST_LIMIT_EXCEEDED` before any remote API dispatch occurs.
 
 ---
 
@@ -128,8 +129,11 @@ cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 # Rust compilation
 cargo check --manifest-path src-tauri/Cargo.toml --all-targets
 
-# Automated test suite (612 tests)
+# Automated backend test suite
 cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+
+# Frontend unit & store test suite
+npx vitest run
 
 # Frontend production build
 npm run build

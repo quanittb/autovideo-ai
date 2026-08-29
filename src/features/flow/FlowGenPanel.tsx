@@ -527,6 +527,19 @@ export const FlowGenPanel: React.FC = () => {
         </div>
       </div>
 
+      {/* Multi-Segment Pipeline & Facial Identity Guidance */}
+      <div className="p-3.5 bg-slate-900/50 border border-slate-800 rounded-xl text-xs flex items-start gap-3">
+        <Info className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
+        <div className="flex flex-col gap-1 text-slate-300">
+          <span className="font-semibold text-slate-200">
+            Pipeline Tạo Video Tự Động Nhiều Phân Đoạn (Multi-Segment Flow)
+          </span>
+          <p className="text-slate-400 text-[11px] leading-relaxed">
+            Video dài (&gt;10s) sẽ được tự động chia thành các phân đoạn 10s chuẩn CFR 30fps. Mỗi phân đoạn được gửi đến Google Flow xử lý biến đổi khuôn mặt / phong cách, sau đó được tự động tải về, ghép nối timeline liền mạch và phục hồi toàn bộ âm thanh gốc từ video nguồn ban đầu.
+          </p>
+        </div>
+      </div>
+
       {/* Prompt Editor */}
       <FlowPromptEditor
         prompt={prompt}

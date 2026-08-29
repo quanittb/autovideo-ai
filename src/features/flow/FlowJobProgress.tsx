@@ -252,17 +252,24 @@ export const FlowJobProgress: React.FC<FlowJobProgressProps> = ({ job }) => {
         <div className="flex flex-col gap-2 p-3 bg-rose-950/40 border border-rose-800/50 rounded-lg text-xs text-rose-300">
           <div className="flex items-start gap-2">
             <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-            <span>{job.errorMessage}</span>
+            <div className="flex flex-col gap-1">
+              <span className="font-medium">{job.errorMessage}</span>
+              {job.completedGenerations > 0 && (
+                <span className="text-[11px] text-amber-300/90">
+                  ✓ Đã bảo toàn thành công {job.completedGenerations}/{job.totalSegments} segment ({job.completedGenerations * 10}s video). Bạn có thể bấm &quot;Resume&quot; để tiếp tục xử lý phân đoạn tiếp theo mà không làm mất dữ liệu đã tạo.
+                </span>
+              )}
+            </div>
           </div>
           {canResume && (
             <div className="flex items-center justify-end pt-1">
               <button
                 onClick={handleResume}
                 disabled={isActing}
-                className="px-3 py-1 rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 text-white text-xs flex items-center gap-1.5 transition cursor-pointer font-medium"
+                className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs flex items-center gap-1.5 transition cursor-pointer font-semibold shadow"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
-                <span>Resume Generation</span>
+                <span>Tiếp tục công việc (Resume Generation)</span>
               </button>
             </div>
           )}
