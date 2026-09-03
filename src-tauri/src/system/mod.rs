@@ -66,7 +66,12 @@ impl StoragePaths {
 
     pub fn default_paths() -> Self {
         let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        Self::resolve_from_base(&base.join(".autovideo_data"))
+        let app_base = if base.join("src-tauri").exists() {
+            base.join("src-tauri")
+        } else {
+            base
+        };
+        Self::resolve_from_base(&app_base.join(".autovideo_data"))
     }
 }
 
