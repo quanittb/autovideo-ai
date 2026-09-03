@@ -382,31 +382,18 @@ export async function ensureUploadedVideoEditActive(
   const checkEditActive = async () => {
     const url = page.url();
     const isEditUrl = url.includes('/edit/') || url.includes('/edit');
-    const hasBackBtn =
-      (await page
-        .locator('button:has(i:has-text("arrow_back")), button:has-text("Quay lại dự án"), button:has-text("Back to project")')
-        .count()
-        .catch(() => 0)) > 0;
-    const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
-    const hasEditPlaceholder =
-      bodyText.includes('Mô tả nội dung bạn muốn chỉnh sửa') ||
-      bodyText.includes('Describe what you want to edit') ||
-      bodyText.includes('Chỉnh sửa video') ||
-      bodyText.includes('Mô tả nội dung') ||
-      bodyText.includes('Nhập lời nhắc') ||
-      bodyText.includes('Tạo video') ||
-      bodyText.includes('Generate');
+    if (isEditUrl) return true;
+
     const hasTimeline =
-      (await page.locator('.lf-player-container, [class*="timeline"], div:has(> button i:has-text("volume_up")), [data-testid*="timeline"], video').count().catch(() => 0)) >
-      0;
-    const hasComposer =
-      (await page.locator('textarea, [contenteditable="true"], input[placeholder*="Mô tả" i], input[placeholder*="Describe" i], [aria-label*="prompt" i], #prompt-composer').count().catch(() => 0)) > 0;
+      (await page.locator('.lf-player-container, div:has(> button i:has-text("volume_up")), video[src]').count().catch(() => 0)) > 0;
+    const hasVideoChip =
+      (await page.locator('#source-video-chip, [data-testid="source-chip"], [class*="source-chip"]').count().catch(() => 0)) > 0;
 
     console.error(
-      `[ensureUploadedVideoEditActive] checkEditActive: url=${url}, isEditUrl=${isEditUrl}, hasBackBtn=${hasBackBtn}, hasEditPlaceholder=${hasEditPlaceholder}, hasTimeline=${hasTimeline}, hasComposer=${hasComposer}`
+      `[ensureUploadedVideoEditActive] checkEditActive: url=${url}, isEditUrl=${isEditUrl}, hasTimeline=${hasTimeline}, hasVideoChip=${hasVideoChip}`
     );
 
-    return isEditUrl || (hasBackBtn && (hasEditPlaceholder || hasTimeline || hasComposer));
+    return hasTimeline || hasVideoChip;
   };
 
   // 0. If not in a project workspace, navigate into one
@@ -463,36 +450,52 @@ export async function ensureUploadedVideoEditActive(
         throw new Error(`FILE_NOT_FOUND: Upload video does not exist at ${params.videoPath}`);
       }
 
-      const addMediaBtn = page
-        .locator(
-          'button:has(i:has-text("add")), button:has-text("add"), button:has-text("Thêm nội dung nghe nhìn"), button:has-text("Add media")'
-        )
-        .first();
-
-      if ((await addMediaBtn.count().catch(() => 0)) === 0 || !(await addMediaBtn.isVisible().catch(() => false))) {
-        throw new Error('FLOW_UI_CHANGED: Top bar media upload button not found');
+      const fileInput = page.locator('input[type="file"]').first();
+      let uploadedDirectly = false;
+      if ((await fileInput.count().catch(() => 0)) > 0) {
+        console.error(`[ensureUploadedVideoEditActive] Found input[type="file"], setting files directly: ${params.videoPath}`);
+        try {
+          await fileInput.setInputFiles(params.videoPath);
+          uploadedDirectly = true;
+          await page.waitForTimeout(2000);
+        } catch (err) {
+          console.error('[ensureUploadedVideoEditActive] setInputFiles failed:', err);
+        }
       }
 
-      await addMediaBtn.click();
-      await page.waitForTimeout(800);
+      if (!uploadedDirectly) {
+        const addMediaBtn = page
+          .locator(
+            'button:has(i:has-text("add")), button:has(span:has-text("add")), button:has-text("add"), button:has-text("Thêm"), button[aria-label*="add" i], button[aria-label*="thêm" i], header button:has(svg)'
+          )
+          .first();
 
-      const uploadMenuItem = page
-        .locator(
-          '[role="menuitem"]:has-text("Tải nội dung nghe nhìn lên"), [role="menuitem"]:has-text("Tải lên"), [role="menuitem"]:has-text("Upload media"), [role="menuitem"]:has-text("Upload")'
-        )
-        .first();
+        if ((await addMediaBtn.count().catch(() => 0)) === 0 || !(await addMediaBtn.isVisible().catch(() => false))) {
+          throw new Error('FLOW_UI_CHANGED: Top bar media upload button not found');
+        }
 
-      if ((await uploadMenuItem.count().catch(() => 0)) === 0 || !(await uploadMenuItem.isVisible().catch(() => false))) {
-        throw new Error('FLOW_UI_CHANGED: Media upload menu item not found');
+        await addMediaBtn.click();
+        await page.waitForTimeout(800);
+
+        const uploadMenuItem = page
+          .locator(
+            '[role="menuitem"]:has-text("Tải nội dung nghe nhìn lên"), [role="menuitem"]:has-text("Tải lên"), [role="menuitem"]:has-text("Upload media"), [role="menuitem"]:has-text("Upload"), button:has-text("Tải lên")'
+          )
+          .first();
+
+        if ((await uploadMenuItem.count().catch(() => 0)) === 0 || !(await uploadMenuItem.isVisible().catch(() => false))) {
+          throw new Error('FLOW_UI_CHANGED: Media upload menu item not found');
+        }
+
+        // Intercept file chooser and set files
+        const [fileChooser] = await Promise.all([
+          page.waitForEvent('filechooser', { timeout: 15000 }),
+          uploadMenuItem.click(),
+        ]);
+
+        await fileChooser.setFiles(params.videoPath);
+        await page.waitForTimeout(2000);
       }
-
-      // Intercept file chooser and set files
-      const [fileChooser] = await Promise.all([
-        page.waitForEvent('filechooser', { timeout: 15000 }),
-        uploadMenuItem.click(),
-      ]);
-
-      await fileChooser.setFiles(params.videoPath);
       await page.waitForTimeout(2000);
 
       // Handle video consent modal if present
