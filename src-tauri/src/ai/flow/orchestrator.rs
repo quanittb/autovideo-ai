@@ -1939,7 +1939,7 @@ impl FlowOrchestrator {
 
             // 3. Poll until complete (with timeout and sleep) on active session
             let poll_start = Utc::now();
-            let poll_timeout = std::time::Duration::from_secs(900); // 15 minutes max for video generation
+            let poll_timeout = std::time::Duration::from_secs(1500); // 25 minutes max for cloud video generation
             let mut is_completed = false;
 
             while !is_completed {
@@ -2480,9 +2480,9 @@ impl FlowOrchestrator {
                         }
                     };
 
-                    // Poll until completion (up to 15 minutes)
+                    // Poll until completion (up to 25 minutes)
                     let poll_start = Utc::now();
-                    let poll_timeout = std::time::Duration::from_secs(900);
+                    let poll_timeout = std::time::Duration::from_secs(1500);
                     let mut is_completed = false;
 
                     while !is_completed {

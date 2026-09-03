@@ -1453,24 +1453,14 @@ export async function detectGenerationState(
   }
 
   // 5. Generating / Queued check (Authoritative semantic progress markers)
-  const progressIndicator = page
-    .locator(
-      '#progress-indicator, [data-testid="progress-indicator"], .progress-indicator, [data-status="generating"]'
-    )
-    .first();
-  if ((await progressIndicator.count().catch(() => 0)) > 0 && (await progressIndicator.isVisible().catch(() => false))) {
-    const progressAttr = await progressIndicator.getAttribute('data-progress').catch(() => null);
-    const progressPct = progressAttr ? parseFloat(progressAttr) : 0;
-    return { status: 'generating', progressPct: isNaN(progressPct) ? 0 : progressPct };
-  }
-
-  const generatingCard = page
-    .locator(
-      '.generating-card, [data-state="generating"], div:has-text("Đang tạo"), div:has-text("Generating..."), span:has-text("Đang tạo"), p:has-text("Đang tạo")'
-    )
-    .first();
-  if ((await generatingCard.count().catch(() => 0)) > 0 && (await generatingCard.isVisible().catch(() => false))) {
-    return { status: 'generating', progressPct: 0 };
+  const generatingNodes = page.locator(
+    '.react-flow__node:has(.generating-card), .react-flow__node:has([data-state="generating"]), .react-flow__node:has([data-status="generating"]), .react-flow__node:has([role="progressbar"]), .react-flow__node:has(.spinner), .generating-card, [data-state="generating"], [data-status="generating"], div:has-text("Đang tạo"), div:has-text("Generating..."), span:has-text("Đang tạo"), p:has-text("Đang tạo"), [role="progressbar"], div[class*="loading"]'
+  );
+  const generatingCount = await generatingNodes.count().catch(() => 0);
+  for (let i = 0; i < generatingCount; i++) {
+    if (await generatingNodes.nth(i).isVisible().catch(() => false)) {
+      return { status: 'generating', progressPct: 0 };
+    }
   }
 
   // 6. Ready / Download check
@@ -1481,19 +1471,11 @@ export async function detectGenerationState(
     .first();
   if ((await downloadLink.count().catch(() => 0)) > 0 && (await downloadLink.isVisible().catch(() => false))) {
     const href = await downloadLink.getAttribute('href').catch(() => null);
-    if (href && href.trim().length > 0) {
-      return {
-        status: 'ready',
-        progressPct: 100,
-        downloadUrl: href.trim(),
-      };
-    } else {
-      return {
-        status: 'ready',
-        progressPct: 100,
-        downloadUrl: undefined,
-      };
-    }
+    return {
+      status: 'ready',
+      progressPct: 100,
+      downloadUrl: href && href.trim().length > 0 ? href.trim() : undefined,
+    };
   }
 
   const completedVideo = page
@@ -1508,6 +1490,41 @@ export async function detectGenerationState(
       progressPct: 100,
       downloadUrl: src || undefined,
     };
+  }
+
+  // 6b. If on project canvas and no generating indicators, click the output card to reveal download/video
+  if (currentUrl.includes('/tools/flow/project/') || currentUrl.includes('/edit/')) {
+    const outputNode = page
+      .locator(
+        'div[role="button"]:has(img[src*="getMediaUrlRedirect"]), .react-flow__node:has(img), div.sc-c4ba2852-0, div[role="button"]:has(video), .react-flow__node:has(video)'
+      )
+      .last();
+    if ((await outputNode.count().catch(() => 0)) > 0 && (await outputNode.isVisible().catch(() => false))) {
+      console.error('[detectGenerationState] Output node found and no active spinner. Clicking node to inspect...');
+      await outputNode.click().catch(() => {});
+      await page.waitForTimeout(2000);
+
+      const reDownload = page
+        .locator(
+          'button:has-text("Download"), button:has-text("Tải xuống"), button[aria-label*="Download" i], button[aria-label*="Tải xuống" i], button:has(i:has-text("download")), button:has(i:has-text("file_download")), a[download]'
+        )
+        .first();
+      if ((await reDownload.count().catch(() => 0)) > 0 && (await reDownload.isVisible().catch(() => false))) {
+        return { status: 'ready', progressPct: 100 };
+      }
+
+      const reVideos = page.locator('video');
+      const vCount = await reVideos.count().catch(() => 0);
+      for (let v = 0; v < vCount; v++) {
+        const vEl = reVideos.nth(v);
+        const src = await vEl.getAttribute('src').catch(() => null);
+        if (src && src.length > 0) {
+          return { status: 'ready', progressPct: 100, downloadUrl: src };
+        }
+      }
+
+      return { status: 'ready', progressPct: 100 };
+    }
   }
 
   // 7. Active project workspace check (still generating in background queue)
