@@ -866,7 +866,7 @@ export async function readActiveEditState(page: Page): Promise<{
   outputCount: number;
   sourceTitle: string;
 }> {
-  let model = 'Omni Flash';
+  let model = 'UNKNOWN';
   let resolution = '720p';
   let durationSec = 10;
   let orientation = 'PORTRAIT / 9:16';
@@ -876,6 +876,14 @@ export async function readActiveEditState(page: Page): Promise<{
   const summaryText = settingsBtn ? (await settingsBtn.innerText().catch(() => '')).trim() : '';
 
   if (summaryText) {
+    if (summaryText.toLowerCase().includes('banana')) {
+      model = 'Nano Banana 2';
+    } else if (summaryText.toLowerCase().includes('veo')) {
+      model = 'Veo 2';
+    } else if (summaryText.toLowerCase().includes('omni') || summaryText.toLowerCase().includes('flash')) {
+      model = 'Omni Flash';
+    }
+
     if (summaryText.toLowerCase().includes('1080p')) resolution = '1080p';
     else if (summaryText.toLowerCase().includes('720p')) resolution = '720p';
 
@@ -920,11 +928,18 @@ export async function readActiveEditState(page: Page): Promise<{
   }
 
   const activeModel = page
-    .locator('#settings-popover [data-testid="model-select"], [role="menu"] [data-testid="model-select"]')
+    .locator(
+      '#settings-popover [data-testid="model-select"], [role="menu"] [data-testid="model-select"], div[data-radix-menu-content] button:has-text("Omni Flash"), div[data-radix-menu-content] button:has-text("Veo"), div[data-radix-menu-content] button:has-text("Banana")'
+    )
     .first();
   if ((await activeModel.count().catch(() => 0)) > 0) {
     const mText = (await activeModel.innerText().catch(() => '')).trim();
-    if (mText) model = mText;
+    if (mText) {
+      if (mText.toLowerCase().includes('banana')) model = 'Nano Banana 2';
+      else if (mText.toLowerCase().includes('veo')) model = 'Veo 2';
+      else if (mText.toLowerCase().includes('omni') || mText.toLowerCase().includes('flash')) model = 'Omni Flash';
+      else model = mText;
+    }
   }
 
   const sourceChip = page.locator('#source-video-chip, [data-testid="source-chip"]').first();
@@ -990,17 +1005,16 @@ export async function openGenerationSettings(page: Page) {
   }
 
   // Ensure Video tab is selected in settings menu
-  const videoTab = menu.locator('button[id*="trigger-VIDEO"], button[role="tab"]:has-text("Video")').first();
+  const videoTab = menu.locator('button[id*="trigger-VIDEO"], button[role="tab"]:has-text("Video"), button:has-text("Video")').first();
   if ((await videoTab.count().catch(() => 0)) > 0) {
-    const isInactive = (await videoTab.getAttribute('data-state').catch(() => '')) === 'inactive';
+    const isInactive = (await videoTab.getAttribute('data-state').catch(() => '')) === 'inactive' ||
+      (await videoTab.getAttribute('aria-selected').catch(() => '')) === 'false';
     if (isInactive) {
-      console.error('[openGenerationSettings] Diagnosing sidebar and top bar in Flow UI...');
-      const sidebarBtns = page.locator('button:has-text("Công cụ"), button:has-text("Cảnh"), button:has-text("Tất cả"), header button, nav button');
-      const sCount = await sidebarBtns.count().catch(() => 0);
-      for (let s = 0; s < sCount; s++) {
-        const b = sidebarBtns.nth(s);
-        console.error(`[Sidebar Button ${s}] "${await b.innerText().catch(() => '')}"`);
-      }
+      console.error('[openGenerationSettings] Actively switching popover to Video tab...');
+      await videoTab.evaluate((el: any) => el.click()).catch(async () => {
+        await videoTab.click({ force: true }).catch(() => {});
+      });
+      await page.waitForTimeout(600);
     }
   }
 
@@ -1021,20 +1035,23 @@ export async function closeGenerationSettings(page: Page) {
 export async function selectVideoModel(page: Page, modelName: string) {
   const menu = await openGenerationSettings(page);
   const modelDropdownBtn = menu
-    .locator('button:has-text("Omni Flash"), button:has-text("Veo"), button:has-text("Flash"), [data-testid="model-select"]')
+    .locator(
+      'button:has-text("Omni Flash"), button:has-text("Veo"), button:has-text("Flash"), button:has-text("Banana"), button:has-text("Nano"), [data-testid="model-select"]'
+    )
     .first();
   const count = await modelDropdownBtn.count().catch(() => 0);
   if (count === 0) {
-    console.error('[selectVideoModel] Model selector dropdown button not found in settings menu, assuming default video model');
+    console.error('[selectVideoModel] Model selector dropdown button not found in settings menu');
     return;
   }
 
   const currentModelText = (await modelDropdownBtn.innerText().catch(() => '')).trim();
+  console.error(`[selectVideoModel] Current model displayed: "${currentModelText}", target: "${modelName}"`);
   if (!currentModelText.toLowerCase().includes(modelName.toLowerCase().replace('gemini ', ''))) {
     await modelDropdownBtn.evaluate((el: any) => el.click()).catch(async () => {
       await modelDropdownBtn.click({ force: true }).catch(() => {});
     });
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(600);
 
     const modelOption = page
       .locator(
@@ -1050,70 +1067,97 @@ export async function selectVideoModel(page: Page, modelName: string) {
       });
       await page.waitForTimeout(500);
     } else {
-      console.error(`[selectVideoModel] Specific model "${modelName}" not found in dropdown, using active default model: "${currentModelText}"`);
+      console.error(`[selectVideoModel] Could not find dropdown option for model "${modelName}"`);
     }
   }
 }
 
 /**
- * Shared Helper: Selects generation length in seconds (4, 6, 8, 10).
- */
-export async function selectGenerationLength(page: Page, lengthSec: number) {
-  const menu = await openGenerationSettings(page);
-  const lengthTab = menu
-    .locator(`button[role="tab"]:has-text("${lengthSec}s"), button:has-text("${lengthSec}s"), [data-testid="length-${lengthSec}s"]`)
-    .first();
-  const count = await lengthTab.count().catch(() => 0);
-  if (count === 0) {
-    console.error(`[selectGenerationLength] Generation length tab "${lengthSec}s" not found in settings menu, assuming determined by input media`);
-    return;
-  }
-  await lengthTab.evaluate((el: any) => el.click()).catch(async () => {
-    await lengthTab.click({ force: true }).catch(() => {});
-  });
-  await page.waitForTimeout(300);
-}
-
-/**
- * Shared Helper: Selects orientation / aspect ratio ("PORTRAIT" / "9:16" or "LANDSCAPE" / "16:9").
+ * Shared Helper: Selects orientation in the open settings menu.
  */
 export async function selectOrientation(page: Page, orientation: string) {
   const menu = await openGenerationSettings(page);
-  const isPortrait =
-    orientation.toUpperCase().includes('PORTRAIT') ||
-    orientation.includes('9:16') ||
-    orientation.toLowerCase().includes('dọc');
-  const selector = isPortrait
-    ? 'button[role="tab"]:has-text("9:16"), button[role="tab"]:has-text("crop_9_16"), button:has-text("crop_9_16"), button:has-text("9:16"), [data-testid="ori-portrait"]'
-    : 'button[role="tab"]:has-text("16:9"), button[role="tab"]:has-text("crop_16_9"), button:has-text("crop_16_9"), button:has-text("16:9"), [data-testid="ori-landscape"]';
+  const isPortrait = orientation.toUpperCase().includes('PORTRAIT') || orientation.includes('9:16');
+  const targetLabel = isPortrait ? '9:16' : '16:9';
 
-  const tab = menu.locator(selector).first();
+  const tab = menu
+    .locator(
+      `button[role="tab"]:has-text("${targetLabel}"), [data-testid^="ori-"]:has-text("${targetLabel}"), button:has-text("crop_${targetLabel.replace(':', '_')}")`
+    )
+    .first();
+
   const count = await tab.count().catch(() => 0);
   if (count === 0) {
-    console.error(`[selectOrientation] Orientation tab for "${orientation}" not found in settings menu`);
+    console.error(`[selectOrientation] Orientation button for "${targetLabel}" not found in settings menu`);
     return;
   }
-  await tab.evaluate((el: any) => el.click()).catch(async () => {
-    await tab.click({ force: true }).catch(() => {});
-  });
-  await page.waitForTimeout(300);
+
+  const isAlreadyActive = (await tab.getAttribute('data-state').catch(() => '')) === 'active';
+  if (!isAlreadyActive) {
+    console.error(`[selectOrientation] Selecting orientation "${targetLabel}"...`);
+    await tab.evaluate((el: any) => el.click()).catch(async () => {
+      await tab.click({ force: true }).catch(() => {});
+    });
+    await page.waitForTimeout(300);
+  }
 }
 
 /**
- * Shared Helper: Selects output count (1, 2, 3, 4).
+ * Shared Helper: Selects generation length in the open settings menu.
  */
-export async function selectOutputCount(page: Page, outputCount: number) {
+export async function selectGenerationLength(page: Page, durationSec: number) {
   const menu = await openGenerationSettings(page);
-  const countTab = menu
-    .locator(`button[role="tab"]:has-text("x${outputCount}"), button:has-text("x${outputCount}"), [data-testid="count-x${outputCount}"]`)
+  const targetLabel = `${durationSec}s`;
+
+  const tab = menu
+    .locator(
+      `button[role="tab"]:has-text("${targetLabel}"), [data-testid^="length-"]:has-text("${targetLabel}"), button:has-text("${targetLabel}")`
+    )
     .first();
-  const count = await countTab.count().catch(() => 0);
+
+  const count = await tab.count().catch(() => 0);
   if (count === 0) {
-    console.error(`[selectOutputCount] Output count tab "x${outputCount}" not found in settings menu`);
+    console.error(`[selectGenerationLength] Duration button for "${targetLabel}" not found in settings menu`);
     return;
   }
-  await countTab.click();
-  await page.waitForTimeout(300);
+
+  const isAlreadyActive = (await tab.getAttribute('data-state').catch(() => '')) === 'active';
+  if (!isAlreadyActive) {
+    console.error(`[selectGenerationLength] Selecting duration "${targetLabel}"...`);
+    await tab.evaluate((el: any) => el.click()).catch(async () => {
+      await tab.click({ force: true }).catch(() => {});
+    });
+    await page.waitForTimeout(300);
+  }
+}
+
+/**
+ * Shared Helper: Selects output count in the open settings menu.
+ */
+export async function selectOutputCount(page: Page, count: number) {
+  const menu = await openGenerationSettings(page);
+  const targetLabel = `x${count}`;
+
+  const tab = menu
+    .locator(
+      `button[role="tab"]:has-text("${targetLabel}"), [data-testid^="count-"]:has-text("${targetLabel}"), button:has-text("${targetLabel}")`
+    )
+    .first();
+
+  const elCount = await tab.count().catch(() => 0);
+  if (elCount === 0) {
+    console.error(`[selectOutputCount] Output count button for "${targetLabel}" not found in settings menu`);
+    return;
+  }
+
+  const isAlreadyActive = (await tab.getAttribute('data-state').catch(() => '')) === 'active';
+  if (!isAlreadyActive) {
+    console.error(`[selectOutputCount] Selecting output count "${targetLabel}"...`);
+    await tab.evaluate((el: any) => el.click()).catch(async () => {
+      await tab.click({ force: true }).catch(() => {});
+    });
+    await page.waitForTimeout(300);
+  }
 }
 
 /**
@@ -1124,9 +1168,11 @@ export async function readGenerationSettings(page: Page): Promise<FlowGeneration
 
   // 1. Model readback
   const modelBtn = menu
-    .locator('button:has-text("Omni Flash"), button:has-text("Veo"), button:has-text("Flash"), [data-testid="model-select"]')
+    .locator(
+      'button:has-text("Omni Flash"), button:has-text("Veo"), button:has-text("Flash"), button:has-text("Banana"), button:has-text("Nano"), [data-testid="model-select"]'
+    )
     .first();
-  let model = 'Omni Flash';
+  let model = 'UNKNOWN';
   if ((await modelBtn.count().catch(() => 0)) > 0) {
     const raw = (await modelBtn.innerText().catch(() => '')).trim();
     if (raw) model = raw.replace('arrow_drop_down', '').trim();
@@ -2522,17 +2568,34 @@ export class FlowUiAdapterV1 {
             await this.page.waitForTimeout(1000);
 
             const menuItems = this.page.locator(
-              '[role="menuitem"], [role="menu"] button, div[data-radix-popper-content-wrapper] button, [data-radix-popper-content-wrapper] [role="menuitem"], div[role="menu"] div, button:has-text("video"), button:has-text("Video"), button:has-text("MP4"), button:has-text("720p"), button:has-text("1080p")'
+              'button:has-text("Video"), button:has-text("video"), button:has-text("MP4"), button:has-text("Tải video"), button:has-text("720p"), button:has-text("1080p"), [role="menuitem"], [role="menu"] button, div[data-radix-popper-content-wrapper] button, [data-radix-popper-content-wrapper] [role="menuitem"], div[role="menu"] div'
             );
             const miCount = await menuItems.count().catch(() => 0);
             if (miCount > 0) {
-              console.error(`[downloadArtifact] Found ${miCount} dropdown menu items, clicking first visible item...`);
+              console.error(`[downloadArtifact] Found ${miCount} dropdown menu items, searching for best video item...`);
+              let clicked = false;
+              // First pass: try specifically video/mp4 menu items
               for (let m = 0; m < miCount; m++) {
                 const mi = menuItems.nth(m);
                 if (await mi.isVisible().catch(() => false)) {
-                  console.error(`[downloadArtifact] Clicking menu item: "${await mi.innerText().catch(() => '')}"`);
-                  await mi.click().catch(() => {});
-                  break;
+                  const itemText = (await mi.innerText().catch(() => '')).toLowerCase();
+                  if (itemText.includes('video') || itemText.includes('mp4') || itemText.includes('720p') || itemText.includes('1080p')) {
+                    console.error(`[downloadArtifact] Clicking specific video menu item: "${itemText}"`);
+                    await mi.click().catch(() => {});
+                    clicked = true;
+                    break;
+                  }
+                }
+              }
+              // Second pass: if no video item explicitly found, click first visible
+              if (!clicked) {
+                for (let m = 0; m < miCount; m++) {
+                  const mi = menuItems.nth(m);
+                  if (await mi.isVisible().catch(() => false)) {
+                    console.error(`[downloadArtifact] Clicking fallback menu item: "${await mi.innerText().catch(() => '')}"`);
+                    await mi.click().catch(() => {});
+                    break;
+                  }
                 }
               }
             }
@@ -2540,6 +2603,34 @@ export class FlowUiAdapterV1 {
             const download = await downloadPromise;
             await download.saveAs(destinationPath);
             console.error(`[downloadArtifact] Download event succeeded, saved to ${destinationPath}`);
+
+            // Validate that the downloaded file is a real video container, not JPEG/PNG/HTML
+            if (fs.existsSync(destinationPath)) {
+              const stat = fs.statSync(destinationPath);
+              if (stat.size < 1000) {
+                fs.unlinkSync(destinationPath);
+                throw new Error(`FLOW_DOWNLOAD_CORRUPTED: Downloaded file size (${stat.size} bytes) is too small to be a valid video`);
+              }
+              const buf = Buffer.alloc(32);
+              const fd = fs.openSync(destinationPath, 'r');
+              fs.readSync(fd, buf, 0, 32, 0);
+              fs.closeSync(fd);
+
+              if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+                fs.unlinkSync(destinationPath);
+                throw new Error('FLOW_DOWNLOAD_INVALID_FORMAT: Downloaded artifact is a JPEG image, not an MP4 video. Video model was not active.');
+              }
+              if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+                fs.unlinkSync(destinationPath);
+                throw new Error('FLOW_DOWNLOAD_INVALID_FORMAT: Downloaded artifact is a PNG image, not an MP4 video. Video model was not active.');
+              }
+              const startStr = buf.toString('utf8', 0, 15).toLowerCase();
+              if (startStr.includes('<!doc') || startStr.includes('<html')) {
+                fs.unlinkSync(destinationPath);
+                throw new Error('FLOW_DOWNLOAD_INVALID_FORMAT: Downloaded artifact is an HTML error page, not an MP4 video.');
+              }
+            }
+
             return { success: true, savedPath: destinationPath };
           } catch (e: any) {
             console.error(`[downloadArtifact] Click on ${sel} did not trigger download event: ${e?.message || e}`);

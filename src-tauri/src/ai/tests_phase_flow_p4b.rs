@@ -1624,8 +1624,8 @@ async fn test_flow_p4b_live_recover_seg0_only() {
     let paths = StoragePaths::resolve_from_base(&base_path);
     let flow_service = FlowRuntimeService::new(paths.clone());
 
-    let project_id = "proj-c15a1fa7-cbcb-4bec-8a55-6d926d3d2fc2";
-    let parent_id = "flow_8a8ec897-ddf3-4a12-a161-955db6c6d757";
+    let project_id = "proj-c3d44687-64b6-4eff-bcbb-174030eef202";
+    let parent_id = "flow_101e6f8f-0376-4364-8a09-36c6a9585931";
 
     println!(
         "[LIVE RECOVER SEG0] Attempting recovery for parent {}...",

@@ -71,6 +71,18 @@ impl FlowOutputValidator {
             ));
         }
 
+        let codec_name = stream
+            .get("codec_name")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if codec_name == "mjpeg" || codec_name == "jpeg" || codec_name == "png" {
+            return Err(format!(
+                "VALIDATION_FAILED: Output file is an image contact sheet (codec {}), not a valid video stream",
+                codec_name
+            ));
+        }
+
         let duration_sec = stream
             .get("duration")
             .and_then(|d| d.as_str())
