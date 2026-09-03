@@ -101,7 +101,11 @@ export function normalizeCanonicalOrientation(ori?: string): string {
 }
 
 export function normalizeCanonicalModel(model?: string): string {
-  return (model || 'Omni Flash').trim().toLowerCase();
+  const m = (model || '').trim().toLowerCase();
+  if (m.includes('omni') || m.includes('flash')) return 'omni-flash';
+  if (m.includes('veo')) return 'veo-2';
+  if (m.includes('banana')) return 'nano-banana-2';
+  return m || 'omni-flash';
 }
 
 export function normalizeCanonicalResolution(res?: string): string {
@@ -1009,13 +1013,32 @@ export async function openGenerationSettings(page: Page) {
   if ((await videoTab.count().catch(() => 0)) > 0) {
     const isInactive = (await videoTab.getAttribute('data-state').catch(() => '')) === 'inactive' ||
       (await videoTab.getAttribute('aria-selected').catch(() => '')) === 'false';
+    console.error(`[openGenerationSettings] videoTab found, isInactive=${isInactive}`);
     if (isInactive) {
-      console.error('[openGenerationSettings] Actively switching popover to Video tab...');
-      await videoTab.evaluate((el: any) => el.click()).catch(async () => {
-        await videoTab.click({ force: true }).catch(() => {});
-      });
+      console.error('[openGenerationSettings] Actively switching popover to Video tab via real click...');
+      await videoTab.click({ force: true }).catch(() => {});
       await page.waitForTimeout(600);
+
+      let stateAfter = await videoTab.getAttribute('data-state').catch(() => '');
+      console.error(`[openGenerationSettings] videoTab data-state after Playwright click: "${stateAfter}"`);
+
+      if (stateAfter !== 'active') {
+        const box = await videoTab.boundingBox().catch(() => null);
+        if (box) {
+          console.error(`[openGenerationSettings] Clicking Video tab via mouse coordinates (${box.x + box.width / 2}, ${box.y + box.height / 2})...`);
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+          await page.waitForTimeout(600);
+          stateAfter = await videoTab.getAttribute('data-state').catch(() => '');
+          console.error(`[openGenerationSettings] videoTab data-state after mouse click: "${stateAfter}"`);
+        }
+      }
+
+      await page.screenshot({
+        path: 'C:/Users/quant/.gemini/antigravity/brain/03dfd7cb-4efe-4678-886a-2998012fb846/scratch/video_tab_clicked_debug.png'
+      }).catch(() => {});
     }
+  } else {
+    console.error('[openGenerationSettings] Video tab button NOT found in menu! InnerHTML snippet:', (await menu.innerHTML().catch(() => '')).substring(0, 300));
   }
 
   return menu;
@@ -1047,7 +1070,9 @@ export async function selectVideoModel(page: Page, modelName: string) {
 
   const currentModelText = (await modelDropdownBtn.innerText().catch(() => '')).trim();
   console.error(`[selectVideoModel] Current model displayed: "${currentModelText}", target: "${modelName}"`);
-  if (!currentModelText.toLowerCase().includes(modelName.toLowerCase().replace('gemini ', ''))) {
+  const normCurrent = normalizeCanonicalModel(currentModelText);
+  const normTarget = normalizeCanonicalModel(modelName);
+  if (normCurrent !== normTarget) {
     await modelDropdownBtn.evaluate((el: any) => el.click()).catch(async () => {
       await modelDropdownBtn.click({ force: true }).catch(() => {});
     });
@@ -1095,10 +1120,17 @@ export async function selectOrientation(page: Page, orientation: string) {
   const isAlreadyActive = (await tab.getAttribute('data-state').catch(() => '')) === 'active';
   if (!isAlreadyActive) {
     console.error(`[selectOrientation] Selecting orientation "${targetLabel}"...`);
-    await tab.evaluate((el: any) => el.click()).catch(async () => {
-      await tab.click({ force: true }).catch(() => {});
-    });
-    await page.waitForTimeout(300);
+    await tab.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(400);
+
+    const isStillInactive = (await tab.getAttribute('data-state').catch(() => '')) !== 'active';
+    if (isStillInactive) {
+      const box = await tab.boundingBox().catch(() => null);
+      if (box) {
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        await page.waitForTimeout(400);
+      }
+    }
   }
 }
 
@@ -1124,10 +1156,17 @@ export async function selectGenerationLength(page: Page, durationSec: number) {
   const isAlreadyActive = (await tab.getAttribute('data-state').catch(() => '')) === 'active';
   if (!isAlreadyActive) {
     console.error(`[selectGenerationLength] Selecting duration "${targetLabel}"...`);
-    await tab.evaluate((el: any) => el.click()).catch(async () => {
-      await tab.click({ force: true }).catch(() => {});
-    });
-    await page.waitForTimeout(300);
+    await tab.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(400);
+
+    const isStillInactive = (await tab.getAttribute('data-state').catch(() => '')) !== 'active';
+    if (isStillInactive) {
+      const box = await tab.boundingBox().catch(() => null);
+      if (box) {
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        await page.waitForTimeout(400);
+      }
+    }
   }
 }
 
@@ -1153,10 +1192,17 @@ export async function selectOutputCount(page: Page, count: number) {
   const isAlreadyActive = (await tab.getAttribute('data-state').catch(() => '')) === 'active';
   if (!isAlreadyActive) {
     console.error(`[selectOutputCount] Selecting output count "${targetLabel}"...`);
-    await tab.evaluate((el: any) => el.click()).catch(async () => {
-      await tab.click({ force: true }).catch(() => {});
-    });
-    await page.waitForTimeout(300);
+    await tab.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(400);
+
+    const isStillInactive = (await tab.getAttribute('data-state').catch(() => '')) !== 'active';
+    if (isStillInactive) {
+      const box = await tab.boundingBox().catch(() => null);
+      if (box) {
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        await page.waitForTimeout(400);
+      }
+    }
   }
 }
 
@@ -1280,10 +1326,14 @@ export async function configureGenerationSettings(
   const readback = await readGenerationSettings(page);
 
   // 3. Strict Fail-Closed Verification
-  if (target.model && readback.model !== 'UNKNOWN' && !readback.model.toLowerCase().includes(target.model.toLowerCase().replace('gemini ', ''))) {
-    throw new Error(
-      `FLOW_CONFIGURATION_UNVERIFIED: Model readback mismatch (expected ${target.model}, got ${readback.model})`
-    );
+  if (target.model) {
+    const normTarget = normalizeCanonicalModel(target.model);
+    const normReadback = normalizeCanonicalModel(readback.model);
+    if (readback.model === 'UNKNOWN' || normReadback !== normTarget) {
+      throw new Error(
+        `FLOW_CONFIGURATION_UNVERIFIED: Model readback mismatch (expected ${target.model}, got ${readback.model})`
+      );
+    }
   }
   if (target.generationLengthSec && readback.generationLengthSec !== target.generationLengthSec) {
     throw new Error(

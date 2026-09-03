@@ -1649,9 +1649,9 @@ async fn test_flow_p4b_inspect_video_settings() {
 
     let base_path = PathBuf::from("D:/rustProject/autovideo-ai/src-tauri/.autovideo_data");
     let paths = StoragePaths::resolve_from_base(&base_path);
-    let flow_service = FlowRuntimeService::new(paths.clone());
+    let _flow_service = FlowRuntimeService::new(paths.clone());
 
-    let req = FlowGenerationRequest {
+    let _req = FlowGenerationRequest {
         project_id: "proj-0566f1d3-f644-457a-9386-3ec8450a805f".to_string(),
         source_media_id: "media_4c850963-cf0c-4c6b-9685-18747a4cd50a".to_string(),
         profile_id: "profile_2".to_string(),
@@ -1679,10 +1679,226 @@ async fn test_flow_p4b_inspect_video_settings() {
         .join("media")
         .join("p4b_source_15s.mp4");
 
-    let preflight = flow_service
-        .preflight_flow_generation(req, source_path)
-        .await
-        .expect("Preflight failed");
+    let profile_manager = crate::ai::flow::FlowProfileManager::new(paths.app_data_dir.clone());
+    let bridge = crate::ai::flow::PlaywrightBridge::new();
+    let profile_dir = profile_manager.get_profile_dir("profile_2").unwrap();
+    let mut session = bridge.open_active_session(&profile_dir).await.unwrap();
+    let req_cfg = FlowRequestedGenerationConfig {
+        model_id: Some("Omni Flash".to_string()),
+        resolution: Some("720p".to_string()),
+        duration_sec: Some(10),
+        orientation: Some("PORTRAIT / 9:16".to_string()),
+        output_count: 1,
+    };
+    let prep_res = session
+        .prepare_video_edit(
+            "Replace only the selected target person's facial identity",
+            Some(&source_path),
+            Some(10.0),
+            Some(&req_cfg),
+            "att_test_diagnostic",
+        )
+        .await;
+    session.close().await;
+    println!("PREP_RESULT: {:?}", prep_res);
+}
 
-    println!("PREFLIGHT_RESULT: {:?}", preflight);
+#[tokio::test]
+#[ignore = "Real live Google Flow full 58s video acceptance test"]
+async fn test_flow_p4b_live_acceptance_full_58s() {
+    if std::env::var("RUN_FLOW_P4B_LIVE_PAID_ACCEPTANCE").unwrap_or_default() != "1" {
+        println!("SKIPPED: Set RUN_FLOW_P4B_LIVE_PAID_ACCEPTANCE=1 to authorize live paid acceptance run.");
+        return;
+    }
+
+    println!("==================================================");
+    println!("FLOW-P4-B FULL 58s PAID VIDEO ACCEPTANCE TEST");
+    println!("SOURCE: C:\\Users\\quant\\Dropbox\\PC\\Downloads\\video_test.mp4");
+    println!("MAX TOTAL CREDITS = 140 (6 SEGMENTS x 20 + BUFFER)");
+    println!("MAX PAID CLICKS = 6, AUTO RETRIES = 0");
+    println!("==================================================");
+
+    let source_asset = PathBuf::from(r"C:\Users\quant\Dropbox\PC\Downloads\video_test.mp4");
+    assert!(
+        source_asset.exists(),
+        "Source asset video_test.mp4 must exist at {:?}",
+        source_asset
+    );
+
+    let base_path = PathBuf::from("D:/rustProject/autovideo-ai/src-tauri/.autovideo_data");
+    let paths = StoragePaths::resolve_from_base(&base_path);
+    let manager = ProjectManager::new(paths.clone());
+    let media_service = MediaService::new();
+    let flow_service = FlowRuntimeService::new(paths.clone());
+
+    // 1. Initial Credit Balance Discovery
+    println!("[FULL 58s STEP 1] Querying initial credit balance...");
+    let initial_status = flow_service
+        .refresh_flow_credit_balance("profile_2")
+        .await
+        .expect("Failed to query initial credit balance");
+    let initial_balance = initial_status.balance;
+    println!("INITIAL_BALANCE: {:?}", initial_balance);
+
+    // 2. Import Source into Real Project Workflow
+    println!("[FULL 58s STEP 2] Setting up project and importing video_test.mp4...");
+    let mut project = manager
+        .create_project("Full 58s Acceptance Project")
+        .expect("Failed to create project");
+
+    let proj_dir = paths.projects_dir.join(&project.id);
+    let media_dir = proj_dir.join("media");
+    fs::create_dir_all(&media_dir).unwrap();
+
+    let dest_media_path = media_dir.join("video_test.mp4");
+    fs::copy(&source_asset, &dest_media_path).expect("Failed to copy source media to project");
+
+    let media_metadata = media_service
+        .probe(&dest_media_path)
+        .expect("Failed to probe source media");
+    let media_id = format!("media_{}", uuid::Uuid::new_v4());
+
+    project.source_media = Some(SourceMedia {
+        media_id: media_id.clone(),
+        original_file_name: "video_test.mp4".to_string(),
+        source_path: dest_media_path.clone(),
+        duration_ms: media_metadata.duration_ms,
+        width: media_metadata.width,
+        height: media_metadata.height,
+        fps: media_metadata.fps,
+        file_size_bytes: media_metadata.file_size_bytes,
+        container: media_metadata.container,
+        video_codec: media_metadata.video_codec,
+        audio_codec: media_metadata.audio_codec,
+        has_audio: media_metadata.has_audio,
+    });
+    project.editor_state = Some(ProjectEditorState {
+        active_media_id: Some(media_id.clone()),
+        ..Default::default()
+    });
+    manager
+        .update_project(&project)
+        .expect("Failed to update project");
+
+    println!("PROJECT_ID: {}", project.id);
+    println!("SOURCE_MEDIA_ID: {}", media_id);
+    println!("SOURCE_DURATION_MS: {}", media_metadata.duration_ms);
+
+    let clean_source_path = dest_media_path.canonicalize().unwrap();
+    let clean_str = clean_source_path.to_string_lossy().to_string();
+    let clean_dest_path = if let Some(stripped) = clean_str.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        clean_source_path
+    };
+
+    // 3. Dispatch Long Video Parent Generation
+    println!("[FULL 58s STEP 3] Dispatching parent generation request (6 segments, 140 max credits)...");
+    let req = FlowGenerationRequest {
+        project_id: project.id.clone(),
+        source_media_id: media_id.clone(),
+        profile_id: "profile_2".to_string(),
+        transformation_intent: Some(TransformationIntent::FaceReplace),
+        identity_mode: Some(IdentityMode::Generated),
+        prompt: "Thay đổi khuôn mặt của nhân vật nữ trong video thành ca sĩ Hoàng Thùy Linh. Giữ nguyên biểu cảm, ánh sáng và cử động tự nhiên. Xóa bỏ hoàn toàn watermark và logo. / Replace the female character's face with Vietnamese singer Hoang Thuy Linh, maintaining expressions and natural lighting. Remove any watermarks.".to_string(),
+        prompt_source: Some(PromptSource::User),
+        target_face: None,
+        max_credits: Some(140), // 6 segments * 20 = 120 + buffer
+        preserve_original_audio: Some(true),
+        requested_config: Some(FlowRequestedGenerationConfig {
+            model_id: Some("Omni Flash".to_string()),
+            resolution: Some("720p".to_string()),
+            duration_sec: Some(10),
+            orientation: Some("PORTRAIT / 9:16".to_string()),
+            output_count: 1,
+        }),
+        configuration_fingerprint: None,
+        preflight_id: None,
+    };
+
+    let start_snapshot = flow_service
+        .start_flow_generation(req, clean_dest_path.clone())
+        .await
+        .expect("Failed to dispatch long video parent generation");
+
+    let parent_id = start_snapshot.parent_id;
+    println!("PARENT_JOB_ID: {}", parent_id);
+    println!("INITIAL_STATE: {:?}", start_snapshot.state);
+
+    // 4. Poll To Terminal Completion (up to 60 minutes: 720 * 5s)
+    println!("[FULL 58s STEP 4] Polling full long video job to terminal completion...");
+    let mut final_snapshot = None;
+    for iteration in 1..=720 {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let snap = flow_service
+            .get_flow_job_status(&project.id, &parent_id)
+            .expect("Failed to get job status");
+
+        if iteration % 6 == 0 || snap.state != FlowJobState::Generating {
+            println!(
+                "[Poll #{:03} | {:?}s] seg_idx: {:?}, state: {:?}, completed: {}/{}, error: {:?}",
+                iteration,
+                iteration * 5,
+                snap.active_segment_index,
+                snap.state,
+                snap.completed_generations,
+                snap.total_segments,
+                snap.error_message
+            );
+        }
+
+        match snap.state {
+            FlowJobState::Completed => {
+                final_snapshot = Some(snap);
+                break;
+            }
+            FlowJobState::Failed
+            | FlowJobState::GenerationAmbiguous
+            | FlowJobState::Blocked
+            | FlowJobState::FlowUiChanged => {
+                panic!(
+                    "Job reached terminal failure state: {:?}, code: {:?}, msg: {:?}",
+                    snap.state, snap.error_code, snap.error_message
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let completed_snap =
+        final_snapshot.expect("Long video job did not reach Completed state within timeout");
+    println!(
+        "Job Completed Successfully! Final State: {:?}",
+        completed_snap.state
+    );
+
+    // 5. Inspect Final Stitched Output
+    let manifest = flow_service
+        .orchestrator
+        .store()
+        .load_manifest(&project.id, &parent_id)
+        .expect("Failed to load completed manifest");
+
+    let final_record = manifest
+        .final_output
+        .as_ref()
+        .expect("Final output record must exist");
+    assert!(
+        final_record.final_path.exists(),
+        "Final output video must exist on disk"
+    );
+    println!("FINAL_OUTPUT_PATH: {:?}", final_record.final_path);
+    println!("FINAL_FRAME_COUNT: {}", final_record.frame_count);
+    println!("FINAL_DURATION_SEC: {}", final_record.duration_sec);
+
+    // Final balance check
+    let final_status = flow_service
+        .refresh_flow_credit_balance("profile_2")
+        .await
+        .expect("Failed to query final credit balance");
+    println!("FINAL_BALANCE: {:?}", final_status.balance);
+
+    println!("==================================================");
+    println!("FULL 58s ACCEPTANCE TEST COMPLETED SUCCESSFULLY!");
+    println!("==================================================");
 }
