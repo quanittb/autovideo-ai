@@ -884,7 +884,11 @@ export async function readActiveEditState(page: Page): Promise<{
       model = 'Nano Banana 2';
     } else if (summaryText.toLowerCase().includes('veo')) {
       model = 'Veo 2';
-    } else if (summaryText.toLowerCase().includes('omni') || summaryText.toLowerCase().includes('flash')) {
+    } else if (
+      summaryText.toLowerCase().includes('omni') ||
+      summaryText.toLowerCase().includes('flash') ||
+      summaryText.toLowerCase().includes('video')
+    ) {
       model = 'Omni Flash';
     }
 
@@ -943,6 +947,20 @@ export async function readActiveEditState(page: Page): Promise<{
       else if (mText.toLowerCase().includes('veo')) model = 'Veo 2';
       else if (mText.toLowerCase().includes('omni') || mText.toLowerCase().includes('flash')) model = 'Omni Flash';
       else model = mText;
+    }
+  }
+
+  if (model === 'UNKNOWN') {
+    try {
+      const readback = await readGenerationSettings(page);
+      if (readback.model && readback.model !== 'UNKNOWN') {
+        model = readback.model;
+      }
+      if (readback.generationLengthSec) durationSec = readback.generationLengthSec;
+      if (readback.orientation) orientation = readback.orientation;
+      if (readback.outputCount) outputCount = readback.outputCount;
+    } catch (e) {
+      console.error('[readActiveEditState] Fallback readGenerationSettings error:', e);
     }
   }
 
